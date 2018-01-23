@@ -39,10 +39,10 @@ gen_decodable(Size) ->
                {1, non_empty(list(gen_decodable(Size div 3)))}]).
 
 gen_tree() ->
-    ?LET({Keys, Ops}, gen_ops(),
+    ?LET(Ops, gen_ops(),
          begin
             {ok, Tree} = build_tree(Ops),
-            {Keys, Ops, Tree}
+            {ops_keys(Ops), Tree}
          end).
 
 gen_ops() ->
@@ -60,6 +60,25 @@ gen_ops(N, Keys, Ops) ->
 
 gen_scrambled_lists(N, Ls) ->
     vector(N, shuffle(Ls)).
+
+alter_proof(DB) ->
+    Dict = aeu_mp_trees_db:get_cache(DB),
+    ?LET({Hash, Node}, elements(dict:to_list(Dict)),
+    begin
+        NewNode =
+            case Node of
+                [X, Y] ->
+                    [<<X/binary, 0>>, Y]; %% Leaf or Ext
+                Branch ->
+                    case lists:reverse(Branch) of
+                        [<<>>|Rev] -> lists:reverse([<<1>>|Rev]);
+                        [_|Rev] -> lists:reverse([<<>>|Rev])
+                    end
+            end,
+        BogusDB = aeu_mp_trees_db:put(Hash, NewNode, DB),
+        {Hash, BogusDB}
+    end).
+
 
 %% -- Properties -------------------------------------------------------------
 prop_all_trees_ok() ->
@@ -133,6 +152,33 @@ check_groups([{Ref, HashOps} | GRTs]) ->
             ?WHENFAIL(eqc:format("~p =/= ~p\nOps1: ~p\nOps2: ~p\nGroup: ~p\n", [H1, H2, Os1, Os2, Ref]), false)
     end.
 
+
+prop_check_proof() ->
+    ?FORALL(Ops, gen_ops(),
+    ?FORALL(Key, weighted_default({1, gen_key()}, {5, gen_put_key(ops_keys(Ops))}),
+    begin
+        {ok, Tree} = build_tree(Ops),
+        {Hash, ProofDB} = tree_construct_proof(Key, Tree),
+        equals(aeu_mp_trees:verify_proof(Key, tree_get(Key, Tree), Hash, ProofDB), ok)
+    end)).
+
+prop_check_invalid_proof() ->
+    ?FORALL({Keys, Tree}, gen_tree(),
+    ?IMPLIES(Keys =/= [],
+    ?FORALL(Key, elements(Keys),
+    begin
+        Val = tree_get(Key, Tree),
+        {Hash, ProofDB} = tree_construct_proof(Key, Tree),
+        ?FORALL({BadHash, BadProofDB}, alter_proof(ProofDB),
+        conjunction(
+            [{bad_hash,  check_invalid_proof(bad_proof, Key, Val, change_binary(Hash), ProofDB)},
+             {bad_value, check_invalid_proof({bad_value, Val}, Key, change_binary(Val), Hash, ProofDB)},
+             {bad_db   , check_invalid_proof({bad_hash, BadHash}, Key, Val, Hash, BadProofDB)}]))
+    end))).
+
+check_invalid_proof(Expected, Key, Val, Hash, ProofDB) ->
+    equals(aeu_mp_trees:verify_proof(Key, Val, Hash, ProofDB), Expected).
+
 property_weight(_, prop_idempotence) -> 5;
 property_weight(_, _) -> 1.
 
@@ -148,6 +194,9 @@ tree_get(K, Tree) ->
 
 tree_hash(Tree) ->
     aeu_mp_trees:root_hash(Tree).
+
+tree_construct_proof(Key, Tree) ->
+    aeu_mp_trees:construct_proof(Key, aeu_mp_trees_db:new(dict_db_spec()), Tree).
 
 ops_keys(Ops) ->
     lists:usort([ K || {K, _} <- build_ref(Ops) ]).
@@ -187,11 +236,22 @@ build_ref([{put, K, V} | Ops], Ref) -> build_ref(Ops, lists:keystore(K, 1, Ref, 
 build_ref([{delete, K} | Ops], Ref) -> build_ref(Ops, lists:keydelete(K, 1, Ref)).
 
 
-test() ->
-    Ops = [{put,<<15:4>>,<<0>>},
-           {put,<<253,0:4>>,<<0>>},
-           {put,<<"ý">>,<<0>>},
-           {delete,<<15:4>>},
-           {delete,<<"ý">>} ],
-    build_tree(Ops).
+change_binary([B|Bs]) -> [change_binary(B) | Bs];
+change_binary(<<X:8, Rest/bitstring>>) ->
+    Y = X + 1,
+    <<Y:8, Rest/bitstring>>.
+
+dict_db_spec() ->
+    #{ handle => dict:new()
+     , cache  => dict:new()
+     , get    => fun dict_db_get/2
+     , put    => fun dict:store/3
+     , commit => fun dict_db_commit/2
+     }.
+
+dict_db_get(Key, Dict) ->
+    {value, dict:fetch(Key, Dict)}.
+
+dict_db_commit(Cache, DB) ->
+    {ok, dict:new(), dict:merge(fun(_, _, Val) -> Val end, Cache, DB)}.
 
