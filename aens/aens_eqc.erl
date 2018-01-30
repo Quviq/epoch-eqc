@@ -74,7 +74,7 @@ init_args(_S) ->
 init(#account{ pubkey = PK, balance = B }) ->
     {Genesis, Trees} = aec_block_genesis:genesis_block_with_state(#{ preset_accounts => [{longhash(PK), B}] }),
     {ok, GenesisHash} = aec_blocks:hash_internal_representation(Genesis),
-    Chain = aec_chain_state:new_from_persistance([Genesis], [{GenesisHash, Trees}]),
+    Chain = aec_chain_state:new_from_persistence([Genesis], [{GenesisHash, Trees}]),
     state_start(Chain).
 
 init_next(S, _V, [Patron]) ->
