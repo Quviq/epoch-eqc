@@ -57,7 +57,7 @@ gen_update(_H) ->
     #update{ ttl = choose(5, 11), pointers = gen_pointers() }.
 
 gen_pointers() ->
-    ?LET(Xs, list({elements([p1, p2, p3]), non_empty(list(choose($a, $z)))}), lists:usort(Xs)).
+    ?LET(Xs, list({elements([<<"p1">>, <<"p2">>, <<"p3">>]), non_empty(list(choose($a, $z)))}), lists:usort(Xs)).
 
 
 %% -- Operations -------------------------------------------------------------
@@ -379,7 +379,7 @@ state_invariant(S = #state{ height = Height }) ->
     {_LastBlock, Trees} = top_block_with_state(Chain),
     eqc_statem:conj([tag(accounts, check_accounts(S#state.accounts, Trees)),
                      tag(preclaims, check_preclaims(S#state.preclaims, Trees, Height)),
-                     tag(names, check_names(S#state.names, Trees, Height))
+                     tag(names, check_names(S#state.names, Trees))
                     ]).
 
 check_accounts(As, Trees) ->
@@ -411,7 +411,7 @@ check_preclaims(ModelPCs, Trees, Height) ->
         {PCs1, PCs2} -> {extra, PCs1, missing, PCs2}
     end.
 
-check_names(ModelNs, Trees, Height) ->
+check_names(ModelNs, Trees) ->
     NTree = aec_trees:ns(Trees),
     ExpectedNs = [ {H, S, PK, Ps, TTL}
                     || #name{ pubkey = PK, hash = H, ttl = {block, TTL}, state = S, pointers = Ps } <- ModelNs ],
