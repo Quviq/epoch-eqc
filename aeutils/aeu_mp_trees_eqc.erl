@@ -158,8 +158,9 @@ prop_check_proof() ->
     ?FORALL(Key, weighted_default({1, gen_key()}, {5, gen_put_key(ops_keys(Ops))}),
     begin
         {ok, Tree} = build_tree(Ops),
-        {Hash, ProofDB} = tree_construct_proof(Key, Tree),
-        equals(aeu_mp_trees:verify_proof(Key, tree_get(Key, Tree), Hash, ProofDB), ok)
+        {Val, ProofDB} = tree_construct_proof(Key, Tree),
+        Hash = aeu_mp_trees:root_hash(Tree),
+        equals(aeu_mp_trees:verify_proof(Key, Val, Hash, ProofDB), ok)
     end)).
 
 prop_check_invalid_proof() ->
@@ -167,8 +168,8 @@ prop_check_invalid_proof() ->
     ?IMPLIES(Keys =/= [],
     ?FORALL(Key, elements(Keys),
     begin
-        Val = tree_get(Key, Tree),
-        {Hash, ProofDB} = tree_construct_proof(Key, Tree),
+        {Val, ProofDB} = tree_construct_proof(Key, Tree),
+        Hash = aeu_mp_trees:root_hash(Tree),
         ?FORALL({BadHash, BadProofDB}, alter_proof(ProofDB),
         conjunction(
             [{bad_hash,  check_invalid_proof(bad_proof, Key, Val, change_binary(Hash), ProofDB)},
@@ -181,6 +182,71 @@ check_invalid_proof(Expected, Key, Val, Hash, ProofDB) ->
 
 property_weight(_, prop_idempotence) -> 5;
 property_weight(_, _) -> 1.
+
+prop_iterator() ->
+    ?FORALL({Keys, Tree}, gen_tree(),
+    begin
+        Iter = aeu_mp_trees:iterator(Tree),
+        IterKeys = iterate(Iter),
+        equals(IterKeys, Keys)
+    end).
+
+prop_iterator_next() ->
+    ?FORALL({Keys, Tree}, gen_tree(),
+    ?IMPLIES(length(Keys) > 1,
+    begin
+        KeyPairs = lists:zip(lists:droplast(Keys), tl(Keys)),
+
+        F = fun({K1, K2}) ->
+                I = aeu_mp_trees:iterator_from(K1, Tree),
+                {K2, _, _} = aeu_mp_trees:iterator_next(I)
+            end,
+        [ F(X) || X <- KeyPairs ],
+        true
+    end)).
+
+prop_iterator_from() ->
+    ?FORALL({_Keys, Tree}, gen_tree(),
+    ?FORALL(Key, gen_key(),
+    begin
+        aeu_mp_trees:iterator_from(Key, Tree),
+        true
+    end)).
+
+prop_iterator_from_next() ->
+    ?FORALL({_Keys, Tree}, gen_tree(),
+    ?FORALL(Key, gen_key(),
+    begin
+        I = aeu_mp_trees:iterator_from(Key, Tree),
+        try
+            aeu_mp_trees:iterator_next(I),
+            true
+        catch E:R ->
+            ?WHENFAIL(eqc:format("I: ~p\nSt: {~p, ~p, ~p}\n", [I, E, R, erlang:get_stacktrace()]), false)
+        end
+    end)).
+
+prop_iterator_from_next2() ->
+    ?FORALL({Keys, Tree}, gen_tree(),
+    ?FORALL(Key, gen_key(),
+    begin
+        Iter = aeu_mp_trees:iterator_from(Key, Tree),
+        case aeu_mp_trees:iterator_next(Iter) of
+            {Key1, _, _} -> lists:member(Key1, Keys);
+            _ -> true
+        end
+    end)).
+
+prop_iterator_depth() ->
+    ?FORALL({Keys0, Tree}, gen_tree(),
+    ?FORALL(MaxDepth, choose(1,4),
+    begin
+        Iter = aeu_mp_trees:iterator(Tree, [{max_path_length, MaxDepth}]),
+        IterKeys = iterate(Iter),
+        Keys = [ K || K <- Keys0, bit_size(K) div 4 =< MaxDepth ],
+        equals(IterKeys, Keys)
+    end)).
+
 
 %% -- Helper functions -------------------------------------------------------
 tree_put(K, V, Tree) ->
@@ -244,14 +310,22 @@ change_binary(<<X:8, Rest/bitstring>>) ->
 dict_db_spec() ->
     #{ handle => dict:new()
      , cache  => dict:new()
-     , get    => fun dict_db_get/2
-     , put    => fun dict:store/3
-     , commit => fun dict_db_commit/2
+     , get    => {?MODULE, dict_db_get}
+     , put    => {?MODULE, dict_db_put}
+     , commit => {?MODULE, dict_db_commit}
      }.
 
 dict_db_get(Key, Dict) ->
     {value, dict:fetch(Key, Dict)}.
 
+dict_db_put(Key, Val, Dict) ->
+    dict:store(Key, Val, Dict).
+
 dict_db_commit(Cache, DB) ->
     {ok, dict:new(), dict:merge(fun(_, _, Val) -> Val end, Cache, DB)}.
 
+iterate(Iter) ->
+    case aeu_mp_trees:iterator_next(Iter) of
+        {Key, _Val, NextIter} -> [Key | iterate(NextIter)];
+        '$end_of_table' -> []
+    end.
