@@ -298,40 +298,51 @@ remove_next(S, _Value, [Uri]) ->
 
 %% --- ... more operations
 
+-define(SHARE, 32).
+
 ping_callouts(_S, [Uri, Response]) ->
   ?MATCH(Local, ?APPLY(local_ping_object, [])),
+  ?MATCH_GEN(ManyPeers, ?LET(N, choose(?SHARE+1,40), [ {http, "12.3.4.5", I} || I <- lists:seq(1,N) ])),
   ?MATCH_GEN(Remote,
              #{best_hash => oneof([maps:get(best_hash, Local), <<1,2,3,4>>]),
                difficulty => difficulty(),
                genesis_hash => oneof([maps:get(genesis_hash, Local), <<1,2,3,4>>]),
-               peers => ?LET(Peers, list(uri()), [ pp(P) || P<-Peers]),
+               peers => ?LET(Peers, list(?SHARE, uri()), [ pp(P) || P<-Peers]),
                source => oneof([list_to_binary(pp(Uri)), <<"blubber">>])}),
-  ?MATCH_GEN({Tag, RemoteObj},
+  ?MATCH_GEN(ClientReturn,
              case Response of
                error ->
-                 oneof([{error, didntwork}, {ok, choose(0,900), #{<<"reason">> => <<"didn't work">>}}]);
+                 oneof([{error, didntwork}, 
+                        {ok, choose(0,900), #{<<"reason">> => <<"didn't work">>}}
+                       ]);
                block ->
-                 {ok, oneof([200, 403, 409]),
-                      oneof([#{<<"reason">> => <<"Different genesis">> },
-                             #{<<"reason">> => <<"Not allowed">> }])};
+                 oneof([{ok, 409, #{<<"reason">> => <<"Different genesis">> }},
+                        {ok, 403, #{<<"reason">> => <<"Not allowed">> }},
+                        {ok, 200, #{<<"best_hash">> => encode(maps:get(best_hash, Remote)),
+                                    <<"difficulty">> => maps:get(difficulty, Remote),
+                                    <<"genesis_hash">> => encode(maps:get(genesis_hash, Remote)),
+                                    <<"peers">> => [ list_to_binary(pp(P)) || P <- ManyPeers ],
+                                    <<"pong">> => <<"pong">>,
+                                    <<"share">> => ?SHARE,
+                                    <<"source">> => list_to_binary(pp(Uri)) }}]);
                ok ->
                  {ok, 200, #{<<"best_hash">> => encode(maps:get(best_hash, Remote)),
                              <<"difficulty">> => maps:get(difficulty, Remote),
                              <<"genesis_hash">> => encode(maps:get(genesis_hash, Remote)),
                              <<"peers">> => [ list_to_binary(P) || P <- maps:get(peers, Remote) ],
                              <<"pong">> => <<"pong">>,
-                             <<"share">> => 32,
+                             <<"share">> => ?SHARE,
                              <<"source">> => list_to_binary(pp(Uri)) }}
              end),
-  %% Note that the parameters in the request haveencoded hashes
-  ?CALLOUT(aeu_http_client, request, [?WILDCARD, 'Ping', ?WILDCARD], {Tag, RemoteObj}),
+  %% Note that the parameters in the request have encoded hashes
+  ?CALLOUT(aeu_http_client, request, [?WILDCARD, 'Ping', ?WILDCARD], ClientReturn),
   ?WHEN(Response == ok,
         begin
           ?APPLY(add_peer, [Uri]),
           ?MATCH(Res, ?APPLY(compare_ping_objects, [Local, Remote])),
           ?WHEN(Res == ok,
                 ?APPLY(ping_peers, [Uri, maps:get(peers, Remote)])),
-          ?WHEN(Res == {error, different_genesis_blocks},
+          ?WHEN(Res == {error, violation},
                 %% We decide that the response is incorrect
                 %% (attacker did not reject ours)
                 ?APPLY(block, [Uri]))
@@ -387,7 +398,7 @@ compare_ping_objects_callouts(_S, [Local, Remote]) ->
       ?CALLOUT(jobs, enqueue, [sync_jobs, {fetch_mempool, ?WILDCARD}], ok),
       ?RET(ok);
     false ->
-      ?RET({error, different_genesis_blocks})
+      ?RET({error, violation})
   end.
 
 compare_ping_objects_features(_S, _Args, Res) ->
