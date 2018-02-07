@@ -17,13 +17,12 @@
 -compile([export_all, nowarn_export_all]).
 -define(SUT, aec_sync).
 
--define(MOCKING_REQ, false).
-
 %% -- State ------------------------------------------------------------------
 -record(state,{ aec_peers_pid
               , aec_sync_pid    %% pids of aec_sync and aec_peers processes
               , peers = []
               , blocked = []
+              , trusted = []
               , queue = []
               , errored = []
               , tried_connect = []
@@ -53,16 +52,6 @@ start_peers() ->
   unlink(PeersPid),
   timer:sleep(10),
   PeersPid.
-
-start_peers_callouts(_S, _Args) ->
-  ?WHEN(?MOCKING_REQ,
-        begin
-          %% Super ugly, aec_peers should have a function to extract the local peer,
-          %% which is then called by aehttp_app in order to get local peer.
-          %% (in aec_peers level only abstract peers, pretty_print where needed)
-          ?MATCH(Local, ?CALLOUT(aeu_requests, pp_uri, [myhost()], pp(myhost()))),
-          ?CALLOUT(aeu_requests, parse_uri, [Local], myhost() )
-        end).
 
 start_peers_process(_S, _Args) ->
   worker.
@@ -96,6 +85,8 @@ start_callouts(_S, [Peers]) ->
 start_next(S, V, [Peers]) ->
     S#state{ aec_sync_pid = V
            , blocked = lists:usort([ full_peer(Peer) || {blocked, Peer} <- Peers, Peer =/= error])
+           , trusted = lists:usort([ full_peer(Peer) || {peer, Peer} <- Peers, Peer =/= error, 
+                                                        not local_peer(full_peer(Peer)) ])
            }.
 
 start_post(_S, _Args, Res) ->
@@ -233,7 +224,7 @@ all_peers() ->
   aec_peers:all().
 
 all_peers_post(S, [], Res) ->
-  eq(lists:sort([binary_to_list(P) || P <- Res]),
+  eq(lists:sort([binary_to_list(P) || {P, _} <- Res]),
      lists:sort([ pp(P) || P <- S#state.peers ])).
 
 
@@ -257,21 +248,25 @@ get_random_post(S, [N, Exclude], Res) ->
                      false -> too_many_returned;
                      true ->
                        eq(lists:sort([binary_to_list(P) || P <- Res]),
-                          lists:sort([ pp(P) || P <- S#state.peers] -- [ pp(Ex) || Ex <- RealExclude ]))
+                          lists:sort([ pp(P) || P <- lists:usort(S#state.peers 
+                                                                  ++ S#state.trusted)  %% gossip blocked trusted peers
+                                     ] -- [ pp(Ex) || Ex <- RealExclude ]))
                    end
                   ]).
 
 %% --- Operation: block_peer ---
 
-block_args(_S) ->
-  [ uri() ].
+%% block_args(_S) ->
+%%   [ uri() ].
 
 block(Uri) ->
   aec_peers:block_peer(pp(Uri)).
 
+%% We cannot block trusted notes
 block_next(S, _Value, [Uri]) ->
-  S#state{ blocked = (S#state.blocked -- [full_peer(Uri)]) ++ [full_peer(Uri)],
-           peers = S#state.peers -- [full_peer(Uri)]}.
+  S#state{ blocked = (S#state.blocked -- [full_peer(Uri)]) ++ [full_peer(Uri)] -- S#state.trusted,
+           peers = S#state.peers -- [full_peer(Uri) 
+                                     || not lists:member(full_peer(Uri), S#state.trusted)]}.
 
 %% --- Operation: unblock ---
 unblock_args(_S) ->
@@ -293,7 +288,8 @@ remove(Uri) ->
 
 remove_next(S, _Value, [Uri]) ->
    S#state{ blocked = S#state.blocked -- [full_peer(Uri)],
-            peers = S#state.peers -- [full_peer(Uri)]}.
+            peers = S#state.peers -- [full_peer(Uri)],
+            trusted =  S#state.trusted -- [full_peer(Uri)]}.
 
 
 
@@ -313,18 +309,19 @@ ping_callouts(_S, [Uri, Response]) ->
   ?MATCH_GEN({Tag, RemoteObj},
              case Response of
                error ->
-                 oneof([{error, didntwork}, {ok, #{<<"reason">> => <<"didn't work">>}}]);
+                 oneof([{error, didntwork}, {ok, choose(0,900), #{<<"reason">> => <<"didn't work">>}}]);
                block ->
-                 {ok, oneof([#{<<"reason">> => <<"Different genesis">> },
+                 {ok, oneof([200, 403, 409]),
+                      oneof([#{<<"reason">> => <<"Different genesis">> },
                              #{<<"reason">> => <<"Not allowed">> }])};
                ok ->
-                 {ok, #{<<"best_hash">> => encode(maps:get(best_hash, Remote)),
-                        <<"difficulty">> => maps:get(difficulty, Remote),
-                        <<"genesis_hash">> => encode(maps:get(genesis_hash, Remote)),
-                        <<"peers">> => [ list_to_binary(P) || P <- maps:get(peers, Remote) ],
-                        <<"pong">> => <<"pong">>,  %% What ??
-                        <<"share">> => 32,
-                        <<"source">> => list_to_binary(pp(Uri)) }}
+                 {ok, 200, #{<<"best_hash">> => encode(maps:get(best_hash, Remote)),
+                             <<"difficulty">> => maps:get(difficulty, Remote),
+                             <<"genesis_hash">> => encode(maps:get(genesis_hash, Remote)),
+                             <<"peers">> => [ list_to_binary(P) || P <- maps:get(peers, Remote) ],
+                             <<"pong">> => <<"pong">>,
+                             <<"share">> => 32,
+                             <<"source">> => list_to_binary(pp(Uri)) }}
              end),
   %% Note that the parameters in the request haveencoded hashes
   ?CALLOUT(aeu_http_client, request, [?WILDCARD, 'Ping', ?WILDCARD], {Tag, RemoteObj}),
