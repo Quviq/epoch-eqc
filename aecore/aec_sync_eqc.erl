@@ -426,6 +426,31 @@ compare_ping_objects_features(_S, _Args, Res) ->
 timer_inc_next(S, _, []) ->
   S#state{time = S#state.time + 1}.
 
+timer_expire_pre(S) ->
+  S#state.errored =/= [].
+
+timer_expire_args(S) ->
+  %% is always a full peer
+  [elements(S#state.errored)].
+
+timer_expire_pre(S, [Uri]) ->
+  %% Timer only calls aec_sync if possible
+  can_be_added(S, Uri).
+
+timer_expire(Uri) ->
+  aec_sync:schedule_ping(aeu_requests:pp_uri(Uri)),
+  timer:sleep(10).
+
+timer_expire_callouts(S, [Uri]) ->
+  BinUri = list_to_binary(pp(Uri)),
+  ?CALLOUT(jobs, enqueue, [sync_jobs, {ping, BinUri}], ok),
+  ?APPLY(enqueue, [Uri, {ping, BinUri}]).
+
+timer_expire_features(_S, [Uri], _Res) ->
+  [].
+
+
+
 %% -- Property ---------------------------------------------------------------
 %% invariant(S) ->
 %%   [ Peer || Peer <- S#state.peers, lists:member(Peer, S#state.blocked)] == [].
