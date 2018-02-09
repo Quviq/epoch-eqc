@@ -473,7 +473,7 @@ prop_sync(Verbose) ->
                          lager:set_loglevel(lager_console_backend, debug);
               true -> ok
            end,
-           application:set_env(aecore, peer_error_expired, 30000),  
+           application:set_env(aecore, peer_error_expiry, 1),  
                 %% put to 1 to find that model not yet covers removing of errored nodes 
            %% Return the teardwown function
            fun() ->
