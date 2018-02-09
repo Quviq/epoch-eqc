@@ -138,8 +138,8 @@ stop_next(S, _Value, []) ->
 can_be_added(S, Uri) ->
   not (Uri == error orelse lists:member(full_peer(Uri), S#state.blocked) orelse local_peer(full_peer(Uri))).
 
-connect_peer_args(_S) ->
-  [uri()].
+connect_peer_args(S) ->
+  [oneof([uri()|S#state.errored])].
 
 connect_peer(Uri) ->
   Peer = pp(Uri),
@@ -167,6 +167,7 @@ connect_features(S, [Uri], _Res) ->
   [ {connecting_to_blocked_peer, Uri} || lists:member(Uri, S#state.blocked) ] ++
    [ {connect_to_self, Uri} || myhost() == Uri ] ++
     [ {connect_to_existing_peer, Uri} || lists:member(Uri, S#state.peers) ] ++
+    [ {connect_to_errored_peer, Uri} || lists:member(full_peer(Uri), S#state.errored) ] ++
     [ connect ].
 
 enqueue_next(S, _, [Uri, Task]) ->
@@ -188,7 +189,12 @@ sync_worker_pre(S) ->
 
 sync_worker_args(S) ->
   {Uri, Task} = hd(S#state.queue),
-  [Uri, Task, oneof([ok, block, error])].
+  [Uri, Task, frequency([{2,ok}, {1,block}, 
+                         %% High probability recurrent error
+                         {case lists:member(full_peer(Uri), S#state.errored) of 
+                            true -> 4;
+                            false -> 1
+                          end, error}])].
 
 sync_worker_pre(S, [Uri, Task, _]) ->
   %% we don't allow them out of order for now
@@ -215,8 +221,15 @@ sync_worker_post(_S, [_, _, _], _Res) ->
 sync_worker_process(_S, [_Uri, _Task, _]) ->
   worker.
 
+sync_worker_features(S, [Uri, _Task, Response], _Res) ->
+  [{response, Response}] ++
+   [ sync_errored || lists:member(full_peer(Uri), S#state.errored)] ++
+   [ repeated_error || Response == error, lists:member(full_peer(Uri), S#state.errored)].
+
+
 %% --- Operation: all_peers ---
 %% Errored peers are still in the list of peers
+%% but not when error time has expired
 all_peers_args(_S) ->
   [].
 
@@ -413,6 +426,7 @@ timer_inc_next(S, _, []) ->
 %%   [ Peer || Peer <- S#state.peers, lists:member(Peer, S#state.blocked)] == [].
 
 weight(_S, start) -> 1;
+weight(_S, sync_worker) -> 8;
 weight(_S, _Cmd) -> 1.
 
 prop_sync() ->
@@ -429,6 +443,8 @@ prop_sync(Verbose) ->
                          lager:set_loglevel(lager_console_backend, debug);
               true -> ok
            end,
+           application:set_env(aecore, peer_error_expired, 30000),  
+                %% put to 1 to find that model not yet covers removing of errored nodes 
            %% Return the teardwown function
            fun() ->
                if Verbose -> application:stop(lager);
