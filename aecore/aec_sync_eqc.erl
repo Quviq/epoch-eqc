@@ -269,8 +269,8 @@ get_random_post(S, [N, Exclude], Res) ->
 
 %% --- Operation: block_peer ---
 
-%% block_args(_S) ->
-%%   [ uri() ].
+block_args(_S) ->
+  [ uri() ].
 
 block(Uri) ->
   aec_peers:block_peer(pp(Uri)).
@@ -280,6 +280,11 @@ block_next(S, _Value, [Uri]) ->
   S#state{ blocked = (S#state.blocked -- [full_peer(Uri)]) ++ [full_peer(Uri)] -- S#state.trusted,
            peers = S#state.peers -- [full_peer(Uri) 
                                      || not lists:member(full_peer(Uri), S#state.trusted)]}.
+
+block_features(S, [Uri], _Res) ->
+  [ {block, errored} || lists:member(full_peer(Uri), S#state.errored) ] ++
+    [ {block, trusted} || lists:member(full_peer(Uri), S#state.trusted) ].
+
 
 %% --- Operation: unblock ---
 unblock_args(_S) ->
@@ -326,7 +331,7 @@ ping_callouts(_S, [Uri, Response]) ->
              case Response of
                error ->
                  oneof([{error, didntwork}, 
-                        {ok, choose(0,900), #{<<"reason">> => <<"didn't work">>}}
+                        {ok, oneof([200, choose(0,900)]), #{<<"reason">> => <<"didn't work">>}}
                        ]);
                block ->
                  oneof([{ok, 409, #{<<"reason">> => <<"Different genesis">> }},
