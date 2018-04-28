@@ -84,11 +84,16 @@ add_account_pre(S) ->
   S#state.running =/= [].
 
 add_account_args(S) ->
-  [elements(S#state.accounts), account_gen(choose(5, 200)), 
+  [elements(S#state.accounts), account_gen(elements([5, 10, 23, 71, 200])), 
    choose(1,5), elements(S#state.running)].
 
-add_account_pre(S, [_Sender, _Receiver, _Fee, Node]) ->
-  lists:member(Node, S#state.running).
+add_account_pre(S, [Sender, _Receiver, _Fee, Node]) ->
+  lists:member(Sender, S#state.accounts) andalso
+    lists:member(Node, S#state.running).
+
+%% Doesn't work if S#state.running is []
+%% add_account_adapt(S, [Sender, Receiver, Fee, Node]) ->
+%%   [Sender, Receiver, Fee, hd(S#state.running)].
 
 add_account(Sender, Receiver, Fee, Node) ->
   {ok, Tx} =
@@ -118,10 +123,10 @@ add_account_next(S, _V, [From = #account{ balance = PB, nonce = PN },
     false -> S;  %% not enough balance
     true ->
       Accounts = lists:keydelete(From#account.privkey, #account.privkey, S#state.accounts),
-      S#state{ accounts = Accounts ++ [NewAccount] ++ [ From#account{ balance = PB - NB - Fee, nonce = PN + 1 } ]}
+      S#state{ accounts = Accounts ++ [ From#account{ balance = PB - NB - Fee, nonce = PN + 1 } ] ++ [NewAccount]}
   end.
 
-add_account_post(_S, [Sender, Receiver, Fee, Node], Res) ->
+add_account_post(_S, [_Sender, _Receiver, _Fee, _Node], Res) ->
   eq(Res, ok).
 
 %% --- Operation: transaction_pool ---
@@ -141,7 +146,13 @@ transaction_pool(Node) ->
   case httpc:request(get, {URL, []}, [], []) of
     {ok, {{"HTTP/1.1", 200, "OK"}, _, Body}} ->
       io:format(" -> ~p\n", [Body]),
-      ok;
+      Transactions = jsx:decode(iolist_to_binary(Body)),
+      Txs = [ begin
+                {transaction, Trans} = aec_base58c:decode(T),
+                %% Not sure all transactions in pool must be signed???
+                aetx_sign:tx(aetx_sign:deserialize_from_binary(Trans))
+              end || [{<<"tx">>, T}] <- Transactions ],
+      Txs;
     Res ->
       io:format(" -> ~p\n", [Res]),
       Res
@@ -149,7 +160,7 @@ transaction_pool(Node) ->
 
 
 transaction_pool_post(_S, [Node], Res) ->
-  eq(Res, ok).
+  is_list(Res).
 
 
 
@@ -190,6 +201,27 @@ top_post(_S, [Node], Res) ->
   eq(Res, ok).
 
 
+final_balances([], _) ->
+  {undefined, []};
+final_balances([Node|_], PubKeys) ->
+  TxPool = transaction_pool(Node),
+  Balances = [ balance(Node, PubKey) || PubKey <- PubKeys ],
+  {Balances, TxPool}.
+
+balance(Node, PubKey) ->
+  Host = aest_nodes_mgr:get_service_address(Node, ext_http),
+  URL = binary_to_list(iolist_to_binary([Host, "v2/account/balance/", aec_base58c:encode(account_pubkey, PubKey)])),
+  io:format("GET ~p ", [URL]),
+  case httpc:request(get, {URL, []}, [], []) of
+    {ok, {{"HTTP/1.1", 200, "OK"}, _, Body}} ->
+      io:format(" -> ~p\n", [Body]),
+      jsx:decode(iolist_to_binary(Body));
+    Res ->
+      io:format(" -> ~p\n", [Res]),
+      {request_failed, PubKey}
+  end.
+
+
 
 weight(_S, start) -> 10;
 weight(S, add_account) -> 
@@ -209,8 +241,11 @@ gen_key_pair() ->
     return(crypto:generate_key(ecdh, crypto:ec_curve(secp256k1))).
 
 account_gen(NatGen) ->
-    ?LET({Balance, {PubKey, PrivKey}}, {NatGen, gen_key_pair()},
-         #account{ pubkey = PubKey, balance = Balance, privkey = PrivKey }).
+    ?LET(Balance, NatGen,
+         begin
+           {PubKey, PrivKey} = crypto:generate_key(ecdh, crypto:ec_curve(secp256k1)),
+           #account{ pubkey = PubKey, balance = Balance, privkey = PrivKey }
+         end).
 
 
 prop_transactions() ->
@@ -237,12 +272,21 @@ prop_transactions(FinalSleep) ->
                                        backend => aest_docker} || Node <- Nodes ]),
     {H, S, Res} = run_commands(Cmds),
     timer:sleep(FinalSleep),
+    {FinalBalances, TransactionPool} = final_balances(S#state.running, [ A#account.pubkey || A <-S#state.accounts]),
     aest_nodes_mgr:stop(),
     check_command_names(Cmds,
       measure(length, commands_length(Cmds),
+      measure(spend_tx, length([ 1 || {_, add_account, 4} <- command_names(Cmds)]),
         pretty_commands(?MODULE, Cmds, {H, S, Res},
-                        Res == ok)))
+                        conjunction([{result, Res == ok},
+                                     {transactions, equals([ Tx || Tx <- TransactionPool, is_possible(S, Tx) ], [])},
+                                     {balances, true}])))))
   end))).
+
+is_possible(S, Tx) ->
+  From = aetx:origin(Tx),
+  Type = aetx:tx_type(Tx),
+  {From, Type, Tx}.
 
 
 %% -- helper functions
