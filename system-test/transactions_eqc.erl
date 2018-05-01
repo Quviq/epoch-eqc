@@ -24,6 +24,14 @@
 initial_state() ->
   #state{}.
 
+balance_of(PubKey, Accounts) ->
+  case lists:keyfind(PubKey, #account.pubkey, Accounts) of
+    Account when is_record(Account, account) ->
+      Account#account.balance;
+    false ->
+      0
+  end.
+
 %% -- Generators -------------------------------------------------------------
 
 systems(N) ->
@@ -84,8 +92,8 @@ add_account_pre(S) ->
   S#state.running =/= [].
 
 add_account_args(S) ->
-  [elements(S#state.accounts), account_gen(elements([5, 10, 23, 71, 200])), 
-   choose(1,5), elements(S#state.running)].
+  [elements(S#state.accounts), account_gen(elements([5, 10, 23, 71, 200, 0])), 
+   choose(0,5), elements(S#state.running)].
 
 add_account_pre(S, [Sender, _Receiver, _Fee, Node]) ->
   lists:member(Sender, S#state.accounts) andalso
@@ -101,7 +109,9 @@ add_account(Sender, Receiver, Fee, Node) ->
                         recipient => Receiver#account.pubkey,
                         amount    => Receiver#account.balance,   %% we create it with this much
                         fee       => Fee,
-                        nonce     => Sender#account.nonce + 1 }),
+                        %% payload   => <<"quickcheck">>,
+                        nonce     => Sender#account.nonce + 1
+                        }),
   SignedTx = aetx_sign:sign(Tx, Sender#account.privkey),
   Transaction = aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(SignedTx)),
   Host = aest_nodes_mgr:get_service_address(Node, ext_http),
@@ -215,10 +225,10 @@ balance(Node, PubKey) ->
   case httpc:request(get, {URL, []}, [], []) of
     {ok, {{"HTTP/1.1", 200, "OK"}, _, Body}} ->
       io:format(" -> ~p\n", [Body]),
-      jsx:decode(iolist_to_binary(Body));
+      {PubKey, jsx:decode(iolist_to_binary(Body))};
     Res ->
       io:format(" -> ~p\n", [Res]),
-      {request_failed, PubKey}
+      {PubKey, request_failed}
   end.
 
 
@@ -279,14 +289,24 @@ prop_transactions(FinalSleep) ->
       measure(spend_tx, length([ 1 || {_, add_account, 4} <- command_names(Cmds)]),
         pretty_commands(?MODULE, Cmds, {H, S, Res},
                         conjunction([{result, Res == ok},
-                                     {transactions, equals([ Tx || Tx <- TransactionPool, is_possible(S, Tx) ], [])},
+                                     {transactions, equals([ Tx || Tx <- TransactionPool, is_possible(S#state.accounts, Tx) ], [])},
                                      {balances, true}])))))
   end))).
 
-is_possible(S, Tx) ->
+is_possible(Accounts, Tx) ->
   From = aetx:origin(Tx),
+  FromBalance = balance_of(From, Accounts),
   Type = aetx:tx_type(Tx),
-  {From, Type, Tx}.
+  Fee = aetx:fee(Tx),
+  Amount = 
+    case Type of
+      <<"spend_tx">> ->
+        %% Why is there no amount API ???
+        {aetx,spend_tx,aec_spend_tx,
+              {spend_tx, _, _, A, _, _, _, _}} = Tx,
+        A
+      end,
+  Amount + Fee < FromBalance.
 
 
 %% -- helper functions
