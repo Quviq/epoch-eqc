@@ -13,7 +13,7 @@
 -compile([export_all, nowarn_export_all]).
 
 %% -- State and state functions ----------------------------------------------
--record(state,{nodes = [], accounts = [], running = []}).
+-record(state,{nodes = [], accounts = [], running = [], names = [], invalid_transactions = []}).
 
 -record(account, { pubkey, 
                    balance,
@@ -92,52 +92,60 @@ add_account_pre(S) ->
   S#state.running =/= [].
 
 add_account_args(S) ->
-  [elements(S#state.accounts), account_gen(elements([5, 10, 23, 71, 200, 0])), 
-   choose(0,5), elements(S#state.running)].
+  noshrink(
+  [elements(S#state.running), 
+   elements(S#state.accounts), account_gen(elements([5, 10, 23, 71, 200, 0])), 
+   choose(0,5), <<"quickcheck">>]).
 
-add_account_pre(S, [Sender, _Receiver, _Fee, Node]) ->
+add_account_pre(S, [Node, Sender, _Receiver, _Fee, _Payload]) ->
   lists:member(Sender, S#state.accounts) andalso
     lists:member(Node, S#state.running).
 
 %% Doesn't work if S#state.running is []
-%% add_account_adapt(S, [Sender, Receiver, Fee, Node]) ->
+%% add_account_adapt(S, [Node, Sender, Receiver, Fee, Payload]) ->
 %%   [Sender, Receiver, Fee, hd(S#state.running)].
 
-add_account(Sender, Receiver, Fee, Node) ->
+add_account(Node, Sender, Receiver, Fee, Payload) ->
   {ok, Tx} =
     aec_spend_tx:new(#{ sender    => Sender#account.pubkey,
                         recipient => Receiver#account.pubkey,
                         amount    => Receiver#account.balance,   %% we create it with this much
                         fee       => Fee,
-                        %% payload   => <<"quickcheck">>,
+                        payload   => Payload,
                         nonce     => Sender#account.nonce + 1
                         }),
   SignedTx = aetx_sign:sign(Tx, Sender#account.privkey),
   Transaction = aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(SignedTx)),
-  Host = aest_nodes_mgr:get_service_address(Node, ext_http),
-  URL = binary_to_list(iolist_to_binary([Host, "v2/tx"])),
-  io:format("POST ~p ~p ", [URL, Tx]),
-  case httpc:request(post, {URL, [], "application/json", jsx:encode(#{tx => Transaction})}, [], []) of
-    {ok, {{"HTTP/1.1", 200, "OK"}, _, Body}} ->
-      io:format(" -> ~p\n", [Body]),
-      ok;
-    Res ->
-      io:format(" -> ~p\n", [Res]),
-      Res
-  end.
+  request(Node, 'PostTx', #{tx => Transaction}).
 
-
-add_account_next(S, _V, [From = #account{ balance = PB, nonce = PN },
-                         NewAccount = #account{ balance = NB }, Fee, _Node]) ->
-  case PB >= NB + Fee of
-    false -> S;  %% not enough balance
+add_account_next(S, _V, [_Node, Sender = #account{ balance = PB, nonce = PN },
+                         Receiver = #account{ balance = NB }, Fee, Payload]) ->
+  case is_invalid(Sender, Receiver, Fee, Payload) of
     true ->
-      Accounts = lists:keydelete(From#account.privkey, #account.privkey, S#state.accounts),
-      S#state{ accounts = Accounts ++ [ From#account{ balance = PB - NB - Fee, nonce = PN + 1 } ] ++ [NewAccount]}
+      {ok, Tx} =
+    aec_spend_tx:new(#{ sender    => Sender#account.pubkey,
+                        recipient => Receiver#account.pubkey,
+                        amount    => Receiver#account.balance,
+                        fee       => Fee,
+                        payload   => Payload,
+                        nonce     => Sender#account.nonce + 1
+                        }),
+      S#state{invalid_transactions = S#state.invalid_transactions ++ [ Tx ]};
+    false ->
+      case PB >= NB + Fee of
+        false -> S;  %% not enough balance
+        true ->
+          Accounts = lists:keyreplace(Sender#account.privkey, #account.privkey, S#state.accounts, 
+                                      Sender#account{ balance = PB - NB - Fee, nonce = PN + 1 }),
+          S#state{ accounts = Accounts ++ [Receiver]}
+      end
   end.
 
-add_account_post(_S, [_Sender, _Receiver, _Fee, _Node], Res) ->
-  eq(Res, ok).
+add_account_post(_S, [_Node, _Sender, _Receiver, _Fee, _Payload], Res) ->
+  eq(Res, {ok, 200, #{}}).
+
+is_invalid(_Sender, _Receiver, Fee, _Payload) ->
+  Fee < aec_governance:minimum_tx_fee().
 
 %% --- Operation: transaction_pool ---
 transaction_pool_pre(S) ->
@@ -150,13 +158,8 @@ transaction_pool_pre(S, [Node]) ->
   lists:member(Node, S#state.running).
 
 transaction_pool(Node) ->
-  Host = aest_nodes_mgr:get_service_address(Node, ext_http),
-  URL = binary_to_list(iolist_to_binary([Host, "v2/transactions"])),
-  io:format("GET ~p ", [URL]),
-  case httpc:request(get, {URL, []}, [], []) of
-    {ok, {{"HTTP/1.1", 200, "OK"}, _, Body}} ->
-      io:format(" -> ~p\n", [Body]),
-      Transactions = jsx:decode(iolist_to_binary(Body)),
+  case request(Node, 'GetTxs', #{}) of
+    {ok, 200, Transactions} ->
       Txs = [ begin
                 {transaction, Trans} = aec_base58c:decode(T),
                 %% Not sure all transactions in pool must be signed???
@@ -169,7 +172,7 @@ transaction_pool(Node) ->
   end.
 
 
-transaction_pool_post(_S, [Node], Res) ->
+transaction_pool_post(_S, [_Node], Res) ->
   is_list(Res).
 
 
@@ -195,20 +198,13 @@ top_pre(S, [Node]) ->
   lists:member(Node, S#state.running).
 
 top(Node) ->
-  Host = aest_nodes_mgr:get_service_address(Node, ext_http),
-  URL = binary_to_list(iolist_to_binary([Host, "v2/top"])),
-  io:format("GET ~p ", [URL]),
-  case httpc:request(get, {URL, []}, [], []) of
-    {ok, {{"HTTP/1.1", 200, "OK"}, _, Top}} ->
-      io:format(" -> ~p\n", [Top]),
-      ok;
-    Res ->
-      io:format(" -> ~p\n", [Res]),
-      Res
-  end.
+  request(Node, 'GetTop', #{}).
 
-top_post(_S, [Node], Res) ->
-  eq(Res, ok).
+top_post(_S, [_Node], Res) ->
+  case Res of 
+    {ok, 200, _} -> true;
+    _ -> eq(Res, ok)
+  end.
 
 
 final_balances([], _) ->
@@ -301,19 +297,17 @@ is_possible(Accounts, Tx) ->
   Amount = 
     case Type of
       <<"spend_tx">> ->
-        %% Why is there no amount API ???
+        %% Why is there no amount API ??? Utterly ugly.
         {aetx,spend_tx,aec_spend_tx,
-              {spend_tx, _, _, A, _, _, _, _}} = Tx,
+         {spend_tx, _, _, A, _, _, _, _}} = Tx,
         A
       end,
-  Amount + Fee < FromBalance.
+  Amount + Fee < FromBalance andalso Fee >= aec_gevernance:minimum_tx_fee().
 
+remain(Txs, Pool) ->
+  [].
 
 %% -- helper functions
-
--define(EPOCH_CONFIG_FILE, "/home/epoch/epoch.yaml").
--define(EPOCH_LOG_FOLDER, "/home/epoch/node/log").
-
 
 all_connected(Nodes) ->
   Graph = digraph:new(),
@@ -322,5 +316,12 @@ all_connected(Nodes) ->
   Result = length(digraph_utils:components(Graph)) == 1,
   digraph:delete(Graph),
   Result.
+
+
+request(Node, Id, Params) ->
+  aehttp_client:request(Id, Params, 
+                        [{ext_http, aest_nodes_mgr:get_service_address(Node, ext_http)}, 
+                         {ct_log, fun(Fmt, Args) -> io:format(Fmt++["\n"], Args) end }]).
+
 
 
