@@ -123,13 +123,13 @@ add_account_next(S, _V, [_Node, Sender = #account{ balance = PB, nonce = PN },
   case is_invalid(Sender, Receiver, Fee, Payload) of
     true ->
       {ok, Tx} =
-    aec_spend_tx:new(#{ sender    => Sender#account.pubkey,
-                        recipient => Receiver#account.pubkey,
-                        amount    => Receiver#account.balance,
-                        fee       => Fee,
-                        payload   => Payload,
-                        nonce     => Sender#account.nonce + 1
-                        }),
+        aec_spend_tx:new(#{ sender    => Sender#account.pubkey,
+                            recipient => Receiver#account.pubkey,
+                            amount    => Receiver#account.balance,
+                            fee       => Fee,
+                            payload   => Payload,
+                            nonce     => Sender#account.nonce + 1
+                          }),
       S#state{invalid_transactions = S#state.invalid_transactions ++ [ Tx ]};
     false ->
       case PB >= NB + Fee of
@@ -137,7 +137,7 @@ add_account_next(S, _V, [_Node, Sender = #account{ balance = PB, nonce = PN },
         true ->
           Accounts = lists:keyreplace(Sender#account.privkey, #account.privkey, S#state.accounts, 
                                       Sender#account{ balance = PB - NB - Fee, nonce = PN + 1 }),
-          S#state{ accounts = Accounts ++ [Receiver]}
+          S#state{ accounts = Accounts ++ [Receiver] }
       end
   end.
 
@@ -146,6 +146,37 @@ add_account_post(_S, [_Node, _Sender, _Receiver, _Fee, _Payload], Res) ->
 
 is_invalid(_Sender, _Receiver, Fee, _Payload) ->
   Fee < aec_governance:minimum_tx_fee().
+
+%% --- Operation: balance ---
+balance_pre(S) ->
+  S#state.running =/= [].
+
+balance_args(S) ->
+  [ elements(S#state.running), 
+    ?LET(Account, oneof(S#state.accounts), Account#account.pubkey) ].
+
+balance_pre(S, [Node, PubKey]) ->
+  lists:member(Node, S#state.running) andalso lists:keymember(PubKey, #account.pubkey, S#state.accounts).
+
+balance(Node, PubKey) ->
+  request(Node, 'GetAccountBalance',  #{account_pubkey => aec_base58c:encode(account_pubkey, PubKey)}).
+
+balance_post(S, [_, PubKey], Res) ->
+  Account = lists:keyfind(PubKey, #account.pubkey, S#state.accounts),
+  case Res of
+    {ok, 200, #{balance := _B}} ->
+      true;  %% We don't know what the actual balance is.
+    {ok, 404, #{reason := <<"Account not found">>}} ->
+      true;  %% unless we mine extensively, this could happen
+      %% tag(account_not_found, 
+      %%     not lists:keymember(PubKey, #account.pubkey, S#state.accounts));
+    Other ->
+      Other
+  end.
+
+
+
+
 
 %% --- Operation: transaction_pool ---
 transaction_pool_pre(S) ->
@@ -164,7 +195,7 @@ transaction_pool(Node) ->
                 {transaction, Trans} = aec_base58c:decode(T),
                 %% Not sure all transactions in pool must be signed???
                 aetx_sign:tx(aetx_sign:deserialize_from_binary(Trans))
-              end || [{<<"tx">>, T}] <- Transactions ],
+              end || #{tx := T} <- Transactions ],
       Txs;
     Res ->
       io:format(" -> ~p\n", [Res]),
@@ -176,6 +207,9 @@ transaction_pool_post(_S, [_Node], Res) ->
   is_list(Res).
 
 
+tag(_Tag, true) -> true;
+tag(Tag, false) -> Tag;
+tag(Tag, Other) -> {Tag, Other}. 
 
 
 
@@ -214,18 +248,6 @@ final_balances([Node|_], PubKeys) ->
   Balances = [ balance(Node, PubKey) || PubKey <- PubKeys ],
   {Balances, TxPool}.
 
-balance(Node, PubKey) ->
-  Host = aest_nodes_mgr:get_service_address(Node, ext_http),
-  URL = binary_to_list(iolist_to_binary([Host, "v2/account/balance/", aec_base58c:encode(account_pubkey, PubKey)])),
-  io:format("GET ~p ", [URL]),
-  case httpc:request(get, {URL, []}, [], []) of
-    {ok, {{"HTTP/1.1", 200, "OK"}, _, Body}} ->
-      io:format(" -> ~p\n", [Body]),
-      {PubKey, jsx:decode(iolist_to_binary(Body))};
-    Res ->
-      io:format(" -> ~p\n", [Res]),
-      {PubKey, request_failed}
-  end.
 
 
 
@@ -255,14 +277,28 @@ account_gen(NatGen) ->
 
 
 prop_transactions() ->
-  prop_transactions(10000).
+  prop_transactions(10000, [{account,<<4,94,119,98,220,186,47,108,183,90,26,231,
+                                       177,91,97,10,54,130,205,240,164,176,35,91,
+                                       219,1,103,167,76,247,182,171,169,5,125,59,
+                                       224,45,77,51,127,22,194,34,208,131,79,122,
+                                       190,67,32,205,125,180,0,105,131,67,242,37,6,
+                                       132,179,168,70>>,
+                             1000000,
+                             <<204,238,170,174,35,138,190,186,99,168,81,105,138,19,244,
+                               91,60,214,133,141,122,197,245,33,252,231,67,130,4,151,
+                               24,9>>,
+                             0}]).
 
 
 prop_transactions(FinalSleep) ->
-  ?FORALL({Accounts, Nodes}, {noshrink(non_empty(list(account_gen(1000000)))),
-                              systems(2)},
+  ?FORALL(Accounts, noshrink(non_empty(list(account_gen(1000000)))),
+          prop_transactions(FinalSleep, Accounts)).
+
+prop_transactions(FinalSleep, Accounts) ->
+  ?FORALL(Nodes, systems(2),
   ?IMPLIES(all_connected(Nodes), 
   ?FORALL(Cmds, commands(?MODULE, #state{nodes = Nodes, accounts = Accounts}),
+  ?SOMETIMES(2,
   begin
     DataDir = filename:absname("data"),
     Genesis = filename:join(DataDir, "accounts.json"),
@@ -282,12 +318,12 @@ prop_transactions(FinalSleep) ->
     aest_nodes_mgr:stop(),
     check_command_names(Cmds,
       measure(length, commands_length(Cmds),
-      measure(spend_tx, length([ 1 || {_, add_account, 4} <- command_names(Cmds)]),
+      measure(spend_tx, length([ 1 || {_, add_account, _} <- command_names(Cmds)]),
         pretty_commands(?MODULE, Cmds, {H, S, Res},
                         conjunction([{result, Res == ok},
                                      {transactions, equals([ Tx || Tx <- TransactionPool, is_possible(S#state.accounts, Tx) ], [])},
-                                     {balances, true}])))))
-  end))).
+                                     {invalid_transactions, equals(remain(S#state.invalid_transactions, TransactionPool), TransactionPool)}])))))
+  end)))).
 
 is_possible(Accounts, Tx) ->
   From = aetx:origin(Tx),
@@ -299,7 +335,7 @@ is_possible(Accounts, Tx) ->
       <<"spend_tx">> ->
         %% Why is there no amount API ??? Utterly ugly.
         {aetx,spend_tx,aec_spend_tx,
-         {spend_tx, _, _, A, _, _, _, _}} = Tx,
+         {spend_tx, _, _, A, _, _, _}} = Tx,
         A
       end,
   Amount + Fee < FromBalance andalso Fee >= aec_gevernance:minimum_tx_fee().
