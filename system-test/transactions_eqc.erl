@@ -155,7 +155,7 @@ balance_pre(S, [Node, PubKey]) ->
 balance(Node, PubKey) ->
   request(Node, 'GetAccountBalance',  #{account_pubkey => aec_base58c:encode(account_pubkey, PubKey)}).
 
-balance_post(S, [_, PubKey], Res) ->
+balance_post(_S, [_, _PubKey], Res) ->
   case Res of
     {ok, 200, #{balance := _B}} ->
       true;  %% We don't know what the actual balance is.
@@ -329,9 +329,10 @@ is_possible(Accounts, Tx) ->
       end,
   Amount + Fee < FromBalance andalso Fee >= aec_governance:minimum_tx_fee().
 
+%% There are no invalid transactions left in the pool.
 subset(Txs, Pool) ->
   ?WHENFAIL(eqc:format("Txs = ~p =/= TransactionPool = ~p\n", [Txs, Pool]),
-            (Txs -- Pool) == []).
+            (Txs -- Pool) == Txs).
 
 %% -- helper functions
 
