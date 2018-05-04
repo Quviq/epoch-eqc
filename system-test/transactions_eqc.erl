@@ -42,14 +42,8 @@ systems(N) ->
      } || Name <- Names ].
 
 %% -- Common pre-/post-conditions --------------------------------------------
-command_precondition_common(_S, _Cmd) ->
-  true.
-
-precondition_common(_S, _Call) ->
-  true.
-
-postcondition_common(_S, _Call, _Res) ->
-  true.
+command_precondition_common(S, Cmd) ->
+  Cmd == start orelse S#state.running =/= [].
 
 %% -- Operations -------------------------------------------------------------
 
@@ -148,8 +142,8 @@ is_invalid(_Sender, _Receiver, Fee, _Payload) ->
   Fee < aec_governance:minimum_tx_fee().
 
 %% --- Operation: balance ---
-balance_pre(S) ->
-  S#state.running =/= [].
+%% balance_pre(S) ->
+%%   S#state.running =/= [].
 
 balance_args(S) ->
   [ elements(S#state.running), 
@@ -176,8 +170,8 @@ balance_post(S, [_, PubKey], Res) ->
 
 
 %% --- Operation: transaction_pool ---
-transaction_pool_pre(S) ->
-  S#state.running /= [].
+%% transaction_pool_pre(S) ->
+%%   S#state.running /= [].
 
 transaction_pool_args(S) ->
   [elements(S#state.running)].
@@ -204,9 +198,6 @@ transaction_pool_post(_S, [_Node], Res) ->
   is_list(Res).
 
 
-tag(_Tag, true) -> true;
-tag(Tag, false) -> Tag;
-tag(Tag, Other) -> {Tag, Other}. 
 
 
 
@@ -245,9 +236,9 @@ final_balances(Nodes, PubKeys) ->
   Balances = [ balance(Node, PubKey) || Node <- Nodes, PubKey <- PubKeys ],
   {lists:usort(Balances), lists:usort(TxPools)}.
 
-
-
-
+tag(_Tag, true) -> true;
+tag(Tag, false) -> Tag;
+tag(Tag, Other) -> {Tag, Other}. 
 
 weight(_S, start) -> 10;
 weight(S, add_account) -> 
