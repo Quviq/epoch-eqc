@@ -162,14 +162,11 @@ balance(Node, PubKey) ->
   request(Node, 'GetAccountBalance',  #{account_pubkey => aec_base58c:encode(account_pubkey, PubKey)}).
 
 balance_post(S, [_, PubKey], Res) ->
-  Account = lists:keyfind(PubKey, #account.pubkey, S#state.accounts),
   case Res of
     {ok, 200, #{balance := _B}} ->
       true;  %% We don't know what the actual balance is.
     {ok, 404, #{reason := <<"Account not found">>}} ->
       true;  %% unless we mine extensively, this could happen
-      %% tag(account_not_found, 
-      %%     not lists:keymember(PubKey, #account.pubkey, S#state.accounts));
     Other ->
       Other
   end.
@@ -243,10 +240,11 @@ top_post(_S, [_Node], Res) ->
 
 final_balances([], _) ->
   {undefined, []};
-final_balances([Node|_], PubKeys) ->
-  TxPool = transaction_pool(Node),
-  Balances = [ balance(Node, PubKey) || PubKey <- PubKeys ],
-  {Balances, TxPool}.
+final_balances(Nodes, PubKeys) ->
+  TxPools = lists:append([ transaction_pool(Node) || Node <- Nodes ]),
+  Balances = [ balance(Node, PubKey) || Node <- Nodes, PubKey <- PubKeys ],
+  {lists:usort(Balances), lists:usort(TxPools)}.
+
 
 
 
@@ -322,7 +320,7 @@ prop_transactions(FinalSleep, Accounts) ->
         pretty_commands(?MODULE, Cmds, {H, S, Res},
                         conjunction([{result, Res == ok},
                                      {transactions, equals([ Tx || Tx <- TransactionPool, is_possible(S#state.accounts, Tx) ], [])},
-                                     {invalid_transactions, equals(remain(S#state.invalid_transactions, TransactionPool), TransactionPool)}])))))
+                                     {invalid_transactions, subset(S#state.invalid_transactions, TransactionPool)}])))))
   end)))).
 
 is_possible(Accounts, Tx) ->
@@ -338,10 +336,11 @@ is_possible(Accounts, Tx) ->
          {spend_tx, _, _, A, _, _, _}} = Tx,
         A
       end,
-  Amount + Fee < FromBalance andalso Fee >= aec_gevernance:minimum_tx_fee().
+  Amount + Fee < FromBalance andalso Fee >= aec_governance:minimum_tx_fee().
 
-remain(Txs, Pool) ->
-  [].
+subset(Txs, Pool) ->
+  ?WHENFAIL(eqc:format("Txs = ~p =/= TransactionPool = ~p\n", [Txs, Pool]),
+            (Txs -- Pool) == []).
 
 %% -- helper functions
 
