@@ -32,6 +32,15 @@ balance_of(PubKey, Accounts) ->
       0
   end.
 
+nonce_of(PubKey, Accounts) ->
+  case lists:keyfind(PubKey, #account.pubkey, Accounts) of
+    Account when is_record(Account, account) ->
+      Account#account.nonce;
+    false ->
+      0
+  end.
+
+
 %% -- Generators -------------------------------------------------------------
 
 systems(N) ->
@@ -82,9 +91,6 @@ stop_next(S, _Value, [Node]) ->
   S#state{running = S#state.running -- [Node]}.
 
 %% --- add_account ---
-add_account_pre(S) ->
-  S#state.running =/= [].
-
 add_account_args(S) ->
   noshrink(
   [elements(S#state.running), 
@@ -170,9 +176,6 @@ balance_post(_S, [_, _PubKey], Res) ->
 
 
 %% --- Operation: transaction_pool ---
-%% transaction_pool_pre(S) ->
-%%   S#state.running /= [].
-
 transaction_pool_args(S) ->
   [elements(S#state.running)].
 
@@ -260,23 +263,22 @@ gen_key_pair() ->
 account_gen(NatGen) ->
     ?LET(Balance, NatGen,
          begin
-           {PubKey, PrivKey} = crypto:generate_key(ecdh, crypto:ec_curve(secp256k1)),
+           #{ public := PubKey, secret := PrivKey} = enacl:sign_keypair(),
            #account{ pubkey = PubKey, balance = Balance, privkey = PrivKey }
          end).
 
 
 prop_transactions() ->
-  prop_transactions(10000, [{account,<<4,94,119,98,220,186,47,108,183,90,26,231,
-                                       177,91,97,10,54,130,205,240,164,176,35,91,
-                                       219,1,103,167,76,247,182,171,169,5,125,59,
-                                       224,45,77,51,127,22,194,34,208,131,79,122,
-                                       190,67,32,205,125,180,0,105,131,67,242,37,6,
-                                       132,179,168,70>>,
-                             1000000,
-                             <<204,238,170,174,35,138,190,186,99,168,81,105,138,19,244,
-                               91,60,214,133,141,122,197,245,33,252,231,67,130,4,151,
-                               24,9>>,
-                             0}]).
+  prop_transactions(10000, [#account{ pubkey = <<136,106,172,100,246,157,109,184,169,56,90,126,201,63,76,
+                                                 145,106,174,154,144,184,52,67,97,64,236,142,102,78,130,
+                                                 9,63>>,
+                                      privkey = <<81,242,128,212,195,137,237,101,90,18,76,133,21,206,255,
+                                                  205,114,148,22,164,193,169,220,167,235,183,62,187,75,
+                                                  231,174,35,136,106,172,100,246,157,109,184,169,56,90,
+                                                  126,201,63,76,145,106,174,154,144,184,52,67,97,64,236,
+                                                  142,102,78,130,9,63>>,
+                                      balance = 1000000,
+                                      nonce = 0}]).
 
 
 prop_transactions(FinalSleep) ->
@@ -304,6 +306,7 @@ prop_transactions(FinalSleep, Accounts) ->
     {H, S, Res} = run_commands(Cmds),
     timer:sleep(FinalSleep),
     {FinalBalances, TransactionPool} = final_balances(S#state.running, [ A#account.pubkey || A <-S#state.accounts]),
+    NonceGapTxs = nonce_gaps(S#state.accounts, TransactionPool),
     aest_nodes_mgr:stop(),
     check_command_names(Cmds,
       measure(length, commands_length(Cmds),
@@ -328,6 +331,29 @@ is_possible(Accounts, Tx) ->
         A
       end,
   Amount + Fee < FromBalance andalso Fee >= aec_governance:minimum_tx_fee().
+
+nonce_gaps(Accounts, Txs) ->
+  Unprocessed = 
+    lists:foldl(fun(Tx, Map) ->
+                    Sender = aetx:origin(Tx),
+                    Nonce = aetx:nonce(Tx),
+                    maps:put(Sender, lists:sort([Nonce | maps:get(Sender, Map, [])]), Map)
+                end, #{}, Txs), 
+  maps:fold(fun(Sender, Nonces, Acc) ->
+                dropped(nonce_of(Sender, Accounts), lists:reverse(Nonces)) ++ Acc
+            end, [], Unprocessed).
+
+dropped(_Max, []) ->
+  [];
+dropped(Max, [N | Ns]) when Max > N ->
+  [N | Ns];
+dropped(Max, [Max | Ns]) ->
+  dropped(Max -1, Ns);
+dropped(_, Ns) ->
+  [].
+
+
+
 
 %% There are no invalid transactions left in the pool.
 subset(Txs, Pool) ->
