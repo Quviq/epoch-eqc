@@ -78,8 +78,8 @@ start_next(S, _Value, [Node]) ->
 stop_pre(S) ->
   S#state.running =/= [].
 
-stop_args(S) ->
-  [elements(S#state.running)].
+%% stop_args(S) ->
+%%   [elements(S#state.running)].
 
 stop_pre(S, [Node]) ->
   lists:member(Node, S#state.running).
@@ -116,6 +116,12 @@ add_account(Node, Sender, Receiver, Fee, Payload) ->
                         }),
   SignedTx = aetx_sign:sign(Tx, Sender#account.privkey),
   Transaction = aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(SignedTx)),
+  file:write_file("stats.txt", "t", [append]),
+  file:write_file("txs.erl", 
+                  io_lib:format("{ok, 200, #{}} = aehttp_client:request('PostTx', #{tx => ~p}, "
+                                "[{ext_http, maps:get(~p, Nodes)}, "
+                                " {ct_log, fun log/2}]),\n",
+                                [Transaction, Node]), [append]),
   request(Node, 'PostTx', #{tx => Transaction}).
 
 add_account_next(S, _V, [_Node, Sender = #account{ balance = PB, nonce = PN },
@@ -190,9 +196,9 @@ transaction_pool(Node) ->
                 %% Not sure all transactions in pool must be signed???
                 aetx_sign:tx(aetx_sign:deserialize_from_binary(Trans))
               end || #{tx := T} <- Transactions ],
+      io:format("\n\nTransactions ~p\nTxs ~p\n\n", [Transactions, Txs]),
       Txs;
     Res ->
-      io:format(" -> ~p\n", [Res]),
       Res
   end.
 
@@ -201,8 +207,44 @@ transaction_pool_post(_S, [_Node], Res) ->
   is_list(Res).
 
 
+%% --- Operation: name_preclaim ---
+%% name_preclaim_pre(S) ->
+%%     S#state.running /= [].
 
+%% name_preclaim_args(_S) ->
+%%   [elements(S#state.running), elements(S#state.accounts), choose(0,5), utf8()].
 
+name_preclaim_pre(S, [Node, _, _, _]) ->
+  lists:member(Node, S#state.running).
+
+name_preclaim(Node, Sender, Fee, Commitment) ->
+  {ok, Tx} =
+    aens_preclaim_tx:new(#{account    => Sender#account.pubkey,
+                           nonce      => Sender#account.nonce + 1,
+                           commitment => Commitment,
+                           fee        => Fee}),
+  SignedTx = aetx_sign:sign(Tx, Sender#account.privkey),
+  Transaction = aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(SignedTx)),
+  request(Node, 'PostNamePreclaim',  #{tx => Transaction}).
+
+name_preclaim_next(S, _Value, [ _Node, #account{ balance = PB, nonce = PN } = Sender, Fee, Commitment]) ->
+  case PB >= Fee of
+    false -> S;  %% not enough balance
+    true ->
+      Accounts = lists:keyreplace(Sender#account.privkey, #account.privkey, S#state.accounts, 
+                                  Sender#account{ balance = PB - Fee, nonce = PN + 1 }),
+      S#state{ accounts = Accounts, names = S#state.names ++ [{Sender#account.pubkey, Commitment, preclaim}] }
+  end.
+
+name_preclaim_post(_S, [_Name], Res) ->
+  case Res of 
+    {ok, 200, _} -> true;
+    {error, socket_closed_remotely} ->
+      file:write_file("stats.txt", "C", [append]),
+      timer:sleep(1000),
+      socket_closed;
+    _ -> eq(Res, ok)
+  end.
 
 %% --- Operation: wait ---
 %% wait_args(_S) ->
@@ -268,17 +310,18 @@ account_gen(NatGen) ->
          end).
 
 
+%% UAT keys: https://github.com/aeternity/testnet-keys/tree/master/accounts/UAT_sender_account
 prop_transactions() ->
-  prop_transactions(10000, [#account{ pubkey = <<136,106,172,100,246,157,109,184,169,56,90,126,201,63,76,
-                                                 145,106,174,154,144,184,52,67,97,64,236,142,102,78,130,
-                                                 9,63>>,
-                                      privkey = <<81,242,128,212,195,137,237,101,90,18,76,133,21,206,255,
-                                                  205,114,148,22,164,193,169,220,167,235,183,62,187,75,
-                                                  231,174,35,136,106,172,100,246,157,109,184,169,56,90,
-                                                  126,201,63,76,145,106,174,154,144,184,52,67,97,64,236,
-                                                  142,102,78,130,9,63>>,
+  prop_transactions(10000, [#account{ pubkey = <<206,167,173,228,112,201,249,157,157,78,64,8,128,168,111,
+                                                 29,73,187,68,75,98,241,26,158,187,100,187,207,235,115,
+                                                 254,243>>,
+                                      privkey = <<230,169,29,99,60,119,207,87,113,50,157,51,84,179,188,
+                                                  239,27,197,224,50,196,61,112,182,211,90,249,35,206,30,
+                                                  183,77,206,167,173,228,112,201,249,157,157,78,64,8,128,
+                                                  168,111,29,73,187,68,75,98,241,26,158,187,100,187,207,
+                                                  235,115,254,243>>,
                                       balance = 1000000,
-                                      nonce = 0}]).
+                                      nonce = 19}]).
 
 
 prop_transactions(FinalSleep) ->
@@ -286,9 +329,16 @@ prop_transactions(FinalSleep) ->
           prop_transactions(FinalSleep, Accounts)).
 
 prop_transactions(FinalSleep, Accounts) ->
+  ?SETUP(fun() ->
+             
+             fun() -> ok end
+         end,
+         prop_patron(FinalSleep, Accounts)).
+
+prop_patron(FinalSleep, Accounts) ->
   ?FORALL(Nodes, systems(2),
   ?IMPLIES(all_connected(Nodes), 
-  ?FORALL(Cmds, commands(?MODULE, #state{nodes = Nodes, accounts = Accounts}),
+  ?FORALL(Cmds, more_commands(20, commands(?MODULE, #state{nodes = Nodes, accounts = Accounts})),
   ?SOMETIMES(2,
   begin
     DataDir = filename:absname("data"),
@@ -298,24 +348,36 @@ prop_transactions(FinalSleep, Accounts) ->
         [ { aec_base58c:encode(account_pubkey, PK), B} || #account{ pubkey = PK, balance = B } <- Accounts ]),
     ok = filelib:ensure_dir(Genesis),
     ok = file:write_file(Genesis, JSON),
+    file:write_file("stats.txt", "|", [append]),
 
     aest_nodes_mgr:start([aest_docker], #{data_dir => DataDir,
                                           temp_dir => "/tmp"}),
-    aest_nodes_mgr:setup_nodes([ Node#{genesis => Genesis, 
-                                       backend => aest_docker} || Node <- Nodes ]),
+    aest_nodes_mgr:setup_nodes([ Node#{ genesis => Genesis,
+                                        backend => aest_docker
+                                      } || Node <- Nodes ]),
     {H, S, Res} = run_commands(Cmds),
     timer:sleep(FinalSleep),
     {FinalBalances, TransactionPool} = final_balances(S#state.running, [ A#account.pubkey || A <-S#state.accounts]),
+    eqc:format("Balances ~p\n", [FinalBalances]),
     NonceGapTxs = nonce_gaps(S#state.accounts, TransactionPool),
+    eqc:format("Nonces ~p\n", [NonceGapTxs]),
+
     aest_nodes_mgr:stop(),
+    timer:sleep(8000),
+
     check_command_names(Cmds,
       measure(length, commands_length(Cmds),
       measure(spend_tx, length([ 1 || {_, add_account, _} <- command_names(Cmds)]),
         pretty_commands(?MODULE, Cmds, {H, S, Res},
                         conjunction([{result, Res == ok},
-                                     {transactions, equals([ Tx || Tx <- TransactionPool, is_possible(S#state.accounts, Tx) ], [])},
+                                     {transactions, equals([ Tx || Tx <- TransactionPool, 
+                                                                   is_possible(S#state.accounts, Tx),
+                                                                   not in_nonce_gap(NonceGapTxs, Tx)
+                                                           ], [])},
+                                     {nonce_gap, true}, %% equals(NonceGapTxs, [])
                                      {invalid_transactions, subset(S#state.invalid_transactions, TransactionPool)}])))))
   end)))).
+
 
 is_possible(Accounts, Tx) ->
   From = aetx:origin(Tx),
@@ -340,8 +402,18 @@ nonce_gaps(Accounts, Txs) ->
                     maps:put(Sender, lists:sort([Nonce | maps:get(Sender, Map, [])]), Map)
                 end, #{}, Txs), 
   maps:fold(fun(Sender, Nonces, Acc) ->
-                dropped(nonce_of(Sender, Accounts), lists:reverse(Nonces)) ++ Acc
+                [{Sender, dropped(nonce_of(Sender, Accounts), lists:reverse(Nonces))}] ++ Acc
             end, [], Unprocessed).
+
+in_nonce_gap(Gaps, Tx) ->
+  Sender = aetx:origin(Tx),
+  Nonce = aetx:nonce(Tx),
+  case lists:keyfind(Sender, 1, Gaps) of
+    false ->
+      false;
+    {_, Nonces} ->
+      lists:member(Nonce, Nonces)
+  end.
 
 dropped(_Max, []) ->
   [];
@@ -349,7 +421,7 @@ dropped(Max, [N | Ns]) when Max > N ->
   [N | Ns];
 dropped(Max, [Max | Ns]) ->
   dropped(Max -1, Ns);
-dropped(_, Ns) ->
+dropped(_, _Ns) ->
   [].
 
 
@@ -372,6 +444,7 @@ all_connected(Nodes) ->
 
 
 request(Node, Id, Params) ->
+  io:format("request ~p\n", [Id]),
   aehttp_client:request(Id, Params, 
                         [{ext_http, aest_nodes_mgr:get_service_address(Node, ext_http)}, 
                          {ct_log, fun(Fmt, Args) -> io:format(Fmt++["\n"], Args) end }]).
