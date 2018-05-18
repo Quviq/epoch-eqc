@@ -21,7 +21,7 @@
 -compile([export_all, nowarn_export_all]).
 
 %% -- State and state functions ----------------------------------------------
--record(state,{nodes = [], accounts = [], nonce_delta = 0, running = []}).
+-record(state,{nodes = [], accounts = [], nonce_delta = 0, running = [], http_ready = []}).
 
 -record(account, { pubkey,
                    balance,
@@ -57,10 +57,7 @@ systems(N) ->
       peers => ?LET(Disconnect, sublist(Names), Names -- [Name | Disconnect]),
       source => {pull, oneof(["aeternity/epoch:local"])}
      } || Name <- Names ].
-
-%% -- Common pre-/post-conditions --------------------------------------------
-command_precondition_common(S, Cmd) ->
-  Cmd == start orelse S#state.running =/= [].
+  
 
 %% -- Operations -------------------------------------------------------------
 
@@ -76,11 +73,46 @@ start_pre(S, [Node]) ->
   not lists:member(Node, S#state.running).
 
 start(Node) ->
-  aest_nodes_mgr:start_node(Node),
-  timer:sleep(2000). %% http interface needs time to start
+  aest_nodes_mgr:start_node(Node).
 
 start_next(S, _Value, [Node]) ->
   S#state{running = S#state.running ++ [Node]}.
+
+%% --- Operation: patron ---
+http_ready_pre(S) ->
+  S#state.running =/= [].
+
+http_ready_args(S) ->
+  [elements(S#state.running)].
+
+http_ready_pre(S, [Node]) ->
+  lists:member(Node, S#state.running) andalso not lists:member(Node, S#state.http_ready).
+
+http_ready(Node) ->
+  gettop(Node, erlang:system_time(millisecond) + 8000).
+
+http_ready_next(S, _Value, [Node]) ->
+  S#state{http_ready = S#state.http_ready ++ [Node]}.
+
+http_ready_post(_S, [_Node], Res) ->
+  case Res of
+    {ok, 200, _} -> true;
+    _ -> false
+  end.
+
+gettop(Node, Timeout) ->
+  case top(Node) of
+    {ok, 200, Top} -> {ok, 200, Top};
+    Res ->
+      case erlang:system_time(millisecond) > Timeout of
+        true -> Res;
+        false ->
+          timer:sleep(100),
+          gettop(Node, Timeout)
+      end
+  end.
+    
+
 
 %% --- Operation: stop ---
 stop_pre(S) ->
@@ -96,18 +128,22 @@ stop(Node) ->
   aest_nodes_mgr:stop_node(Node, infinity).
 
 stop_next(S, _Value, [Node]) ->
-  S#state{running = S#state.running -- [Node]}.
+  S#state{running = S#state.running -- [Node],
+          http_ready = S#state.http_ready -- [Node]}.
 
 %% --- add_account ---
+add_account_pre(S) ->
+  S#state.http_ready =/= [].
+
 add_account_args(S) ->
   noshrink(
-  [elements(S#state.running), 
+  [elements(S#state.http_ready), 
    {var, patron}, S#state.nonce_delta, account_gen(elements([5, 10, 23, 71, 200, 0])), 
    choose(1,5), <<"quickcheck">>]).
 
 add_account_pre(S, [Node, _Sender, Nonce, _Receiver, Fee, _Payload]) ->
   Fee >= aec_governance:minimum_tx_fee() andalso 
-    lists:member(Node, S#state.running) andalso S#state.nonce_delta == Nonce.
+    lists:member(Node, S#state.http_ready) andalso S#state.nonce_delta == Nonce.
 
 add_account_adapt(S, [Node, Sender, _Nonce, Receiver, Fee, Payload]) ->
   [Node, Sender, S#state.nonce_delta, Receiver, Fee, Payload].
@@ -139,14 +175,14 @@ add_account_post(_S, [_Node, _Sender, _Nonce, _Receiver, _Fee, _Payload], Res) -
 
 %% --- Operation: balance ---
 balance_pre(S) ->
-  S#state.accounts =/= [].
+  S#state.http_ready =/= [] andalso S#state.accounts =/= [].
 
 balance_args(S) ->
-  [ elements(S#state.running), 
+  [ elements(S#state.http_ready), 
     ?LET(Account, oneof(S#state.accounts), Account#account.pubkey) ].
 
 balance_pre(S, [Node, PubKey]) ->
-  lists:member(Node, S#state.running) andalso lists:keymember(PubKey, #account.pubkey, S#state.accounts).
+  lists:member(Node, S#state.http_ready) andalso lists:keymember(PubKey, #account.pubkey, S#state.accounts).
 
 balance(Node, PubKey) ->
   request(Node, 'GetAccountBalance',  #{account_pubkey => aec_base58c:encode(account_pubkey, PubKey)}).
@@ -163,14 +199,14 @@ balance_post(_S, [_, _PubKey], Res) ->
 
 %% --- Operation: txs ---
 txs_pre(S) ->
-  S#state.accounts =/= [].
+  S#state.http_ready =/= [] andalso S#state.accounts =/= [].
 
 txs_args(S) ->
-  [ elements(S#state.running), 
+  [ elements(S#state.http_ready), 
     ?LET(Account, oneof(S#state.accounts), Account#account.pubkey) ].
 
 txs_pre(S, [Node, PubKey]) ->
-  lists:member(Node, S#state.running) andalso lists:keymember(PubKey, #account.pubkey, S#state.accounts).
+  lists:member(Node, S#state.http_ready) andalso lists:keymember(PubKey, #account.pubkey, S#state.accounts).
 
 txs(Node, PubKey) ->
   request(Node, 'GetAccountTransactions',  #{account_pubkey => aec_base58c:encode(account_pubkey, PubKey),
@@ -193,11 +229,14 @@ txs_post(_S,  [_Node, _PubKey], Res) ->
 
 
 %% --- Operation: transaction_pool ---
+transaction_pool_pre(S) ->
+  S#state.http_ready =/= [].
+
 transaction_pool_args(S) ->
-  [elements(S#state.running)].
+  [elements(S#state.http_ready)].
 
 transaction_pool_pre(S, [Node]) ->
-  lists:member(Node, S#state.running).
+  lists:member(Node, S#state.http_ready).
 
 transaction_pool(Node) ->
   case request(Node, 'GetTxs', #{}) of
@@ -220,13 +259,13 @@ transaction_pool_post(_S, [_Node], Res) ->
 
 %% --- Operation: top ---
 top_pre(S) ->
-  S#state.running =/= [].
+  S#state.http_ready =/= [].
 
 top_args(S) ->
-  [elements(S#state.running)].
+  [elements(S#state.http_ready)].
 
 top_pre(S, [Node]) ->
-  lists:member(Node, S#state.running).
+  lists:member(Node, S#state.http_ready).
 
 top(Node) ->
   request(Node, 'GetTop', #{}).
@@ -271,7 +310,7 @@ tag(Tag, Other) -> {Tag, Other}.
 
 weight(_S, start) -> 10;
 weight(S, add_account) -> 
-  if S#state.running == [] -> 0;
+  if S#state.http_ready == [] -> 0;
      true -> 20
   end;
 weight(_S, stop) -> 1;
@@ -321,7 +360,7 @@ prop_uat() ->
 prop_patron(FinalSleep, Patron, Backend) ->
   ?FORALL([#{name := NodeName}|_] = Nodes, systems(2),
   ?IMPLIES(all_connected(Nodes), 
-  ?FORALL(Cmds, commands(?MODULE, #state{nodes = Nodes, running = [NodeName]}),
+  ?FORALL(Cmds, commands(?MODULE, #state{nodes = Nodes, running = [NodeName], http_ready = [NodeName]}),
   ?SOMETIMES(2,
   begin
     DataDir = filename:absname("data"),
@@ -336,14 +375,15 @@ prop_patron(FinalSleep, Patron, Backend) ->
     aest_nodes_mgr:setup_nodes([ Node#{ genesis => Genesis,
                                         backend => aest_docker
                                       } || Node <- Nodes ]),
-    start(NodeName),      
+    start(NodeName),
+    http_ready(NodeName),
     PatronNonce = try_get_nonce(NodeName, Patron#account.pubkey),
     eqc:format("Patron nonce ~p\n", [PatronNonce]),
 
     {H, S, Res} = run_commands(Cmds, [{patron, Patron#account{nonce = PatronNonce}}]),
     timer:sleep(FinalSleep),
 
-    {FinalBalances, TransactionPool} = final_balances(S#state.running, [ A#account.pubkey || A <-S#state.accounts]),
+    {FinalBalances, TransactionPool} = final_balances(S#state.http_ready, [ A#account.pubkey || A <-S#state.accounts]),
     eqc:format("Balances ~p\n", [FinalBalances]),
 
     aest_nodes_mgr:stop(),
