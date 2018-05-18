@@ -131,10 +131,15 @@ add_account_next(S, _V, [_Node, _Sender, _Nonce, Receiver, _Fee, _Payload]) ->
            nonce_delta = S#state.nonce_delta + 1}.
 
 add_account_post(_S, [_Node, _Sender, _Nonce, _Receiver, _Fee, _Payload], Res) ->
-  eq(Res, {ok, 200, #{}}).
+  case Res of
+    {ok, 200, #{tx_hash := _}} -> true;
+    _ -> false
+  end.
 
 
 %% --- Operation: balance ---
+balance_pre(S) ->
+  S#state.accounts =/= [].
 
 balance_args(S) ->
   [ elements(S#state.running), 
@@ -157,6 +162,9 @@ balance_post(_S, [_, _PubKey], Res) ->
   end.
 
 %% --- Operation: txs ---
+txs_pre(S) ->
+  S#state.accounts =/= [].
+
 txs_args(S) ->
   [ elements(S#state.running), 
     ?LET(Account, oneof(S#state.accounts), Account#account.pubkey) ].
@@ -171,7 +179,7 @@ txs(Node, PubKey) ->
 
 txs_post(_S,  [_Node, _PubKey], Res) ->
   case Res of
-    {ok, 200, Txs} ->
+    {ok, 200, #{transactions := Txs}} ->
       is_list(Txs);  %% We don't know what the actual transactions are.
     {ok, 404, #{reason := <<"Account not found">>}} ->
       true;  %% unless we mine extensively, this could happen
@@ -241,6 +249,22 @@ final_balances(Nodes, PubKeys) ->
   Balances = [ balance(Node, PubKey) || Node <- Nodes, PubKey <- PubKeys ],
   {lists:usort(Balances), lists:usort(TxPools)}.
 
+try_get_nonce(Node, PubKey) ->
+  try
+    {ok, 200, #{transactions := Txs}} = txs(Node, PubKey),
+    case Txs of
+      [] -> 0;
+      [Tx|_] -> 
+        io:format("Tx decoded = ~p\n", [jsx:decode(Tx)]),
+        maps:get(nonce, Tx)
+    end
+  catch
+    _:Reason -> 
+      eqc:format("error getting patron nonce ~p -> ~p\n", [Node, Reason]),
+      0
+  end.
+
+
 tag(_Tag, true) -> true;
 tag(Tag, false) -> Tag;
 tag(Tag, Other) -> {Tag, Other}. 
@@ -278,11 +302,23 @@ prop_transactions() ->
                                                   168,111,29,73,187,68,75,98,241,26,158,187,100,187,207,
                                                   235,115,254,243>>,
                                       balance = 1000000 %% ensure at least this much in patron account
-                                   }).
+                                   }, aest_docker).
+
+prop_uat() ->
+  prop_patron(10000, #account{ pubkey = <<206,167,173,228,112,201,249,157,157,78,64,8,128,168,111,
+                                                 29,73,187,68,75,98,241,26,158,187,100,187,207,235,115,
+                                                 254,243>>,
+                                      privkey = <<230,169,29,99,60,119,207,87,113,50,157,51,84,179,188,
+                                                  239,27,197,224,50,196,61,112,182,211,90,249,35,206,30,
+                                                  183,77,206,167,173,228,112,201,249,157,157,78,64,8,128,
+                                                  168,111,29,73,187,68,75,98,241,26,158,187,100,187,207,
+                                                  235,115,254,243>>,
+                                      balance = 1000000 %% ensure at least this much in patron account
+                                   }, aest_uat).
 
 %% One could run this with an arbitrary generated account 
 %% Patron = noshrink(account_gen(1000000))
-prop_patron(FinalSleep, Patron) ->
+prop_patron(FinalSleep, Patron, Backend) ->
   ?FORALL([#{name := NodeName}|_] = Nodes, systems(2),
   ?IMPLIES(all_connected(Nodes), 
   ?FORALL(Cmds, commands(?MODULE, #state{nodes = Nodes, running = [NodeName]}),
@@ -295,30 +331,22 @@ prop_patron(FinalSleep, Patron) ->
         [ { aec_base58c:encode(account_pubkey, Patron#account.pubkey), Patron#account.balance } ]),
     ok = filelib:ensure_dir(Genesis),
     ok = file:write_file(Genesis, JSON),
-    aest_nodes_mgr:start_link([aest_docker], #{data_dir => DataDir,
-                                               temp_dir => "/tmp"}),
+    aest_nodes_mgr:start_link([Backend], #{data_dir => DataDir,
+                                           temp_dir => "/tmp"}),
     aest_nodes_mgr:setup_nodes([ Node#{ genesis => Genesis,
                                         backend => aest_docker
                                       } || Node <- Nodes ]),
-    
-    start(NodeName),
-    {ok, 200, Txs} = txs(NodeName, Patron#account.pubkey),
-      
-    PatronNonce = 
-      case Txs of
-        #{transactions := []} -> 0;
-        #{transactions := [Tx|_]} -> io:format("Tx decoded = ~p\n", [jsx:decode(Tx)])
-      end,
+    start(NodeName),      
+    PatronNonce = try_get_nonce(NodeName, Patron#account.pubkey),
+    eqc:format("Patron nonce ~p\n", [PatronNonce]),
 
     {H, S, Res} = run_commands(Cmds, [{patron, Patron#account{nonce = PatronNonce}}]),
     timer:sleep(FinalSleep),
 
     {FinalBalances, TransactionPool} = final_balances(S#state.running, [ A#account.pubkey || A <-S#state.accounts]),
     eqc:format("Balances ~p\n", [FinalBalances]),
-    NonceGapTxs = nonce_gaps(S#state.accounts, TransactionPool),
-    eqc:format("Nonces ~p\n", [NonceGapTxs]),
-    aest_nodes_mgr:stop(),
 
+    aest_nodes_mgr:stop(),
     timer:sleep(8000),
 
     check_command_names(Cmds,
@@ -327,10 +355,8 @@ prop_patron(FinalSleep, Patron) ->
         pretty_commands(?MODULE, Cmds, {H, S, Res},
                         conjunction([{result, Res == ok},
                                      {transactions, equals([ Tx || Tx <- TransactionPool, 
-                                                                   is_possible(S#state.accounts, Tx),
-                                                                   not in_nonce_gap(NonceGapTxs, Tx)
-                                                           ], [])},
-                                     {nonce_gap, true} %% equals(NonceGapTxs, [])
+                                                                   is_possible(S#state.accounts, Tx)
+                                                           ], [])}
                                     ])))))
   end)))).
 
