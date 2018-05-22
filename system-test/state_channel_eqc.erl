@@ -151,7 +151,7 @@ add_account_pre(S) ->
 add_account_args(S) ->
   noshrink(
   [elements(S#state.http_ready), 
-   {var, patron}, S#state.nonce_delta, account_gen(elements([5, 10, 23, 71, 200, 0])), 
+   {var, patron}, S#state.nonce_delta, account_gen(elements([5, 71, 200, 500, 1000, 0])), 
    choose(1,5), <<"quickcheck">>]).
 
 add_account_pre(S, [Node, _Sender, Nonce, _Receiver, Fee, _Payload]) ->
@@ -188,7 +188,7 @@ add_account_post(_S, [_Node, _Sender, _Nonce, _Receiver, _Fee, _Payload], Res) -
 
 %% --- Operation: open_channel ---
 open_channel_pre(S) ->
-  S#state.http_ready =/= [] andalso S#state.accounts =/= [].
+  S#state.http_ready =/= [] andalso length(S#state.accounts) > 1.
 
 open_channel_args(S) ->
   ?LET([Initiator, Responder, Fee], 
@@ -207,14 +207,23 @@ open_channel_args(S) ->
        ]).
 
 open_channel_pre(S, [Node, #{initiator := Initiator, responder := Responder, 
-                             fee := Fee, nonce := Nonce}]) ->
+                             fee := Fee, nonce := Nonce} = Tx]) ->
   InAccount = lists:keyfind(Initiator#account.pubkey, #account.pubkey, S#state.accounts),
   RespAccount = lists:keyfind(Responder#account.pubkey, #account.pubkey, S#state.accounts),
   Responder#account.pubkey =/= Initiator#account.pubkey andalso
     Fee >= aec_governance:minimum_tx_fee() andalso 
     lists:member(Node, S#state.http_ready) andalso 
-    InAccount /= false andalso RespAccount /= false andalso 
-    InAccount#account.nonce + 1 == Nonce.
+    InAccount /= false andalso RespAccount /= false andalso
+    open_channel_valid(Tx#{initiator => InAccount, responder => RespAccount}).
+
+open_channel_valid(#{initiator := Initiator, responder := Responder, 
+                         fee := Fee, nonce := Nonce} = Tx) ->
+  Initiator#account.balance >= maps:get(initiator_amount, Tx) + Fee andalso
+    maps:get(initiator_amount, Tx) >= maps:get(channel_reserve, Tx) andalso
+    maps:get(responder_amount, Tx) >= maps:get(channel_reserve, Tx) andalso
+    Responder#account.balance >= maps:get(responder_amount, Tx)  andalso
+    Initiator#account.nonce + 1 == Nonce.
+
 
 open_channel_adapt(S, [Node, #{initiator := Initiator} = Tx]) ->
   case lists:keyfind(Initiator#account.pubkey, #account.pubkey, S#state.accounts) of
@@ -398,6 +407,7 @@ tag(Tag, false) -> Tag;
 tag(Tag, Other) -> {Tag, Other}. 
 
 weight(_S, open_channel) -> 10;
+weight(_S, add_account) -> 5;
 weight(_S, start) -> 1;
 weight(_S, stop) -> 0;
 weight(_S, _) -> 1.
@@ -418,7 +428,7 @@ account_gen(NatGen) ->
 
 %% UAT keys: https://github.com/aeternity/testnet-keys/tree/master/accounts/UAT_sender_account
 prop_transactions() ->
-  prop_patron(10000, #account{ pubkey = <<206,167,173,228,112,201,249,157,157,78,64,8,128,168,111,
+  prop_patron(5000, #account{ pubkey = <<206,167,173,228,112,201,249,157,157,78,64,8,128,168,111,
                                                  29,73,187,68,75,98,241,26,158,187,100,187,207,235,115,
                                                  254,243>>,
                                       privkey = <<230,169,29,99,60,119,207,87,113,50,157,51,84,179,188,
@@ -444,7 +454,9 @@ prop_uat() ->
 %% One could run this with an arbitrary generated account 
 %% Patron = noshrink(account_gen(1000000))
 prop_patron(FinalSleep, Patron, Backend) ->
-  ?FORALL([#{name := NodeName}|_] = Nodes, systems(2),
+  eqc:dont_print_counterexample(
+  ?FORALL([#{name := NodeName}|_] = Nodes, systems(1),
+  ?LET(Shrink, ?SHRINK(false, [true]),
   ?IMPLIES(all_connected(Nodes), 
   ?FORALL(Cmds, commands(?MODULE, #state{nodes = Nodes, running = [NodeName]}),
   begin
@@ -483,7 +495,7 @@ prop_patron(FinalSleep, Patron, Backend) ->
                                                                    not is_possible(S#state.accounts, Tx)
                                                            ], [])}
                                     ])))))
-  end))).
+  end))))).
 
 
 is_possible(Accounts, Tx) ->
