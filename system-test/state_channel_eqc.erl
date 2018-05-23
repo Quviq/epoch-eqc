@@ -182,6 +182,10 @@ add_account_post(_S, [_Node, _Sender, _Nonce, _Receiver, _Fee, _Payload], Res) -
     _ -> false
   end.
 
+add_account_features(S, [_Node, _Sender, _Nonce, _Receiver, _Fee, _Payload], _Res) ->
+  [ {accounts, length(S#state.accounts) + 1} ].
+
+
 
 %% --- Operation: open_channel ---
 open_channel_pre(S) ->
@@ -262,6 +266,10 @@ open_channel_post(_S, [_Node, _], Res) ->
       Res
   end.
 
+open_channel_features(_S, [Node, #{responder := Responder, 
+                                   fee := Fee, nonce := Nonce} = Tx], _) ->
+  [ {open_channel, responder_balance_less_responder_amount} ||
+    not (Responder#account.balance >= maps:get(responder_amount, Tx)) ].
 
 
 
