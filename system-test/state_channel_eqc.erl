@@ -192,8 +192,10 @@ open_channel_pre(S) ->
   S#state.http_ready =/= [] andalso length(S#state.accounts) > 1.
 
 open_channel_args(S) ->
-  ?LET([Initiator, Responder, Fee], 
-       [elements(S#state.accounts), elements(S#state.accounts), choose(1,5)],
+  ?LET({Initiator, Fee}, {elements(S#state.accounts), choose(1,5)},
+  ?LET({Responder, Reserve},
+       {elements(S#state.accounts -- [Initiator]), 
+        noshrink(choose(0, Initiator#account.balance))},
        [elements(S#state.http_ready), 
         #{initiator => Initiator, 
           responder => Responder,
@@ -202,10 +204,10 @@ open_channel_args(S) ->
           lock_period => choose(0,5), %% lock period
           ttl => 1000, %% ttl (we need height for this)
           fee => Fee, %% fee
-          channel_reserve => noshrink(choose(0,200)),
+          channel_reserve => Reserve,
           push_amount => noshrink(choose(0,200)),
           nonce => Initiator#account.nonce + 1}
-       ]).
+       ])).
 
 open_channel_pre(S, [Node, #{initiator := Initiator, responder := Responder, 
                              fee := Fee} = Tx]) ->
@@ -222,15 +224,19 @@ open_channel_valid(#{initiator := Initiator, responder := Responder,
   Initiator#account.balance >= maps:get(initiator_amount, Tx) + Fee andalso
     maps:get(initiator_amount, Tx) >= maps:get(channel_reserve, Tx) andalso
     maps:get(responder_amount, Tx) >= maps:get(channel_reserve, Tx) andalso
-    %% Responder#account.balance >= maps:get(responder_amount, Tx)  andalso
+    Responder#account.balance >= maps:get(responder_amount, Tx)  andalso
     Initiator#account.nonce + 1 == Nonce.
 
 
-open_channel_adapt(S, [Node, #{initiator := Initiator} = Tx]) ->
-  case lists:keyfind(Initiator#account.pubkey, #account.pubkey, S#state.accounts) of
-    false -> false;
-    InAccount ->
-      [Node, Tx#{nonce => InAccount#account.nonce + 1}]
+open_channel_adapt(S, [Node, #{initiator := Initiator, responder := Responder} = Tx]) ->
+  InAccount = lists:keyfind(Initiator#account.pubkey, #account.pubkey, S#state.accounts),
+  RespAccount = lists:keyfind(Responder#account.pubkey, #account.pubkey, S#state.accounts),
+  case {InAccount, RespAccount} of
+    {false, _} -> false;
+    {_, false} -> false;
+    _ ->
+      [Node, Tx#{initiator => InAccount, responder => RespAccount, 
+                 nonce => InAccount#account.nonce + 1}]
   end.
 
 open_channel(Node, #{initiator := Initiator, responder := Responder} = Tx) ->
@@ -467,9 +473,9 @@ prop_uat() ->
 prop_patron(FinalSleep, Patron, Backend) ->
   eqc:dont_print_counterexample(
   ?FORALL([NodeName|_] = Nodes, systems(1),
-  ?FORALL(Cmds, commands(?MODULE, #state{nodes = Nodes, running = [NodeName]}),
+  ?FORALL(Cmds, more_commands(10, commands(?MODULE, #state{nodes = Nodes, running = [NodeName]})),
   begin
-    file:write_file("exs.txt", io_lib:format("Cmds = ~p\n", [Cmds]), [append]),
+    %% file:write_file("exs.txt", io_lib:format("Cmds = ~p\n", [Cmds]), [append]),
     DataDir = filename:absname("data"),
     Genesis = filename:join(DataDir, "accounts.json"),
     JSON = 

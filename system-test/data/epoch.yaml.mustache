@@ -19,6 +19,10 @@ websocket:
     internal:
         listen_address: 0.0.0.0
         port: {{services.int_ws.port}}
+    channel:
+        listen_address: 0.0.0.0
+        port: {{services.ext_ws.port}}
+        acceptors: 10
 
 keys:
     password: {{key_password}}
