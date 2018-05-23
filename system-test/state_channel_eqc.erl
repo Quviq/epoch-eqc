@@ -200,7 +200,7 @@ open_channel_args(S) ->
           initiator_amount => noshrink(choose(0, max(0, Initiator#account.balance - Fee))),
           responder_amount => noshrink(choose(0, max(0, Responder#account.balance))),
           lock_period => choose(0,5), %% lock period
-          ttl => gen_ttl(30), %% ttl
+          ttl => 1000, %% ttl (we need height for this)
           fee => Fee, %% fee
           channel_reserve => noshrink(choose(0,200)),
           push_amount => noshrink(choose(0,200)),
@@ -251,11 +251,17 @@ open_channel(Node, #{initiator := Initiator, responder := Responder} = Tx) ->
       Error
   end.
 
-open_channel_next(S, Value, [_Node, #{initiator := In, fee := Fee, nonce := Nonce} = Tx]) ->
+open_channel_next(S, Value, [_Node, #{initiator := In, responder := Resp, 
+                                      fee := Fee, nonce := Nonce} = Tx]) ->
   Initiator = lists:keyfind(In#account.pubkey, #account.pubkey, S#state.accounts),
-  Accounts = lists:keyreplace(Initiator#account.pubkey, #account.pubkey, S#state.accounts, 
-                              Initiator#account{ balance = Initiator#account.balance - Fee, 
-                                                 nonce = Nonce }),
+  Responder = lists:keyfind(Resp#account.pubkey, #account.pubkey, S#state.accounts),
+  Accounts = 
+    lists:keyreplace(Responder#account.pubkey, #account.pubkey,
+                     lists:keyreplace(Initiator#account.pubkey, #account.pubkey, 
+                                      S#state.accounts, 
+                                      Initiator#account{ balance = Initiator#account.balance - Fee - maps:get(initiator_amount, Tx),
+                                                         nonce = Nonce }),
+                     Responder#account{ balance = Responder#account.balance - maps:get(responder_amount, Tx)}),
   S#state{ channels = S#state.channels ++ [ {open, Value, Tx} ],
            accounts = Accounts }.
 
