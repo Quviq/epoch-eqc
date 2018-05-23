@@ -56,14 +56,11 @@ nonce_of(PubKey, Accounts) ->
 %% -- Generators -------------------------------------------------------------
 
 systems(N) ->
-  Names = [ list_to_atom(lists:concat([node, Name])) || Name <- lists:seq(1,N) ],
-  [ #{name => Name,
-      peers => ?LET(Disconnect, sublist(Names), Names -- [Name | Disconnect]),
-      source => {pull, oneof(["aeternity/epoch:local"])}
-     } || Name <- Names ].
+  [ list_to_atom(lists:concat([node, Name])) || Name <- lists:seq(1,N) ].
 
-gen_ttl(N) ->
-  ?LET(TTL, choose(0, N), N - TTL).
+%% Absolute TTLs are hard to test, thinking required
+gen_ttl(Height) ->
+  ?LET(TTL, choose(0, 20), Height + (20 - TTL)).
   
 
 %% -- Operations -------------------------------------------------------------
@@ -73,7 +70,7 @@ start_pre(S) ->
   length(S#state.nodes) > length(S#state.running).
 
 start_args(S) ->
-  [elements([ Name || #{name := Name} <- S#state.nodes, 
+  [elements([ Name || Name <- S#state.nodes, 
                       not lists:member(Name, S#state.running)])].
 
 start_pre(S, [Node]) ->
@@ -207,7 +204,7 @@ open_channel_args(S) ->
        ]).
 
 open_channel_pre(S, [Node, #{initiator := Initiator, responder := Responder, 
-                             fee := Fee, nonce := Nonce} = Tx]) ->
+                             fee := Fee} = Tx]) ->
   InAccount = lists:keyfind(Initiator#account.pubkey, #account.pubkey, S#state.accounts),
   RespAccount = lists:keyfind(Responder#account.pubkey, #account.pubkey, S#state.accounts),
   Responder#account.pubkey =/= Initiator#account.pubkey andalso
@@ -221,7 +218,7 @@ open_channel_valid(#{initiator := Initiator, responder := Responder,
   Initiator#account.balance >= maps:get(initiator_amount, Tx) + Fee andalso
     maps:get(initiator_amount, Tx) >= maps:get(channel_reserve, Tx) andalso
     maps:get(responder_amount, Tx) >= maps:get(channel_reserve, Tx) andalso
-    Responder#account.balance >= maps:get(responder_amount, Tx)  andalso
+    %% Responder#account.balance >= maps:get(responder_amount, Tx)  andalso
     Initiator#account.nonce + 1 == Nonce.
 
 
@@ -428,7 +425,7 @@ account_gen(NatGen) ->
 
 %% UAT keys: https://github.com/aeternity/testnet-keys/tree/master/accounts/UAT_sender_account
 prop_transactions() ->
-  prop_patron(5000, #account{ pubkey = <<206,167,173,228,112,201,249,157,157,78,64,8,128,168,111,
+  prop_patron(10000, #account{ pubkey = <<206,167,173,228,112,201,249,157,157,78,64,8,128,168,111,
                                                  29,73,187,68,75,98,241,26,158,187,100,187,207,235,115,
                                                  254,243>>,
                                       privkey = <<230,169,29,99,60,119,207,87,113,50,157,51,84,179,188,
@@ -455,11 +452,10 @@ prop_uat() ->
 %% Patron = noshrink(account_gen(1000000))
 prop_patron(FinalSleep, Patron, Backend) ->
   eqc:dont_print_counterexample(
-  ?FORALL([#{name := NodeName}|_] = Nodes, systems(1),
-  ?LET(Shrink, ?SHRINK(false, [true]),
-  ?IMPLIES(all_connected(Nodes), 
+  ?FORALL([NodeName|_] = Nodes, systems(1),
   ?FORALL(Cmds, commands(?MODULE, #state{nodes = Nodes, running = [NodeName]}),
   begin
+    file:write_file("exs.txt", io_lib:format("Cmds = ~p\n", [Cmds]), [append]),
     DataDir = filename:absname("data"),
     Genesis = filename:join(DataDir, "accounts.json"),
     JSON = 
@@ -469,9 +465,10 @@ prop_patron(FinalSleep, Patron, Backend) ->
     ok = file:write_file(Genesis, JSON),
     aest_nodes_mgr:start_link([Backend], #{data_dir => DataDir,
                                            temp_dir => "/tmp"}),
-    aest_nodes_mgr:setup_nodes([ Node#{ genesis => Genesis,
-                                        backend => aest_docker
-                                      } || Node <- Nodes ]),
+    aest_nodes_mgr:setup_nodes(
+      aest_nodes:cluster(Nodes, #{ genesis => Genesis,
+                                   source => {pull, "aeternity/epoch:local"},
+                                   backend => aest_docker })),
     start(NodeName),
     http_ready(NodeName),
     PatronNonce = try_get_nonce(NodeName, Patron#account.pubkey),
@@ -489,82 +486,14 @@ prop_patron(FinalSleep, Patron, Backend) ->
     check_command_names(Cmds,
       measure(length, commands_length(Cmds),
       measure(spend_tx, length([ 1 || {_, add_account, _} <- command_names(Cmds)]),
+      aggregate(call_features(H),
         pretty_commands(?MODULE, Cmds, {H, S, Res},
                         conjunction([{result, Res == ok},
-                                     {transactions, equals([ Tx || Tx <- TransactionPool, 
-                                                                   not is_possible(S#state.accounts, Tx)
-                                                           ], [])}
-                                    ])))))
-  end))))).
-
-
-is_possible(Accounts, Tx) ->
-  From = aetx:origin(Tx),
-  FromBalance = balance_of(From, Accounts),
-  Type = aetx:tx_type(Tx),
-  Fee = aetx:fee(Tx),
-  Amount = 
-    case Type of
-      <<"spend_tx">> ->
-        %% Why is there no amount API ??? Utterly ugly.
-        {aetx,spend_tx,aec_spend_tx,
-         {spend_tx, _, _, A, _, _, _}} = Tx,
-        A;
-      <<"channel_create_tx">> ->
-        {aetx,channel_create_tx,aesc_create_tx,
-           {channel_create_tx, _, IA, _, _, CR, _, _, _, _}} = Tx,
-        IA + CR
-    end,                        
-  Amount + Fee < FromBalance andalso Fee >= aec_governance:minimum_tx_fee().
-
-nonce_gaps(Accounts, Txs) ->
-  Unprocessed = 
-    lists:foldl(fun(Tx, Map) ->
-                    Sender = aetx:origin(Tx),
-                    Nonce = aetx:nonce(Tx),
-                    maps:put(Sender, lists:sort([Nonce | maps:get(Sender, Map, [])]), Map)
-                end, #{}, Txs), 
-  maps:fold(fun(Sender, Nonces, Acc) ->
-                [{Sender, dropped(nonce_of(Sender, Accounts), lists:reverse(Nonces))}] ++ Acc
-            end, [], Unprocessed).
-
-in_nonce_gap(Gaps, Tx) ->
-  Sender = aetx:origin(Tx),
-  Nonce = aetx:nonce(Tx),
-  case lists:keyfind(Sender, 1, Gaps) of
-    false ->
-      false;
-    {_, Nonces} ->
-      lists:member(Nonce, Nonces)
-  end.
-
-dropped(_Max, []) ->
-  [];
-dropped(Max, [N | Ns]) when Max > N ->
-  [N | Ns];
-dropped(Max, [Max | Ns]) ->
-  dropped(Max -1, Ns);
-dropped(_, _Ns) ->
-  [].
-
-
-
-
-%% There are no invalid transactions left in the pool.
-subset(Txs, Pool) ->
-  ?WHENFAIL(eqc:format("Txs = ~p =/= TransactionPool = ~p\n", [Txs, Pool]),
-            (Txs -- Pool) == Txs).
+                                     {transactions, equals([ Tx || Tx <- TransactionPool ], [])}
+                                    ]))))))
+  end))).
 
 %% -- helper functions
-
-all_connected(Nodes) ->
-  Graph = digraph:new(),
-  [ digraph:add_vertex(Graph, Name) || #{name := Name} <- Nodes ],
-  [ digraph:add_edge(Graph, Name, Peer) || #{name := Name, peers := Peers} <- Nodes, Peer <- Peers ],
-  Result = length(digraph_utils:components(Graph)) == 1,
-  digraph:delete(Graph),
-  Result.
-
 
 request(Node, Id, Params) ->
   aehttp_client:request(Id, Params, 
