@@ -436,7 +436,7 @@ close_mutual_next(S, _Value, [_Node, Channel, #{fee := Fee, nonce := Nonce}]) ->
 
 close_mutual_post(_S, [_Node, _, _], Res) ->
   case Res of
-    {ok, 200, #{tx_hash := _}} -> false;
+    {ok, 200, #{tx_hash := _}} -> true;
     _ -> 
       Res
   end.
