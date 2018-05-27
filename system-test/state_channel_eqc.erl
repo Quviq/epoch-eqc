@@ -364,20 +364,21 @@ close_mutual_pre(S) ->
     lists:keymember(created, #channel.status, S#state.channels).
 
 close_mutual_args(S) ->
-  ?LET(Channel, elements([ Ch || #channel{status = created} = Ch <- S#state.channels]),
+  ?LET({Channel, Fee}, {elements([ Ch || #channel{status = created} = Ch <- S#state.channels]), choose(1,5)},
        begin
          #{initiator_amount := InAmount,
            responder_amount := RespAmount,
            initiator := Initiator} = Channel#channel.tx,
-         Account = lists:keyfind(Initiator#account.pubkey, #account.pubkey, S#state.accounts),
-         [elements(S#state.http_ready), Channel,
-          #{channel_id => Channel#channel.id,
-            initiator_amount => at_most(InAmount + RespAmount),
-            responder_amount => at_most(InAmount + RespAmount + 100),
-            ttl => 200, %% ttl (we need height for this)
-            fee => choose(1,5),
-            nonce => Account#account.nonce + 1}
-         ]
+           Account = lists:keyfind(Initiator#account.pubkey, #account.pubkey, S#state.accounts),
+           ?LET(Settle, at_most(InAmount + RespAmount - Fee),
+                [elements(S#state.http_ready), Channel,
+                 #{channel_id => Channel#channel.id,
+                   initiator_amount => Settle,
+                   responder_amount => InAmount + RespAmount - Fee - Settle ,
+                   ttl => 200, %% ttl (we need height for this)
+                   fee => Fee,
+                   nonce => Account#account.nonce + 1}
+                ])
        end).
 
 close_mutual_pre(S, [Node, Channel, 
@@ -389,10 +390,12 @@ close_mutual_pre(S, [Node, Channel,
     lists:member(Node, S#state.http_ready) andalso
     ChannelInS /= false andalso ChannelInS#channel.status == created andalso
     Account /= false andalso Account#account.nonce + 1 == Nonce andalso
-    close_mutual_valid(Tx).
+    close_mutual_valid(ChannelInS#channel.tx, Tx).
 
-close_mutual_valid(#{initiator_amount := InAmount, responder_amount := RespAmount, fee := Fee}) ->
-  InAmount + RespAmount >= Fee.
+%% New InAmount + RespAmout + Fee == Channel.inanmount + Channel.respamount
+close_mutual_valid(Channel, #{initiator_amount := InAmount, responder_amount := RespAmount, fee := Fee}) ->
+  InAmount + RespAmount >= Fee andalso
+    maps:get(initiator_amount, Channel) + maps:get(responder_amount, Channel) == InAmount + RespAmount + Fee.
 
 %% If the channel does not exist, we cannot replace it
 close_mutual_adapt(S, [Node, Channel, Tx]) ->
