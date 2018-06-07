@@ -24,38 +24,34 @@
 -record(state,{nodes = [], accounts = [], nonce_delta = 1, 
                running = [], http_ready = [],
                channels = [],
-               height = 0
+               height = 0,
+               tx_hashes = [], %% symbolic !
+               users = []
               }).
+
+-record(user, {name, balance, nonce}).
 
 -record(account, { pubkey,
                    balance,
                    privkey,
                    nonce = 0}).
 
--record(channel, {status, %% open | created (on chain) 
-                  tx_hash, %% symbolic! 
+-record(channel, {status, %% open | created (on chain)
                   id, 
-                  port, tx}). 
+                  port,
+                  initiator,
+                  initiator_amount,
+                  responder,
+                  responder_amount,
+                  lock_period,
+                  channel_reserve,
+                  push_amount,
+                  ttl,
+                  tx}). 
 
 
 initial_state() ->
   #state{}.
-
-balance_of(PubKey, Accounts) ->
-  case lists:keyfind(PubKey, #account.pubkey, Accounts) of
-    Account when is_record(Account, account) ->
-      Account#account.balance;
-    false ->
-      0
-  end.
-
-nonce_of(PubKey, Accounts) ->
-  case lists:keyfind(PubKey, #account.pubkey, Accounts) of
-    Account when is_record(Account, account) ->
-      Account#account.nonce;
-    false ->
-      0
-  end.
 
 
 %% -- Generators -------------------------------------------------------------
@@ -66,6 +62,14 @@ systems(N) ->
 %% Absolute TTLs are hard to test, thinking required
 gen_ttl(Height) ->
   ?LET(TTL, choose(0, 20), Height + (20 - TTL)).
+
+ttl(S, N) when is_integer(N) ->
+  {S#state.height, N};
+ttl(S, {_H, N}) ->
+  {S#state.height, N};
+ttl(_S, optional) ->
+  optional.
+
 
 at_most(X) ->
   noshrink(choose(0, max(0, X))).
@@ -138,42 +142,53 @@ add_account_pre(S) ->
 add_account_args(S) ->
   noshrink(
   [elements(S#state.http_ready), 
-   {var, patron}, S#state.nonce_delta, account_gen(elements([5, 71, 200, 500, 1000, 0])), 
-   choose(1,5), <<"quickcheck">>]).
+   patron, S#state.nonce_delta, account_gen(oneof([71, 200, 500, 1000, 0])), 
+   choose(1,5), ttl(S, 200), <<"quickcheck">>]).
 
-add_account_pre(S, [Node, _Sender, Nonce, _Receiver, Fee, _Payload]) ->
-  Fee >= aec_governance:minimum_tx_fee() andalso 
-    lists:member(Node, S#state.http_ready) andalso S#state.nonce_delta == Nonce.
+add_account_pre(S, [Node, _Sender, Nonce, {Name, _Balance}, Fee, TTL, _Payload]) ->
+  not lists:keymember(Name, #user.name, S#state.accounts) andalso
+    lists:member(Node, S#state.http_ready) andalso 
+    check_ttl(S, TTL) andalso
+    S#state.nonce_delta == Nonce andalso
+    %% and valid
+    Fee >= aec_governance:minimum_tx_fee().
 
-add_account_adapt(S, [Node, Sender, _Nonce, Receiver, Fee, Payload]) ->
-  [Node, Sender, S#state.nonce_delta, Receiver, Fee, Payload].
+add_account_adapt(S, [Node, Sender, _Nonce, NewAccount, Fee, TTL, Payload]) ->
+  [Node, Sender, S#state.nonce_delta, NewAccount, Fee, ttl(S, TTL), Payload].
 
-add_account(Node, Sender, Nonce, Receiver, Fee, Payload) ->
+add_account(Node, From, Nonce, {Name, Balance}, Fee, {SeenHeight, DeltaTTL}, Payload) ->
+  #{ public := PubKey, secret := PrivKey} = enacl:sign_keypair(),
+  Receiver = #account{ pubkey = PubKey, balance = Balance, privkey = PrivKey },
+  ets:insert(accounts, {Name, Receiver}),
+  [{_, Sender}] = ets:lookup(accounts, From),
   {ok, Tx} =
     aec_spend_tx:new(#{ sender    => Sender#account.pubkey,
                         recipient => Receiver#account.pubkey,
                         amount    => Receiver#account.balance,   %% we create it with this much
                         fee       => Fee,
                         payload   => Payload,
-                        nonce     => Sender#account.nonce + Nonce
+                        nonce     => Sender#account.nonce + Nonce,
+                        ttl       => SeenHeight + DeltaTTL
                         }),
   SignedTx = aetx_sign:sign(Tx, Sender#account.privkey),
   Transaction = aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(SignedTx)),
   request(Node, 'PostTx', #{tx => Transaction}).
 
-add_account_next(S, _V, [_Node, _Sender, _Nonce, Receiver, _Fee, _Payload]) ->
+add_account_next(S, Value, [_Node, _Sender, _Nonce, {Name, Balance}, _Fee, _TTL, _Payload]) ->
   %% We assume there are always enough tokens in patron account
-  S#state{ accounts = S#state.accounts ++ [Receiver],
+  S#state{ accounts = S#state.accounts ++ [#user{name = Name, balance = Balance, nonce = 0}],
+           tx_hashes = [{call, ?MODULE, ok200, [Value, tx_hash]} | S#state.tx_hashes],
            nonce_delta = S#state.nonce_delta + 1}.
 
-add_account_post(_S, [_Node, _Sender, _Nonce, _Receiver, _Fee, _Payload], Res) ->
+add_account_post(_S, [_Node, _Sender, _Nonce, _Receiver, _Fee, _TTL, _Payload], Res) ->
   case Res of
     {ok, 200, #{tx_hash := _}} -> true;
     _ -> false
   end.
 
-add_account_features(S, [_Node, _Sender, _Nonce, _Receiver, _Fee, _Payload], _Res) ->
-  [ {accounts, length(S#state.accounts) + 1} ].
+add_account_features(S, [_Node, _Sender, _Nonce, _Receiver, _Fee, {SeenHeight, DeltaTTL}, _Payload], _Res) ->
+  [ {accounts, length(S#state.accounts) + 1},
+    {accounts, ttl_delta_overshoot, (SeenHeight + DeltaTTL) - S#state.height} ] .
 
 
 
@@ -185,53 +200,55 @@ open_channel_args(S) ->
   ?LET({Initiator, Fee}, {elements(S#state.accounts), choose(1,5)},
   ?LET({Responder, Reserve},
        {elements(S#state.accounts -- [Initiator]), 
-        at_most(Initiator#account.balance)},
+        at_most(Initiator#user.balance)},
        [elements(S#state.http_ready),
-        #{initiator => Initiator, 
-          responder => Responder,
-          initiator_amount => at_most(Initiator#account.balance - Fee),
-          responder_amount => at_most(Responder#account.balance),
+        #{initiator => Initiator#user.name, 
+          responder => Responder#user.name,
+          initiator_amount => at_most(Initiator#user.balance - Fee),
+          responder_amount => at_most(Responder#user.balance),
           lock_period => choose(0,5), %% lock period
-          ttl => 1000, %% ttl (we need height for this)
+          ttl => ttl(S, 200), %% ttl (we need height for this)
           fee => Fee, %% fee
           channel_reserve => Reserve,
           push_amount => noshrink(choose(0,200)),
-          nonce => Initiator#account.nonce + 1}
+          nonce => Initiator#user.nonce + 1}
        ])).
 
 open_channel_pre(S, [Node, #{initiator := Initiator, responder := Responder, 
-                             fee := Fee} = Tx]) ->
-  InAccount = lists:keyfind(Initiator#account.pubkey, #account.pubkey, S#state.accounts),
-  RespAccount = lists:keyfind(Responder#account.pubkey, #account.pubkey, S#state.accounts),
-  Responder#account.pubkey =/= Initiator#account.pubkey andalso
-    Fee >= aec_governance:minimum_tx_fee() andalso 
-    lists:member(Node, S#state.http_ready) andalso 
+                             nonce := Nonce, ttl := TTL} = Tx]) ->
+  InAccount = lists:keyfind(Initiator, #user.name, S#state.accounts),
+  RespAccount = lists:keyfind(Responder, #user.name, S#state.accounts),
+  lists:member(Node, S#state.http_ready) andalso 
     InAccount /= false andalso RespAccount /= false andalso
-    open_channel_valid(Tx#{initiator => InAccount, responder => RespAccount}).
+    InAccount#user.nonce + 1 == Nonce andalso 
+    check_ttl(S, TTL) andalso 
+    open_channel_valid(S, [Node, Tx]).
 
-open_channel_valid(#{initiator := Initiator, responder := Responder, 
-                         fee := Fee, nonce := Nonce} = Tx) ->
-  Initiator#account.balance >= maps:get(initiator_amount, Tx) + Fee andalso
+open_channel_valid(S, [_Node, #{initiator := Initiator, responder := Responder, 
+                                fee := Fee} = Tx]) ->
+  InAccount = lists:keyfind(Initiator, #user.name, S#state.accounts),
+  RespAccount = lists:keyfind(Responder, #user.name, S#state.accounts),
+  Responder =/= Initiator andalso
+    Fee >= aec_governance:minimum_tx_fee() andalso 
+    InAccount#user.balance >= maps:get(initiator_amount, Tx) + Fee andalso
     maps:get(initiator_amount, Tx) >= maps:get(channel_reserve, Tx) andalso
     maps:get(responder_amount, Tx) >= maps:get(channel_reserve, Tx) andalso
-    Responder#account.balance >= maps:get(responder_amount, Tx)  andalso
-    Initiator#account.nonce + 1 == Nonce.
+    RespAccount#user.balance >= maps:get(responder_amount, Tx).
 
 
-open_channel_adapt(S, [Node, #{initiator := Initiator, responder := Responder} = Tx]) ->
-  InAccount = lists:keyfind(Initiator#account.pubkey, #account.pubkey, S#state.accounts),
-  RespAccount = lists:keyfind(Responder#account.pubkey, #account.pubkey, S#state.accounts),
-  case {InAccount, RespAccount} of
-    {false, _} -> false;
-    {_, false} -> false;
-    _ ->
-      [Node, Tx#{initiator => InAccount, responder => RespAccount, 
-                 nonce => InAccount#account.nonce + 1}]
+open_channel_adapt(S, [Node, #{initiator := Initiator,  ttl := TTL} = Tx]) ->
+  case lists:keyfind(Initiator, #user.name, S#state.accounts) of
+    false -> false;
+    InAccount ->
+      [Node, Tx#{nonce => InAccount#user.nonce + 1, ttl => ttl(S, TTL)}]
   end.
 
-open_channel(Node, #{initiator := Initiator, responder := Responder} = Tx) ->
-  EncodedTx = Tx#{initiator => aec_base58c:encode(account_pubkey, Initiator#account.pubkey),
-                  responder => aec_base58c:encode(account_pubkey, Responder#account.pubkey)},
+open_channel(Node, #{initiator := In, responder := Resp} = Tx) ->
+  [{_, Initiator}] = ets:lookup(accounts, In),
+  [{_, Responder}] = ets:lookup(accounts, Resp),
+  EncodedTx =
+    optional_ttl(Tx#{initiator => aec_base58c:encode(account_pubkey, Initiator#account.pubkey),
+                     responder => aec_base58c:encode(account_pubkey, Responder#account.pubkey)}),
   case request(Node, 'PostChannelCreate', EncodedTx) of
     {ok, 200, #{tx := TxObject}} ->
       {ok, Bin} = aec_base58c:safe_decode(transaction, TxObject),
@@ -247,21 +264,28 @@ open_channel(Node, #{initiator := Initiator, responder := Responder} = Tx) ->
       Error
   end.
 
-open_channel_next(S, Value, [_Node, #{initiator := In, responder := Resp, 
+open_channel_next(S, Value, [_Node, #{initiator := In, responder := Resp,
                                       fee := Fee, nonce := Nonce} = Tx]) ->
-  Initiator = lists:keyfind(In#account.pubkey, #account.pubkey, S#state.accounts),
-  Responder = lists:keyfind(Resp#account.pubkey, #account.pubkey, S#state.accounts),
+  Initiator = lists:keyfind(In, #user.name, S#state.accounts),
+  Responder = lists:keyfind(Resp, #user.name, S#state.accounts),
   Accounts = 
-    lists:keyreplace(Responder#account.pubkey, #account.pubkey,
-                     lists:keyreplace(Initiator#account.pubkey, #account.pubkey, 
+    lists:keyreplace(Resp, #user.name,
+                     lists:keyreplace(In, #user.name, 
                                       S#state.accounts, 
-                                      Initiator#account{ balance = Initiator#account.balance - Fee - maps:get(initiator_amount, Tx),
-                                                         nonce = Nonce }),
-                     Responder#account{ balance = Responder#account.balance - maps:get(responder_amount, Tx)}),
+                                      Initiator#user{ balance = Initiator#user.balance - Fee - maps:get(initiator_amount, Tx),
+                                                      nonce = Nonce }),
+                     Responder#user{ balance = Responder#user.balance - maps:get(responder_amount, Tx)}),
   S#state{ channels = S#state.channels ++ [ #channel{status = open,
-                                                     tx_hash = {call, ?MODULE, ok200, [Value, tx_hash]},
-                                                     id =  aesc_channels:id(In#account.pubkey, Nonce, Resp#account.pubkey),
-                                                     tx = Tx} ],
+                                                     id = {In, Nonce, Resp},
+                                                     initiator = In,
+                                                     responder = Resp,
+                                                     initiator_amount = maps:get(initiator_amount, Tx),
+                                                     responder_amount = maps:get(responder_amount, Tx),
+                                                     lock_period = maps:get(lock_period, Tx),
+                                                     channel_reserve = maps:get(channel_reserve, Tx),
+                                                     push_amount = maps:get(push_amount, Tx),
+                                                     ttl = maps:get(ttl, Tx)} ],
+           tx_hashes = [{call, ?MODULE, ok200, [Value, tx_hash]} | S#state.tx_hashes],
            accounts = Accounts }.
 
 open_channel_post(_S, [_Node, _], Res) ->
@@ -271,9 +295,22 @@ open_channel_post(_S, [_Node, _], Res) ->
       Res
   end.
 
-open_channel_features(_S, [_Node, #{responder := Responder} = Tx], _) ->
+open_channel_features(S, [_Node, #{responder := Resp} = Tx], _) ->
+  Responder = lists:keyfind(Resp, #user.name, S#state.accounts),
   [ {open_channel, responder_balance_less_responder_amount} ||
-    not (Responder#account.balance >= maps:get(responder_amount, Tx)) ].
+    not (Responder#user.balance >= maps:get(responder_amount, Tx)) ].
+
+channel_account(_S, false, _) ->
+  false;
+channel_account(S, #channel{responder = From}, responder) ->
+  lists:keyfind(From, #user.name, S#state.accounts);
+channel_account(S, #channel{initiator = From}, initiator) ->  
+  lists:keyfind(From, #user.name, S#state.accounts);
+channel_account(S, Id, Party) when is_tuple(Id) ->
+  Channel = lists:keyfind(Id, #channel.id, S#state.channels),
+  channel_account(S, Channel, Party).
+
+
 
 %% --- Operation: deposit ---
 deposit_pre(S) ->
@@ -284,50 +321,58 @@ deposit_args(S) ->
   ?LET({Channel, Party}, {elements([ Ch || #channel{status = created} = Ch <- S#state.channels]), 
                           oneof([initiator, responder])},
        begin
-         From = maps:get(Party, Channel#channel.tx),
-         [elements(S#state.http_ready), Channel, Party,
-          #{from => From,
+         From = channel_account(S, Channel, Party),
+         [elements(S#state.http_ready),
+          #{from => Party,
             channel_id => Channel#channel.id,
-            amount => at_most(From#account.balance),
-            ttl => 200, %% ttl (we need height for this)
+            amount => at_most(From#user.balance),
+            ttl => ttl(S, 200),
             fee => choose(1,5),
-            nonce => From#account.nonce + 1}
+            nonce => From#user.nonce + 1}
          ]
        end).
 
-deposit_pre(S, [Node, _Channel, _Party, 
-                #{channel_id := Ch, from := From, fee := Fee, nonce := Nonce} = Tx]) ->
+deposit_pre(S, [Node,
+                #{channel_id := Ch, from := Party, nonce := Nonce, ttl := TTL} = Tx]) ->
   Channel = lists:keyfind(Ch, #channel.id, S#state.channels),
-  Account = lists:keyfind(From#account.pubkey, #account.pubkey, S#state.accounts),
+  Account = channel_account(S, Channel, Party),
+  lists:member(Node, S#state.http_ready) andalso
+    Channel /= false andalso
+    Channel#channel.status == created andalso 
+    Account /= false andalso Account#user.nonce + 1 == Nonce andalso
+    check_ttl(S, TTL) andalso
+    deposit_valid(S, Tx).
+
+deposit_valid(S, #{channel_id := Ch, from := Party, amount := Amount, fee := Fee}) ->
+  Account = channel_account(S, Ch, Party),
   Fee >= aec_governance:minimum_tx_fee() andalso 
-    lists:member(Node, S#state.http_ready) andalso
-    Channel /= false andalso Channel#channel.status == created andalso
-    Account /= false andalso Account#account.nonce + 1 == Nonce andalso
-    deposit_valid(Tx#{from => Account}).
+    Account#user.balance >= Amount + Fee.
 
-deposit_valid(#{from := From, amount := Amount, fee := Fee}) ->
-  From#account.balance >= Amount + Fee.
-
-deposit_adapt(S, [Node, _Channel, Party, #{from := From, channel_id := Ch} = Tx]) ->
-  case lists:keyfind(From#account.pubkey, #account.pubkey, S#state.accounts) of
+deposit_adapt(S, [Node, #{from := Party, channel_id := Ch, ttl := TTL} = Tx]) ->
+  case channel_account(S, Ch, Party) of
     false -> false;
     Account ->
-      [Node, lists:keyfind(Ch, #channel.id, S#state.channels), Party, 
-       Tx#{from => Account, nonce => Account#account.nonce + 1}]
+      [Node, Tx#{nonce => Account#user.nonce + 1, ttl => ttl(S, TTL)}]
   end.
 
-%% Channel is passed on, because we need secret keys and here we have no state
-deposit(Node, Channel, _Party, #{from := From} = Tx) ->
-  #{initiator := Initiator, responder := Responder} = Channel#channel.tx,
-  EncodedTx = Tx#{from => aec_base58c:encode(account_pubkey, From#account.pubkey),
-                  channel_id => aec_base58c:encode(channel, Channel#channel.id)},
+deposit(Node, #{from := Party, channel_id := Ch} = Tx) ->
+  {Initiator, OrgNonce, Responder} = Ch,
+  [{_, In}] = ets:lookup(accounts, Initiator), 
+  [{_, Resp}] = ets:lookup(accounts, Responder), 
+  Id = aesc_channels:id(In#account.pubkey, OrgNonce, Resp#account.pubkey),
+  From = if Party == initiator -> In;
+            Party == responder -> Resp
+         end,
+  EncodedTx = 
+    optional_ttl(Tx#{from => aec_base58c:encode(account_pubkey, From#account.pubkey),
+                         channel_id => aec_base58c:encode(channel, Id)}),
   case request(Node, 'PostChannelDeposit', EncodedTx) of
     {ok, 200, #{tx := TxObject}} ->
       {ok, Bin} = aec_base58c:safe_decode(transaction, TxObject),
       InitiatorSignedTx = aetx_sign:sign(aetx:deserialize_from_binary(Bin), 
-                                [Initiator#account.privkey]),
+                                [In#account.privkey]),
       ResponderSignedTx = aetx_sign:sign(aetx:deserialize_from_binary(Bin), 
-                                [Responder#account.privkey]),
+                                [Resp#account.privkey]),
       BothSigned = 
         aetx_sign:add_signatures(ResponderSignedTx, aetx_sign:signatures(InitiatorSignedTx)),
       Transaction = aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(BothSigned)),
@@ -336,25 +381,35 @@ deposit(Node, Channel, _Party, #{from := From} = Tx) ->
       Error
   end.
 
-deposit_next(S, _Value, [_Node, Channel, Party, #{fee := Fee, nonce := Nonce}]) ->
-  From = maps:get(Party, Channel#channel.tx),
-  Account = lists:keyfind(From#account.pubkey, #account.pubkey, S#state.accounts),
+%% Due to adapt, Channel is the one we have in the state
+deposit_next(S, Value, [_Node, #{channel_id := Ch, from := Party, fee := Fee, amount := Amount, nonce := Nonce}]) ->
+  Channel = lists:keyfind(Ch, #channel.id, S#state.channels),
+  Account = channel_account(S, Channel, Party),
   Accounts = 
-    lists:keyreplace(Account#account.pubkey, #account.pubkey, 
+    lists:keyreplace(Account#user.name, #user.name, 
                      S#state.accounts, 
-                     Account#account{ balance = Account#account.balance - Fee,
-                                      nonce = Nonce }),
-  S#state{ %% todo update channel amounts
-    accounts = Accounts }.
+                     Account#user{ balance = Account#user.balance - (Fee + Amount),
+                                   nonce = Nonce }),
+  NewChannel = 
+    case Party of
+      initiator ->
+        Channel#channel{initiator_amount = Channel#channel.initiator_amount + Amount};
+      responder ->
+        Channel#channel{responder_amount = Channel#channel.responder_amount + Amount}
+    end,
+  Channels = lists:keyreplace(Ch, #channel.id, S#state.channels, NewChannel),
+  S#state{ channels = Channels,
+           tx_hashes = [{call, ?MODULE, ok200, [Value, tx_hash]} | S#state.tx_hashes],
+           accounts = Accounts }.
 
-deposit_post(_S, [_Node, _, _, _], Res) ->
+deposit_post(_S, [_Node, _], Res) ->
   case Res of
     {ok, 200, #{tx_hash := _}} -> true;
     _ -> 
       Res
   end.
 
-deposit_features(_S, [_, _, Party, _], _Res) ->
+deposit_features(_S, [_, #{from := Party}], _Res) ->
   [{deposit, Party}].
 
 
@@ -366,58 +421,59 @@ close_mutual_pre(S) ->
 close_mutual_args(S) ->
   ?LET({Channel, Fee}, {elements([ Ch || #channel{status = created} = Ch <- S#state.channels]), choose(1,5)},
        begin
-         #{initiator_amount := InAmount,
-           responder_amount := RespAmount,
-           initiator := Initiator} = Channel#channel.tx,
-           Account = lists:keyfind(Initiator#account.pubkey, #account.pubkey, S#state.accounts),
+         InAmount = Channel#channel.initiator_amount,
+         RespAmount = Channel#channel.responder_amount,
+         Account = channel_account(S, Channel, initiator),
            ?LET(Settle, at_most(InAmount + RespAmount - Fee),
-                [elements(S#state.http_ready), Channel,
+                [elements(S#state.http_ready),
                  #{channel_id => Channel#channel.id,
                    initiator_amount => Settle,
                    responder_amount => InAmount + RespAmount - Fee - Settle ,
-                   ttl => 200, %% ttl (we need height for this)
+                   ttl => ttl(S, 200), %% ttl (we need height for this)
                    fee => Fee,
-                   nonce => Account#account.nonce + 1}
+                   nonce => Account#user.nonce + 1}
                 ])
        end).
 
-close_mutual_pre(S, [Node, Channel, 
-                     #{channel_id := Ch, fee := Fee, nonce := Nonce} = Tx]) ->
-  ChannelInS = lists:keyfind(Ch, #channel.id, S#state.channels),
-  #{initiator := From} = Channel#channel.tx,
-  Account = lists:keyfind(From#account.pubkey, #account.pubkey, S#state.accounts),
-  Fee >= aec_governance:minimum_tx_fee() andalso 
-    lists:member(Node, S#state.http_ready) andalso
-    ChannelInS /= false andalso ChannelInS#channel.status == created andalso
-    Account /= false andalso Account#account.nonce + 1 == Nonce andalso
-    close_mutual_valid(ChannelInS#channel.tx, Tx).
+close_mutual_pre(S, [Node, 
+                     #{channel_id := Ch, nonce := Nonce, ttl := TTL} = Tx]) ->
+  Channel = lists:keyfind(Ch, #channel.id, S#state.channels),
+  Account = channel_account(S, Channel, initiator),
+  lists:member(Node, S#state.http_ready) andalso
+    Channel /= false andalso Channel#channel.status == created andalso
+    Account /= false andalso Account#user.nonce + 1 == Nonce andalso
+    check_ttl(S, TTL) andalso
+    close_mutual_valid(Channel, Tx).
 
 %% New InAmount + RespAmout + Fee == Channel.inanmount + Channel.respamount
 close_mutual_valid(Channel, #{initiator_amount := InAmount, responder_amount := RespAmount, fee := Fee}) ->
+  Fee >= aec_governance:minimum_tx_fee() andalso 
   InAmount + RespAmount >= Fee andalso
-    maps:get(initiator_amount, Channel) + maps:get(responder_amount, Channel) == InAmount + RespAmount + Fee.
+    Channel#channel.initiator_amount + Channel#channel.responder_amount == InAmount + RespAmount + Fee.
 
 %% If the channel does not exist, we cannot replace it
-close_mutual_adapt(S, [Node, Channel, Tx]) ->
-  #{initiator := From} = Channel#channel.tx, 
-  case lists:keyfind(From#account.pubkey, #account.pubkey, S#state.accounts) of
+%% Adapting Channel Id and other values results in too complex code
+close_mutual_adapt(S, [Node, #{channel_id := Ch, ttl := TTL} = Tx]) ->
+  case channel_account(S, Ch, initiator) of
     false -> false;
     Account ->
-      [Node, Channel,
-       Tx#{nonce => Account#account.nonce + 1}]
+      [Node, Tx#{nonce => Account#user.nonce + 1, ttl => ttl(S, TTL)}]
   end.
 
-%% Channel is passed on, because we need secret keys and here we have no state
-close_mutual(Node, Channel, Tx) ->
-  #{initiator := Initiator, responder := Responder} = Channel#channel.tx,
-  EncodedTx = Tx#{channel_id => aec_base58c:encode(channel, Channel#channel.id)},
+close_mutual(Node, #{channel_id := Ch} = Tx) ->
+  {Initiator, OrgNonce, Responder} = Ch,
+  [{_, In}] = ets:lookup(accounts, Initiator), 
+  [{_, Resp}] = ets:lookup(accounts, Responder), 
+  Id = aesc_channels:id(In#account.pubkey, OrgNonce, Resp#account.pubkey),
+  EncodedTx =
+    optional_ttl(Tx#{channel_id => aec_base58c:encode(channel, Id)}),
   case request(Node, 'PostChannelCloseMutual', EncodedTx) of
     {ok, 200, #{tx := TxObject}} ->
       {ok, Bin} = aec_base58c:safe_decode(transaction, TxObject),
       InitiatorSignedTx = aetx_sign:sign(aetx:deserialize_from_binary(Bin), 
-                                [Initiator#account.privkey]),
+                                [In#account.privkey]),
       ResponderSignedTx = aetx_sign:sign(aetx:deserialize_from_binary(Bin), 
-                                [Responder#account.privkey]),
+                                [Resp#account.privkey]),
       BothSigned = 
         aetx_sign:add_signatures(ResponderSignedTx, aetx_sign:signatures(InitiatorSignedTx)),
       Transaction = aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(BothSigned)),
@@ -426,25 +482,29 @@ close_mutual(Node, Channel, Tx) ->
       Error
   end.
 
-close_mutual_next(S, _Value, [_Node, Channel, #{fee := Fee, nonce := Nonce}]) ->
-  #{initiator := From} = Channel#channel.tx,
-  Account = lists:keyfind(From#account.pubkey, #account.pubkey, S#state.accounts),
-  Accounts = 
-    lists:keyreplace(Account#account.pubkey, #account.pubkey, 
+close_mutual_next(S, Value, [_Node,  #{channel_id := Ch, nonce := Nonce, 
+                                       initiator_amount := IA, responder_amount := RA}]) ->
+  Initiator = channel_account(S, Ch, initiator),
+  Responder = channel_account(S, Ch, responder),
+  Accounts =
+    lists:keyreplace(Responder#user.name, #user.name,
+    lists:keyreplace(Initiator#user.name, #user.name, 
                      S#state.accounts, 
-                     Account#account{ balance = Account#account.balance - Fee,
-                                      nonce = Nonce }),
-  S#state{ %% todo update channel amounts and close channel
-    accounts = Accounts }.
+                     Initiator#user{ balance = Initiator#user.balance + IA,
+                                     nonce = Nonce }),
+                     Responder#user{ balance = Responder#user.balance + RA } ),
+  S#state{ channels = lists:keydelete(Ch, #channel.id, S#state.channels),
+           tx_hashes = [{call, ?MODULE, ok200, [Value, tx_hash]} | S#state.tx_hashes],
+           accounts = Accounts }.
 
-close_mutual_post(_S, [_Node, _, _], Res) ->
+close_mutual_post(_S, [_Node, _], Res) ->
   case Res of
     {ok, 200, #{tx_hash := _}} -> true;
     _ -> 
       Res
   end.
 
-close_mutual_features(_S, [_, _, #{initiator_amount := InAmount, responder_amount := RespAmount, fee := Fee}], _Res) ->
+close_mutual_features(_S, [_, #{initiator_amount := InAmount, responder_amount := RespAmount, fee := Fee}], _Res) ->
   [{close_mutual, even} ||  (InAmount + RespAmount ) rem 2 == 0 ] ++
     [{close_mutual, odd} ||  (InAmount + RespAmount ) rem 2 == 1 ] ++ 
     [{close_mutual, to_initiator} ||  RespAmount < floor(Fee/2) ] ++
@@ -460,16 +520,17 @@ balance_pre(S) ->
   S#state.http_ready =/= [] andalso S#state.accounts =/= [].
 
 balance_args(S) ->
-  [ elements(S#state.http_ready), 
-    ?LET(Account, oneof(S#state.accounts), Account#account.pubkey) ].
+  [ elements(S#state.http_ready),?LET(A, oneof(S#state.accounts), A#user.name) ].
 
-balance_pre(S, [Node, PubKey]) ->
-  lists:member(Node, S#state.http_ready) andalso lists:keymember(PubKey, #account.pubkey, S#state.accounts).
+balance_pre(S, [Node, Name]) ->
+  lists:member(Node, S#state.http_ready) andalso lists:keymember(Name, #user.name, S#state.accounts).
 
-balance(Node, PubKey) ->
+balance(Node, Name) ->
+  [{_, #account{pubkey = PubKey}}] = ets:lookup(accounts, Name),
   request(Node, 'GetAccountBalance',  #{account_pubkey => aec_base58c:encode(account_pubkey, PubKey)}).
 
-balance_post(_S, [_, _PubKey], Res) ->
+balance_post(_S, [_, _Name], Res) ->
+  %% #user{balance = Bal} = lists:keyfind(Name, #user.name, S#state.accounts), 
   case Res of
     {ok, 200, #{balance := _B}} ->
       true;  %% We don't know what the actual balance is.
@@ -479,31 +540,6 @@ balance_post(_S, [_, _PubKey], Res) ->
       Other
   end.
 
-%% --- Operation: txs ---
-txs_pre(S) ->
-  S#state.http_ready =/= [] andalso S#state.accounts =/= [].
-
-txs_args(S) ->
-  [ elements(S#state.http_ready), 
-    ?LET(Account, oneof(S#state.accounts), Account#account.pubkey) ].
-
-txs_pre(S, [Node, PubKey]) ->
-  lists:member(Node, S#state.http_ready) andalso lists:keymember(PubKey, #account.pubkey, S#state.accounts).
-
-txs(Node, PubKey) ->
-  request(Node, 'GetAccountTransactions',  #{account_pubkey => aec_base58c:encode(account_pubkey, PubKey),
-                                             tx_encoding => json
-                                            }).
-
-txs_post(_S,  [_Node, _PubKey], Res) ->
-  case Res of
-    {ok, 200, #{transactions := Txs}} ->
-      is_list(Txs);  %% We don't know what the actual transactions are.
-    {ok, 404, #{reason := <<"Account not found">>}} ->
-      true;  %% unless we mine extensively, this could happen
-    Other ->
-      Other
-  end.
 
 %% --- Operation: waitforblock ---
 waitforblock_pre(S) ->
@@ -516,7 +552,7 @@ waitforblock_pre(S, [Node]) ->
   lists:member(Node, S#state.http_ready).
 
 waitforblock(Node) ->
-  ok200(wait_blocks(Node, 1, 60*5*1000), height).
+  ok200(wait_blocks(Node, 2, 60*5*1000), height).
 
 %% Now some transactions should be on chain
 waitforblock_next(S, Value, [_Node]) ->
@@ -555,7 +591,6 @@ transaction_pool(Node) ->
                 %% Not sure all transactions in pool must be signed???
                 aetx_sign:tx(aetx_sign:deserialize_from_binary(Trans))
               end || #{tx := T} <- Transactions ],
-      %% io:format("\n\nTransactions ~p\nTxs ~p\n\n", [Transactions, Txs]),
       Txs;
     Res ->
       Res
@@ -589,20 +624,28 @@ top_post(_S, [_Node], Res) ->
   end.
 
 
-
-
 %%% -----------------------------------------------------------------------
 
 final_balances([], _) ->
   {undefined, []};
-final_balances(Nodes, PubKeys) ->
+final_balances(Nodes, Names) ->
   TxPools = lists:append([ transaction_pool(Node) || Node <- Nodes ]),
-  Balances = [ balance(Node, PubKey) || Node <- Nodes, PubKey <- PubKeys ],
+  Balances = [ balance(Node, Name) || Node <- Nodes, Name <- Names ],
   {lists:usort(Balances), lists:usort(TxPools)}.
 
+final_transactions([], _) ->
+  [];
+final_transactions([Node|_], Hashes) ->
+  %% eqc:format("check tx_hases ~p\n", [Hashes]),
+  [ ok200(request(Node, 'GetTx', #{tx_hash => eqc_symbolic:eval(TxHash), tx_encoding => json}), transaction) || TxHash <- Hashes ].
+
+
+%% Start using GetAccountNonce when available!
 try_get_nonce(Node, PubKey) ->
   try
-    {ok, 200, #{transactions := Txs}} = txs(Node, PubKey),
+    {ok, 200, #{transactions := Txs}} =
+      request(Node, 'GetAccountTransactions',  #{account_pubkey => aec_base58c:encode(account_pubkey, PubKey),
+                                                 tx_encoding => json}),
     case Txs of
       [] -> 0;
       [#{tx := Tx}|_] -> 
@@ -621,7 +664,7 @@ tag(Tag, Other) -> {Tag, Other}.
 
 weight(_S, open_channel) -> 10;
 weight(_S, deposit) -> 5;
-weight(_S, add_account) -> 5;
+weight(S, add_account) -> 1;
 weight(_S, close_mutual) -> 3;
 weight(_S, start) -> 1;
 weight(_S, stop) -> 0;
@@ -633,11 +676,21 @@ gen_key_pair() ->
     return(crypto:generate_key(ecdh, crypto:ec_curve(secp256k1))).
 
 account_gen(NatGen) ->
-    ?LET(Balance, NatGen,
-         begin
-           #{ public := PubKey, secret := PrivKey} = enacl:sign_keypair(),
-           #account{ pubkey = PubKey, balance = Balance, privkey = PrivKey }
-         end).
+    ?LET({[Name], Balance}, {eqc_erlang_program:words(1), NatGen}, {Name, Balance}).
+
+check_ttl(S, {Height, _}) ->
+  Height == S#state.height;
+check_ttl(_S, optional) ->
+  true.
+
+optional_ttl(Tx) ->
+  case maps:get(ttl, Tx) of
+    optional -> 
+      maps:without([ttl], Tx);
+    {Height, DTTL} ->
+      Tx#{ttl => Height + DTTL}
+  end.
+
 
 %% -- Property ---------------------------------------------------------------
 
@@ -667,7 +720,6 @@ prop_uat() ->
                                    }, aest_uat).
 
 %% One could run this with an arbitrary generated account 
-%% Patron = noshrink(account_gen(1000000))
 prop_patron(FinalSleep, Patron, Backend) ->
   eqc:dont_print_counterexample(
   ?LET(Shrinking, parameter(shrinking, false),
@@ -694,13 +746,18 @@ prop_patron(FinalSleep, Patron, Backend) ->
     http_ready(NodeName),
     PatronNonce = try_get_nonce(NodeName, Patron#account.pubkey),
     eqc:format("Patron nonce ~p\n", [PatronNonce]),
+    Table = ets:new(accounts, [named_table]),
+    ets:insert(accounts, {patron, Patron#account{nonce = PatronNonce}}),
 
     {H, S, Res} = run_commands(Cmds, [{patron, Patron#account{nonce = PatronNonce}}]),
     wait_blocks(NodeName, 2, FinalSleep),
 
-    {FinalBalances, TransactionPool} = final_balances(S#state.http_ready, [ A#account.pubkey || A <-S#state.accounts]),
+    final_transactions(S#state.http_ready, S#state.tx_hashes),  %% WHY IS S symbolic???? {call, ?MODULE, ok200, _} not evaluated
+
+    {FinalBalances, TransactionPool} = final_balances(S#state.http_ready, [ A#user.name || A <-S#state.accounts]),
     eqc:format("Balances ~p\n", [FinalBalances]),
 
+    ets:delete(Table),
     aest_nodes_mgr:stop(),
     if Backend =/= aest_uat -> timer:sleep(10000);
        true -> ok
@@ -723,9 +780,13 @@ prop_commands() ->
 %% -- helper functions
 
 request(Node, Id, Params) ->
+  Hidden =  ['GetTop', 'GetAccountBalance', 'GetAccountTransactions', 'GetTxs', 'PostTx', 'GetTx'],
   aehttp_client:request(Id, Params, 
                         [{ext_http, aest_nodes_mgr:get_service_address(Node, ext_http)}, 
-                         {ct_log, fun(Fmt, Args) -> io:format(Fmt++["\n"], Args) end }]).
+                         {ct_log, case not lists:member(Id, Hidden) of
+                                      true -> fun(Fmt, Args) -> io:format(Fmt++["\n"], Args) end;
+                                      false -> false
+                                  end}]).
 
 
 wait_blocks(Node, N, Timeout) ->
