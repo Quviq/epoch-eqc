@@ -45,6 +45,7 @@
                   ttl,
                   tx}). 
 
+-define(DELTA_TTL, 40).  %% that is 200 minutes on UAT
 
 initial_state() ->
   #state{}.
@@ -139,7 +140,7 @@ add_account_args(S) ->
   noshrink(
   [elements(S#state.http_ready), 
    patron, S#state.nonce_delta, account_gen(oneof([71, 200, 500, 1000, 0])), 
-   choose(1,5), ttl(S, 200), <<"quickcheck">>]).
+   fee(), ttl(S, ?DELTA_TTL), <<"quickcheck">>]).
 
 add_account_pre(S, [Node, _Sender, Nonce, {Name, _Balance}, Fee, TTL, _Payload]) ->
   not lists:keymember(Name, #user.name, S#state.accounts) andalso
@@ -193,7 +194,7 @@ open_channel_pre(S) ->
   S#state.http_ready =/= [] andalso length(S#state.accounts) > 1.
 
 open_channel_args(S) ->
-  ?LET({Initiator, Fee}, {elements(S#state.accounts), choose(1,5)},
+  ?LET({Initiator, Fee}, {elements(S#state.accounts), fee()},
   ?LET({Responder, Reserve},
        {elements(S#state.accounts -- [Initiator]), 
         at_most(Initiator#user.balance)},
@@ -203,7 +204,7 @@ open_channel_args(S) ->
           initiator_amount => at_most(Initiator#user.balance - Fee),
           responder_amount => at_most(Responder#user.balance),
           lock_period => choose(0,5), %% lock period
-          ttl => ttl(S, 200), %% ttl (we need height for this)
+          ttl => ttl(S, ?DELTA_TTL), %% ttl (we need height for this)
           fee => Fee, %% fee
           channel_reserve => Reserve,
           push_amount => noshrink(choose(0,200)),
@@ -321,8 +322,8 @@ deposit_args(S) ->
           #{from => Party,
             channel_id => Channel#channel.id,
             amount => at_most(From#user.balance),
-            ttl => ttl(S, 200),
-            fee => choose(1,5),
+            ttl => ttl(S, ?DELTA_TTL),
+            fee => fee(),
             nonce => From#user.nonce + 1}
          ]
        end).
@@ -408,15 +409,15 @@ close_mutual_pre(S) ->
     lists:keymember(created, #channel.status, S#state.channels).
 
 close_mutual_args(S) ->
-  ?LET({Channel, Fee}, {elements([ Ch || #channel{status = created} = Ch <- S#state.channels]), choose(1,5)},
+  ?LET({Channel, Fee}, {elements([ Ch || #channel{status = created} = Ch <- S#state.channels]), fee()},
        begin
          Account = channel_account(S, Channel, initiator),
            ?LET(Settle, at_most(Channel#channel.total - Fee),
                 [elements(S#state.http_ready),
                  #{channel_id => Channel#channel.id,
                    initiator_amount => Settle,
-                   ttl => ttl(S, 200), %% ttl (we need height for this)
                    responder_amount => Channel#channel.total - Fee - Settle ,
+                   ttl => ttl(S, ?DELTA_TTL), %% ttl (we need height for this)
                    fee => Fee,
                    nonce => Account#user.nonce + 1}
                 ])
@@ -683,6 +684,8 @@ optional_ttl(Tx) ->
       Tx#{ttl => Height + DTTL}
   end.
 
+fee() ->
+  choose(1,5).
 
 %% -- Property ---------------------------------------------------------------
 
