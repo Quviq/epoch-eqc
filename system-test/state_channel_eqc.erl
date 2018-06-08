@@ -402,6 +402,104 @@ deposit_post(_S, [_Node, _], Res) ->
 deposit_features(_S, [_, #{from := Party}], _Res) ->
   [{channel_deposit, Party}].
 
+%% --- Operation: withdraw ---
+withdraw_pre(S) ->
+  S#state.http_ready =/= [] andalso 
+    lists:keymember(created, #channel.status, S#state.channels).
+
+withdraw_args(S) ->
+  ?LET({Channel, Party, Fee}, {elements([ Ch || #channel{status = created} = Ch <- S#state.channels]), 
+                               oneof([initiator, responder]), fee()},
+       begin
+         From = channel_account(S, Channel, Party),
+         [elements(S#state.http_ready),
+          #{to => Party,
+            channel_id => Channel#channel.id,
+            amount => at_most(Channel#channel.total),
+            ttl => ttl(S, ?DELTA_TTL),
+            fee => Fee,
+            nonce => From#user.nonce + 1}
+         ]
+       end).
+
+withdraw_pre(S, [Node,
+                #{channel_id := Ch, to := Party, nonce := Nonce, ttl := TTL} = Tx]) ->
+  Channel = lists:keyfind(Ch, #channel.id, S#state.channels),
+  Account = channel_account(S, Channel, Party),
+  lists:member(Node, S#state.http_ready) andalso
+    Channel /= false andalso
+    Channel#channel.status == created andalso 
+    Account /= false andalso Account#user.nonce + 1 == Nonce andalso
+    check_ttl(S, TTL) andalso
+    withdraw_valid(S, Tx).
+
+withdraw_valid(S, #{channel_id := Ch, to := Party, amount := Amount, fee := Fee}) ->
+  Account = channel_account(S, Ch, Party),
+  Channel = lists:keyfind(Ch, #channel.id, S#state.channels),
+  Fee >= aec_governance:minimum_tx_fee() andalso 
+    Account#user.balance >= Fee andalso
+    Channel#channel.total =< Amount.
+
+withdraw_adapt(S, [Node, #{to := Party, channel_id := Ch, ttl := TTL} = Tx]) ->
+  case channel_account(S, Ch, Party) of
+    false -> false;
+    Account ->
+      [Node, Tx#{nonce => Account#user.nonce + 1, ttl => ttl(S, TTL)}]
+  end.
+
+withdraw(Node, #{to := Party, channel_id := Ch} = Tx) ->
+  {Initiator, OrgNonce, Responder} = Ch,
+  [{_, In}] = ets:lookup(accounts, Initiator), 
+  [{_, Resp}] = ets:lookup(accounts, Responder), 
+  Id = aesc_channels:id(In#account.pubkey, OrgNonce, Resp#account.pubkey),
+  From = if Party == initiator -> In;
+            Party == responder -> Resp
+         end,
+  EncodedTx = 
+    optional_ttl(Tx#{to => aec_base58c:encode(account_pubkey, From#account.pubkey),
+                     channel_id => aec_base58c:encode(channel, Id)}),
+  case request(Node, 'PostChannelWithdrawal', EncodedTx) of
+    {ok, 200, #{tx := TxObject}} ->
+      {ok, Bin} = aec_base58c:safe_decode(transaction, TxObject),
+      InitiatorSignedTx = aetx_sign:sign(aetx:deserialize_from_binary(Bin), 
+                                [In#account.privkey]),
+      ResponderSignedTx = aetx_sign:sign(aetx:deserialize_from_binary(Bin), 
+                                [Resp#account.privkey]),
+      BothSigned = 
+        aetx_sign:add_signatures(ResponderSignedTx, aetx_sign:signatures(InitiatorSignedTx)),
+      Transaction = aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(BothSigned)),
+      request(Node, 'PostTx', #{tx => Transaction});
+    Error ->
+      Error
+  end.
+
+%% Due to adapt, Channel is the one we have in the state
+withdraw_next(S, Value, [_Node, #{channel_id := Ch, to := Party, fee := Fee, amount := Amount, nonce := Nonce}]) ->
+  Channel = lists:keyfind(Ch, #channel.id, S#state.channels),
+  Account = channel_account(S, Channel, Party),
+  Accounts = 
+    lists:keyreplace(Account#user.name, #user.name, 
+                     S#state.accounts, 
+                     Account#user{ balance = Account#user.balance - Fee + Amount,
+                                   nonce = Nonce }),
+  NewChannel =
+    Channel#channel{total = Channel#channel.total - Amount},
+  Channels = lists:keyreplace(Ch, #channel.id, S#state.channels, NewChannel),
+  S#state{ channels = Channels,
+           tx_hashes = [{call, ?MODULE, ok200, [Value, tx_hash]} | S#state.tx_hashes],
+           accounts = Accounts }.
+
+withdraw_post(_S, [_Node, _], Res) ->
+  case Res of
+    {ok, 200, #{tx_hash := _}} -> true;
+    _ -> 
+      Res
+  end.
+
+withdraw_features(_S, [_, #{to := Party}], _Res) ->
+  [{channel_withdraw, Party}].
+
+
 
 %% --- Operation: close_mutual ---
 close_mutual_pre(S) ->
@@ -657,6 +755,7 @@ tag(Tag, Other) -> {Tag, Other}.
 
 weight(S, open_channel) -> if length(S#state.accounts) > 1 -> 100; true -> 0 end;
 weight(S, deposit) -> if length(S#state.channels) > 0 -> 50; true -> 0 end;
+weight(S, withdraw) -> if length(S#state.channels) > 0 -> 50; true -> 0 end;
 weight(_S, add_account) -> 10;
 weight(S, close_mutual) -> if length(S#state.channels) > 0 -> 30; true -> 0 end;
 weight(_S, start) -> 1;
