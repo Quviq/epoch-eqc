@@ -37,9 +37,8 @@
                   id, 
                   port,
                   initiator,
-                  initiator_amount,
+                  total,
                   responder,
-                  responder_amount,
                   lock_period,
                   channel_reserve,
                   push_amount,
@@ -276,8 +275,7 @@ open_channel_next(S, Value, [_Node, #{initiator := In, responder := Resp,
                                                      id = {In, Nonce, Resp},
                                                      initiator = In,
                                                      responder = Resp,
-                                                     initiator_amount = maps:get(initiator_amount, Tx),
-                                                     responder_amount = maps:get(responder_amount, Tx),
+                                                     total = maps:get(initiator_amount, Tx) + maps:get(responder_amount, Tx),
                                                      lock_period = maps:get(lock_period, Tx),
                                                      channel_reserve = maps:get(channel_reserve, Tx),
                                                      push_amount = maps:get(push_amount, Tx),
@@ -362,7 +360,7 @@ deposit(Node, #{from := Party, channel_id := Ch} = Tx) ->
          end,
   EncodedTx = 
     optional_ttl(Tx#{from => aec_base58c:encode(account_pubkey, From#account.pubkey),
-                         channel_id => aec_base58c:encode(channel, Id)}),
+                     channel_id => aec_base58c:encode(channel, Id)}),
   case request(Node, 'PostChannelDeposit', EncodedTx) of
     {ok, 200, #{tx := TxObject}} ->
       {ok, Bin} = aec_base58c:safe_decode(transaction, TxObject),
@@ -387,13 +385,7 @@ deposit_next(S, Value, [_Node, #{channel_id := Ch, from := Party, fee := Fee, am
                      S#state.accounts, 
                      Account#user{ balance = Account#user.balance - (Fee + Amount),
                                    nonce = Nonce }),
-  NewChannel = 
-    case Party of
-      initiator ->
-        Channel#channel{initiator_amount = Channel#channel.initiator_amount + Amount};
-      responder ->
-        Channel#channel{responder_amount = Channel#channel.responder_amount + Amount}
-    end,
+  NewChannel = Channel#channel{total = Channel#channel.total + Amount},
   Channels = lists:keyreplace(Ch, #channel.id, S#state.channels, NewChannel),
   S#state{ channels = Channels,
            tx_hashes = [{call, ?MODULE, ok200, [Value, tx_hash]} | S#state.tx_hashes],
@@ -407,7 +399,7 @@ deposit_post(_S, [_Node, _], Res) ->
   end.
 
 deposit_features(_S, [_, #{from := Party}], _Res) ->
-  [{deposit, Party}].
+  [{channel_deposit, Party}].
 
 
 %% --- Operation: close_mutual ---
@@ -418,15 +410,13 @@ close_mutual_pre(S) ->
 close_mutual_args(S) ->
   ?LET({Channel, Fee}, {elements([ Ch || #channel{status = created} = Ch <- S#state.channels]), choose(1,5)},
        begin
-         InAmount = Channel#channel.initiator_amount,
-         RespAmount = Channel#channel.responder_amount,
          Account = channel_account(S, Channel, initiator),
-           ?LET(Settle, at_most(InAmount + RespAmount - Fee),
+           ?LET(Settle, at_most(Channel#channel.total - Fee),
                 [elements(S#state.http_ready),
                  #{channel_id => Channel#channel.id,
                    initiator_amount => Settle,
-                   responder_amount => InAmount + RespAmount - Fee - Settle ,
                    ttl => ttl(S, 200), %% ttl (we need height for this)
+                   responder_amount => Channel#channel.total - Fee - Settle ,
                    fee => Fee,
                    nonce => Account#user.nonce + 1}
                 ])
@@ -446,7 +436,7 @@ close_mutual_pre(S, [Node,
 close_mutual_valid(Channel, #{initiator_amount := InAmount, responder_amount := RespAmount, fee := Fee}) ->
   Fee >= aec_governance:minimum_tx_fee() andalso 
   InAmount + RespAmount >= Fee andalso
-    Channel#channel.initiator_amount + Channel#channel.responder_amount == InAmount + RespAmount + Fee.
+    Channel#channel.total == InAmount + RespAmount + Fee.
 
 %% If the channel does not exist, we cannot replace it
 %% Adapting Channel Id and other values results in too complex code
