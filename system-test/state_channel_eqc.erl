@@ -664,10 +664,10 @@ tag(_Tag, true) -> true;
 tag(Tag, false) -> Tag;
 tag(Tag, Other) -> {Tag, Other}. 
 
-weight(_S, open_channel) -> 10;
-weight(_S, deposit) -> 5;
-weight(_S, add_account) -> 1;
-weight(_S, close_mutual) -> 3;
+weight(S, open_channel) -> if length(S#state.accounts) > 1 -> 100; true -> 0 end;
+weight(S, deposit) -> if length(S#state.channels) > 0 -> 50; true -> 0 end;
+weight(_S, add_account) -> 10;
+weight(S, close_mutual) -> if length(S#state.channels) > 0 -> 30; true -> 0 end;
 weight(_S, start) -> 1;
 weight(_S, stop) -> 0;
 weight(_S, _) -> 1.
