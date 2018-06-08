@@ -540,8 +540,8 @@ waitforblock_args(S) ->
 waitforblock_pre(S, [Node, Hashes]) ->
   lists:member(Node, S#state.http_ready) andalso Hashes == S#state.tx_hashes.
 
-waitforblock_adapt(S, [_Node, _Hashes]) ->
-  waitforblock_args(S).
+waitforblock_adapt(S, [Node, _Hashes]) ->
+  [Node, S#state.tx_hashes].
   
 waitforblock(Node, Hashes) ->
   ok200(wait_blocks(Node, 1, Hashes, 60*5*1000), height).
