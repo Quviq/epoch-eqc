@@ -6,9 +6,6 @@
 %%%      The Patron is the account that has a lot of tokens and we start by reading 
 %%%      that account and creating working accounts from it.
 %%%
-%%%      run_commands environment contains {patron, PatronAccount} refered to as
-%%%      {var, patron} in the test case. This makes it possible to re-run a test
-%%%      on a different (or longer) chain.
 %%%
 %%% @end
 %%% Created : 17 May 2018 by Thomas Arts 
@@ -542,20 +539,24 @@ balance_post(_S, [_, _Name], Res) ->
 
 
 %% --- Operation: waitforblock ---
+%% Only wait if there are transactions in the mempool.
 waitforblock_pre(S) ->
   S#state.http_ready =/= [].
 
 waitforblock_args(S) ->
-  [elements(S#state.http_ready)].
+  [elements(S#state.http_ready), S#state.tx_hashes].
 
-waitforblock_pre(S, [Node]) ->
-  lists:member(Node, S#state.http_ready).
+waitforblock_pre(S, [Node, Hashes]) ->
+  lists:member(Node, S#state.http_ready) andalso Hashes == S#state.tx_hashes.
 
-waitforblock(Node) ->
-  ok200(wait_blocks(Node, 2, 60*5*1000), height).
+waitforblock_adapt(S, [_Node, _Hashes]) ->
+  waitforblock_args(S).
+  
+waitforblock(Node, Hashes) ->
+  ok200(wait_blocks(Node, 1, Hashes, 60*5*1000), height).
 
 %% Now some transactions should be on chain
-waitforblock_next(S, Value, [_Node]) ->
+waitforblock_next(S, Value, [_Node, _]) ->
   Channels =
     [ case Channel#channel.status of
         open ->
@@ -566,10 +567,10 @@ waitforblock_next(S, Value, [_Node]) ->
           height = Value %% postcondition guarantees that this is an integer at runtime.
          }.
 
-waitforblock_post(_S, [_Node], Res) ->
+waitforblock_post(_S, [_Node, _], Res) ->
   is_integer(Res).
 
-waitforblock_features(S, [_Node], _Res) ->
+waitforblock_features(S, [_Node, _], _Res) ->
   [ channel_created_on_chain || lists:keymember(open, #channel.status, S#state.channels) ].
 
 
@@ -627,17 +628,18 @@ top_post(_S, [_Node], Res) ->
 %%% -----------------------------------------------------------------------
 
 final_balances([], _) ->
-  {undefined, []};
+  undefined;
 final_balances(Nodes, Names) ->
-  TxPools = lists:append([ transaction_pool(Node) || Node <- Nodes ]),
   Balances = [ balance(Node, Name) || Node <- Nodes, Name <- Names ],
-  {lists:usort(Balances), lists:usort(TxPools)}.
+  lists:usort(Balances).
 
+%% Return all transactions that we genearated but are not yet on chain
 final_transactions([], _) ->
   [];
 final_transactions([Node|_], Hashes) ->
-  %% eqc:format("check tx_hases ~p\n", [Hashes]),
-  [ ok200(request(Node, 'GetTx', #{tx_hash => eqc_symbolic:eval(TxHash), tx_encoding => json}), transaction) || TxHash <- Hashes ].
+  Objs = 
+    [ ok200(request(Node, 'GetTx', #{tx_hash => eqc_symbolic:eval(TxHash), tx_encoding => json}), transaction) || TxHash <- Hashes ],
+  [ Obj || #{block_height := -1} = Obj <-Objs ].
 
 
 %% Start using GetAccountNonce when available!
@@ -646,9 +648,9 @@ try_get_nonce(Node, PubKey) ->
     {ok, 200, #{transactions := Txs}} =
       request(Node, 'GetAccountTransactions',  #{account_pubkey => aec_base58c:encode(account_pubkey, PubKey),
                                                  tx_encoding => json}),
-    case Txs of
+    case [ Tx || #{tx := Tx, block_height := H} <- Txs, H /= -1 ] of
       [] -> 0;
-      [#{tx := Tx}|_] -> 
+      [Tx|_] -> 
         maps:get(nonce, Tx)
     end
   catch
@@ -664,7 +666,7 @@ tag(Tag, Other) -> {Tag, Other}.
 
 weight(_S, open_channel) -> 10;
 weight(_S, deposit) -> 5;
-weight(S, add_account) -> 1;
+weight(_S, add_account) -> 1;
 weight(_S, close_mutual) -> 3;
 weight(_S, start) -> 1;
 weight(_S, stop) -> 0;
@@ -708,7 +710,7 @@ prop_transactions() ->
                                    }, aest_docker).
 
 prop_uat() ->
-  prop_patron(10000, #account{ pubkey = <<206,167,173,228,112,201,249,157,157,78,64,8,128,168,111,
+  prop_patron(15*60*1000, #account{ pubkey = <<206,167,173,228,112,201,249,157,157,78,64,8,128,168,111,
                                                  29,73,187,68,75,98,241,26,158,187,100,187,207,235,115,
                                                  254,243>>,
                                       privkey = <<230,169,29,99,60,119,207,87,113,50,157,51,84,179,188,
@@ -749,12 +751,14 @@ prop_patron(FinalSleep, Patron, Backend) ->
     Table = ets:new(accounts, [named_table]),
     ets:insert(accounts, {patron, Patron#account{nonce = PatronNonce}}),
 
-    {H, S, Res} = run_commands(Cmds, [{patron, Patron#account{nonce = PatronNonce}}]),
-    wait_blocks(NodeName, 2, FinalSleep),
+    {H, S, Res} = run_commands(Cmds, [{patron_nonce, PatronNonce + 1}]),
+    wait_blocks(NodeName, 1, S#state.tx_hashes, FinalSleep),  
+    wait_blocks(NodeName, 1, S#state.tx_hashes, FinalSleep),  %% this is a NOP if pool is empty
 
-    final_transactions(S#state.http_ready, S#state.tx_hashes),  %% WHY IS S symbolic???? {call, ?MODULE, ok200, _} not evaluated
+    FinalTransactions = final_transactions(S#state.http_ready, S#state.tx_hashes),
+    eqc:format("Transaction pool: ~p\n", [FinalTransactions]),
 
-    {FinalBalances, TransactionPool} = final_balances(S#state.http_ready, [ A#user.name || A <-S#state.accounts]),
+    FinalBalances = final_balances(S#state.http_ready, [ A#user.name || A <-S#state.accounts]),
     eqc:format("Balances ~p\n", [FinalBalances]),
 
     ets:delete(Table),
@@ -769,7 +773,7 @@ prop_patron(FinalSleep, Patron, Backend) ->
       aggregate(call_features(H),
         pretty_commands(?MODULE, Cmds, {H, S, Res},
                         conjunction([{result, Res == ok},
-                                     {transactions, equals([ Tx || Tx <- TransactionPool ], [])}
+                                     {transactions, equals([ Tx || Tx <- FinalTransactions ], [])}
                                     ]))))))
   end))))).
 
@@ -789,10 +793,17 @@ request(Node, Id, Params) ->
                                   end}]).
 
 
-wait_blocks(Node, N, Timeout) ->
+wait_blocks(Node, N, Hashes, Timeout) ->
+  Pool = final_transactions([Node], Hashes),
   {ok, 200, Top} = gettop(Node, 0, erlang:system_time(millisecond) + Timeout),
-  H = maps:get(height, Top),
-  gettop(Node, H+N, erlang:system_time(millisecond) + Timeout).
+  case Pool of
+    [] ->
+      %% We're done, no transactions hanging
+      {ok, 200, Top};
+    _ ->
+      H = maps:get(height, Top),
+      gettop(Node, H+N, erlang:system_time(millisecond) + Timeout)
+  end.
 
 ok200(Resp, Field) ->
   case ok200(Resp) of
