@@ -45,7 +45,7 @@
                   ttl,
                   tx}). 
 
--define(DELTA_TTL, 40).  %% that is 200 minutes on UAT
+-define(DELTA_TTL, 20).  %% times 5? minutes on UAT
 
 initial_state() ->
   #state{}.
@@ -718,8 +718,9 @@ top_post(_S, [_Node], Res) ->
 
 final_balances([], _) ->
   undefined;
-final_balances(Nodes, Names) ->
-  Balances = [ balance(Node, Name) || Node <- Nodes, Name <- Names ],
+final_balances(Nodes, Accounts) ->
+  Balances = [ {Account#user.name, ok200(balance(Node, Account#user.name)), Account#user.balance} 
+               || Node <- Nodes, Account <- Accounts ],
   lists:usort(Balances).
 
 %% Return all transactions that we genearated but are not yet on chain
@@ -802,7 +803,7 @@ prop_transactions() ->
                                    }, aest_docker).
 
 prop_uat() ->
-  prop_patron(15*60*1000, #account{ pubkey = <<206,167,173,228,112,201,249,157,157,78,64,8,128,168,111,
+  prop_patron(7*60*1000, #account{ pubkey = <<206,167,173,228,112,201,249,157,157,78,64,8,128,168,111,
                                                  29,73,187,68,75,98,241,26,158,187,100,187,207,235,115,
                                                  254,243>>,
                                       privkey = <<230,169,29,99,60,119,207,87,113,50,157,51,84,179,188,
@@ -850,7 +851,7 @@ prop_patron(FinalSleep, Patron, Backend) ->
     FinalTransactions = final_transactions(S#state.http_ready, S#state.tx_hashes),
     eqc:format("Transaction pool: ~p\n", [FinalTransactions]),
 
-    FinalBalances = final_balances(S#state.http_ready, [ A#user.name || A <-S#state.accounts]),
+    FinalBalances = final_balances(S#state.http_ready, S#state.accounts),
     eqc:format("Balances ~p\n", [FinalBalances]),
 
     ets:delete(Table),
