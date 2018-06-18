@@ -735,14 +735,9 @@ final_transactions([Node|_], Hashes) ->
 %% Start using GetAccountNonce when available!
 try_get_nonce(Node, PubKey) ->
   try
-    {ok, 200, #{transactions := Txs}} =
-      request(Node, 'GetAccountTransactions',  #{account_pubkey => aec_base58c:encode(account_pubkey, PubKey),
-                                                 tx_encoding => json}),
-    case [ Tx || #{tx := Tx, block_height := H} <- Txs, H /= -1 ] of
-      [] -> 0;
-      [Tx|_] -> 
-        maps:get(nonce, Tx)
-    end
+    {ok, 200, Nonce} =
+      request(Node, 'GetAccountNonce',  #{account_pubkey => aec_base58c:encode(account_pubkey, PubKey)}),
+    Nonce
   catch
     _:Reason -> 
       eqc:format("error getting patron nonce ~p -> ~p\n", [Node, Reason]),
