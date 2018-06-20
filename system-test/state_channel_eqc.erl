@@ -45,7 +45,7 @@
                   ttl,
                   tx}). 
 
--define(DELTA_TTL, 20).  %% times 5? minutes on UAT
+-define(DELTA_TTL, 10).  %% times 5? minutes on UAT
 
 initial_state() ->
   #state{}.
@@ -62,8 +62,8 @@ gen_ttl(Height) ->
 
 ttl(S, N) when is_integer(N) ->
   {S#state.height, N};
-ttl(S, {_H, N}) ->
-  {S#state.height, N};
+ttl(S, {_H, Gen}) ->
+  {S#state.height, Gen};
 ttl(_S, optional) ->
   optional.
 
