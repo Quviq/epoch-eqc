@@ -43,7 +43,8 @@
                   channel_reserve,
                   push_amount,
                   ttl,
-                  tx}). 
+                  round = 0  %% this is also placeholder for computing state hash
+                 }). 
 
 -define(DELTA_TTL, 10).  %% times 5? minutes on UAT
 
@@ -243,9 +244,11 @@ open_channel_adapt(S, [Node, #{initiator := Initiator,  ttl := TTL} = Tx]) ->
 open_channel(Node, #{initiator := In, responder := Resp} = Tx) ->
   [{_, Initiator}] = ets:lookup(accounts, In),
   [{_, Responder}] = ets:lookup(accounts, Resp),
+  Round = 0,
   EncodedTx =
     optional_ttl(Tx#{initiator => aec_base58c:encode(account_pubkey, Initiator#account.pubkey),
-                     responder => aec_base58c:encode(account_pubkey, Responder#account.pubkey)}),
+                     responder => aec_base58c:encode(account_pubkey, Responder#account.pubkey),
+                     state_hash => aec_base58c:encode(state, <<Round:256>>)}),
   case request(Node, 'PostChannelCreate', EncodedTx) of
     {ok, 200, #{tx := TxObject}} ->
       {ok, Bin} = aec_base58c:safe_decode(transaction, TxObject),
@@ -324,7 +327,8 @@ deposit_args(S) ->
             amount => at_most(From#user.balance),
             ttl => ttl(S, ?DELTA_TTL),
             fee => fee(),
-            nonce => From#user.nonce + 1}
+            nonce => From#user.nonce + 1,
+            round => Channel#channel.round + 1 }
          ]
        end).
 
@@ -344,6 +348,7 @@ deposit_valid(S, #{channel_id := Ch, from := Party, amount := Amount, fee := Fee
   Fee >= aec_governance:minimum_tx_fee() andalso 
     Account#user.balance >= Amount + Fee.
 
+%% channel.round is monotonically increasing, no need to adapt when leaving out some
 deposit_adapt(S, [Node, #{from := Party, channel_id := Ch, ttl := TTL} = Tx]) ->
   case channel_account(S, Ch, Party) of
     false -> false;
@@ -351,7 +356,7 @@ deposit_adapt(S, [Node, #{from := Party, channel_id := Ch, ttl := TTL} = Tx]) ->
       [Node, Tx#{nonce => Account#user.nonce + 1, ttl => ttl(S, TTL)}]
   end.
 
-deposit(Node, #{from := Party, channel_id := Ch} = Tx) ->
+deposit(Node, #{from := Party, channel_id := Ch, round := Round} = Tx) ->
   {Initiator, OrgNonce, Responder} = Ch,
   [{_, In}] = ets:lookup(accounts, Initiator), 
   [{_, Resp}] = ets:lookup(accounts, Responder), 
@@ -361,7 +366,8 @@ deposit(Node, #{from := Party, channel_id := Ch} = Tx) ->
          end,
   EncodedTx = 
     optional_ttl(Tx#{from => aec_base58c:encode(account_pubkey, From#account.pubkey),
-                     channel_id => aec_base58c:encode(channel, Id)}),
+                     channel_id => aec_base58c:encode(channel, Id),
+                     state_hash => aec_base58c:encode(state, <<Round:256>>)}),
   case request(Node, 'PostChannelDeposit', EncodedTx) of
     {ok, 200, #{tx := TxObject}} ->
       {ok, Bin} = aec_base58c:safe_decode(transaction, TxObject),
@@ -378,7 +384,8 @@ deposit(Node, #{from := Party, channel_id := Ch} = Tx) ->
   end.
 
 %% Due to adapt, Channel is the one we have in the state
-deposit_next(S, Value, [_Node, #{channel_id := Ch, from := Party, fee := Fee, amount := Amount, nonce := Nonce}]) ->
+deposit_next(S, Value, [_Node, #{channel_id := Ch, from := Party, fee := Fee, amount := Amount, 
+                                 nonce := Nonce, round := Round}]) ->
   Channel = lists:keyfind(Ch, #channel.id, S#state.channels),
   Account = channel_account(S, Channel, Party),
   Accounts = 
@@ -386,7 +393,7 @@ deposit_next(S, Value, [_Node, #{channel_id := Ch, from := Party, fee := Fee, am
                      S#state.accounts, 
                      Account#user{ balance = Account#user.balance - (Fee + Amount),
                                    nonce = Nonce }),
-  NewChannel = Channel#channel{total = Channel#channel.total + Amount},
+  NewChannel = Channel#channel{total = Channel#channel.total + Amount, round = Round},
   Channels = lists:keyreplace(Ch, #channel.id, S#state.channels, NewChannel),
   S#state{ channels = Channels,
            tx_hashes = [{call, ?MODULE, ok200, [Value, tx_hash]} | S#state.tx_hashes],
@@ -418,7 +425,8 @@ withdraw_args(S) ->
             amount => at_most(Channel#channel.total),
             ttl => ttl(S, ?DELTA_TTL),
             fee => Fee,
-            nonce => From#user.nonce + 1}
+            nonce => From#user.nonce + 1,
+            round => Channel#channel.round }
          ]
        end).
 
@@ -447,7 +455,7 @@ withdraw_adapt(S, [Node, #{to := Party, channel_id := Ch, ttl := TTL} = Tx]) ->
       [Node, Tx#{nonce => Account#user.nonce + 1, ttl => ttl(S, TTL)}]
   end.
 
-withdraw(Node, #{to := Party, channel_id := Ch} = Tx) ->
+withdraw(Node, #{to := Party, channel_id := Ch, round := Round} = Tx) ->
   {Initiator, OrgNonce, Responder} = Ch,
   [{_, In}] = ets:lookup(accounts, Initiator), 
   [{_, Resp}] = ets:lookup(accounts, Responder), 
@@ -457,7 +465,8 @@ withdraw(Node, #{to := Party, channel_id := Ch} = Tx) ->
          end,
   EncodedTx = 
     optional_ttl(Tx#{to => aec_base58c:encode(account_pubkey, From#account.pubkey),
-                     channel_id => aec_base58c:encode(channel, Id)}),
+                     channel_id => aec_base58c:encode(channel, Id),
+                     state_hash => aec_base58c:encode(state, <<Round:256>>)}),
   case request(Node, 'PostChannelWithdrawal', EncodedTx) of
     {ok, 200, #{tx := TxObject}} ->
       {ok, Bin} = aec_base58c:safe_decode(transaction, TxObject),
@@ -474,7 +483,8 @@ withdraw(Node, #{to := Party, channel_id := Ch} = Tx) ->
   end.
 
 %% Due to adapt, Channel is the one we have in the state
-withdraw_next(S, Value, [_Node, #{channel_id := Ch, to := Party, fee := Fee, amount := Amount, nonce := Nonce}]) ->
+withdraw_next(S, Value, [_Node, #{channel_id := Ch, to := Party, fee := Fee, amount := Amount, 
+                                  nonce := Nonce, round := Round}]) ->
   Channel = lists:keyfind(Ch, #channel.id, S#state.channels),
   Account = channel_account(S, Channel, Party),
   Accounts = 
@@ -483,7 +493,7 @@ withdraw_next(S, Value, [_Node, #{channel_id := Ch, to := Party, fee := Fee, amo
                      Account#user{ balance = Account#user.balance - Fee + Amount,
                                    nonce = Nonce }),
   NewChannel =
-    Channel#channel{total = Channel#channel.total - Amount},
+    Channel#channel{total = Channel#channel.total - Amount, round = Round},
   Channels = lists:keyreplace(Ch, #channel.id, S#state.channels, NewChannel),
   S#state{ channels = Channels,
            tx_hashes = [{call, ?MODULE, ok200, [Value, tx_hash]} | S#state.tx_hashes],
@@ -735,7 +745,7 @@ final_transactions([Node|_], Hashes) ->
 %% Start using GetAccountNonce when available!
 try_get_nonce(Node, PubKey) ->
   try
-    {ok, 200, Nonce} =
+    {ok, 200, #{nonce := Nonce}} =
       request(Node, 'GetAccountNonce',  #{account_pubkey => aec_base58c:encode(account_pubkey, PubKey)}),
     Nonce
   catch
@@ -865,9 +875,14 @@ prop_patron(FinalSleep, Patron, Backend) ->
                                     ]))))))
   end))))).
 
-prop_commands() ->
-  ?FORALL(Cmds, commands(?MODULE, #state{nodes = [node1]}),
-          not lists:keymember(close_mutual, 2, command_names(Cmds))).
+prop_commands(Cmd) ->
+  ?FORALL(Cmds, commands(?MODULE, #state{nodes = [node1], running = [node1]}),
+          not lists:keymember(Cmd, 2, command_names(Cmds))).
+
+check(Cmd) ->
+  [Cmds] = eqc:counterexample(eqc:numtests(2000, prop_commands(Cmd))),
+  io:format("------------------------------------------------------------\n"),
+  eqc:check(prop_transactions(), [[node1], Cmds, []]).
 
 %% -- helper functions
 
