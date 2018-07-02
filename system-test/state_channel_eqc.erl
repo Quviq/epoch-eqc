@@ -140,7 +140,7 @@ add_account_pre(S) ->
 add_account_args(S) ->
   noshrink(
   [elements(S#state.http_ready), 
-   patron, S#state.nonce_delta, account_gen(oneof([71, 200, 500, 1000, 0])), 
+   patron, S#state.nonce_delta, account_gen(oneof([71, 200, 500, 1000])), 
    fee(), ttl(S, ?DELTA_TTL), <<"quickcheck">>]).
 
 add_account_pre(S, [Node, _Sender, Nonce, {Name, _Balance}, Fee, TTL, _Payload]) ->
@@ -188,6 +188,154 @@ add_account_features(S, [_Node, _Sender, _Nonce, _Receiver, _Fee, {SeenHeight, D
   [ {accounts, length(S#state.accounts) + 1},
     {accounts, ttl_delta_overshoot, (SeenHeight + DeltaTTL) - S#state.height} ] .
 
+
+%% --- create_account (within 5 seconds) ---
+create_account_pre(S) ->
+  S#state.http_ready =/= [].
+
+create_account_args(S) ->
+  noshrink(
+  [elements(S#state.http_ready), 
+   patron, S#state.nonce_delta, account_gen(oneof([71, 200, 500, 1000])), 
+   fee(), ttl(S, ?DELTA_TTL), <<"quickcheck create account">>]).
+
+create_account_pre(S, [Node, _Sender, Nonce, {Name, _Balance}, Fee, TTL, _Payload]) ->
+  not lists:keymember(Name, #user.name, S#state.accounts) andalso
+    lists:member(Node, S#state.http_ready) andalso 
+    check_ttl(S, TTL) andalso
+    S#state.nonce_delta == Nonce andalso
+    %% and valid
+    Fee >= aec_governance:minimum_tx_fee().
+
+create_account_adapt(S, [Node, Sender, _Nonce, NewAccount, Fee, TTL, Payload]) ->
+  [Node, Sender, S#state.nonce_delta, NewAccount, Fee, ttl(S, TTL), Payload].
+
+create_account(Node, From, Nonce, {Name, Balance}, Fee, {SeenHeight, DeltaTTL}, Payload) ->
+  #{ public := PubKey, secret := PrivKey} = enacl:sign_keypair(),
+  Receiver = #account{ pubkey = PubKey, balance = Balance, privkey = PrivKey },
+  ets:insert(accounts, {Name, Receiver}),
+  [{_, Sender}] = ets:lookup(accounts, From),
+  {ok, Tx} =
+    aec_spend_tx:new(#{ sender    => Sender#account.pubkey,
+                        recipient => Receiver#account.pubkey,
+                        amount    => Receiver#account.balance,   %% we create it with this much
+                        fee       => Fee,
+                        payload   => Payload,
+                        nonce     => Sender#account.nonce + Nonce,
+                        ttl       => SeenHeight + DeltaTTL
+                        }),
+  SignedTx = aetx_sign:sign(Tx, Sender#account.privkey),
+  Transaction = aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(SignedTx)),
+  case ok200(request(Node, 'PostTx', #{tx => Transaction}), tx_hash) of
+    Hash when is_binary(Hash) ->
+      %% Within 5 seconds the transaction should have been accepted
+      poll_tx_hash(Node, Hash,  erlang:system_time(millisecond) + 5000);
+    Error ->
+       Error
+  end.
+
+create_account_next(S, Value, [_Node, _Sender, _Nonce, {Name, Balance}, _Fee, _TTL, _Payload]) ->
+  %% We assume there are always enough tokens in patron account
+  S#state{ accounts = S#state.accounts ++ [#user{name = Name, balance = Balance, nonce = 0}],
+           nonce_delta = S#state.nonce_delta + 1}.
+
+create_account_post(_S, [_Node, _Sender, _Nonce, _Receiver, _Fee, _TTL, _Payload], Res) ->
+  eq(Res, ok).
+
+
+
+%% --- Operation: pingpong ---
+pingpong_pre(S) ->
+  S#state.http_ready =/= [] andalso length(S#state.accounts) > 1.
+
+pingpong_args(S) ->
+  ?LET({[Account1, Account2 | _], Fee, TTL},
+       {shuffle(S#state.accounts), fee(), ttl(S, ?DELTA_TTL)},
+       [elements(S#state.http_ready), 
+        #{from => Account1#user.name, 
+          from_nonce => Account1#user.nonce + 1, 
+          to => Account2#user.name,
+          to_nonce => Account2#user.nonce + 1,
+          fee => Fee, ttl => TTL}]).
+       
+pingpong_pre(S, [Node, #{from := From, from_nonce := FNonce, to := To,
+                         to_nonce := TNonce, ttl := TTL} = Tx]) ->
+  Account1 = lists:keyfind(From, #user.name, S#state.accounts),
+  Account2 = lists:keyfind(To, #user.name, S#state.accounts),
+  lists:member(Node, S#state.http_ready) andalso 
+    Account1 /= false andalso Account2 /= false andalso
+    Account1#user.nonce + 1 == FNonce andalso
+    Account2#user.nonce + 1 == TNonce andalso
+    check_ttl(S, TTL) andalso 
+    pingpong_valid(S, [Node, Tx]).
+
+pingpong_valid(S, [_Node, #{from := From, to := To, fee := Fee}]) ->
+  Account1 = lists:keyfind(From, #user.name, S#state.accounts),
+  Account2 = lists:keyfind(To, #user.name, S#state.accounts),
+  Fee >= aec_governance:minimum_tx_fee() andalso
+    Account1#user.balance >= Fee + 1 andalso
+    Account2#user.balance >= Fee.
+
+pingpong_adapt(S, [Node, #{from := From, to := To, ttl := TTL} = Tx]) ->
+  case {lists:keyfind(From, #user.name, S#state.accounts), 
+        lists:keyfind(To, #user.name, S#state.accounts)} of
+    {false, _} -> false;
+    {_, false} -> false;
+    {Account1, Account2} ->
+      [Node, Tx#{from_nonce => Account1#user.nonce + 1, to_nonce =>
+                   Account2#user.nonce, ttl => ttl(S, TTL)}]
+  end.
+
+pingpong(Node, #{fee := Fee} = Tx) ->
+  [{_, Account1}] = ets:lookup(accounts, maps:get(from, Tx)),
+  [{_, Account2}] = ets:lookup(accounts, maps:get(to, Tx)),
+  Payload = integer_to_list(aeu_time:now_in_msecs()) ++ " quickcheck",
+  {ok, PingTx} =
+    aec_spend_tx:new(optional_ttl(#{ sender    => Account1#account.pubkey,
+                                     recipient => Account2#account.pubkey,
+                                     amount    => 1,
+                                     fee       => Fee,
+                                     payload   => iolist_to_binary([Payload, " ping"]),
+                                     nonce     => maps:get(from_nonce, Tx),
+                                     ttl       => maps:get(ttl, Tx, optional)
+                                   })),
+  {ok, PongTx} =
+    aec_spend_tx:new(optional_ttl(#{ sender    => Account2#account.pubkey,
+                                     recipient => Account1#account.pubkey,
+                                     amount    => 1,
+                                     fee       => Fee,
+                                     payload   => iolist_to_binary([Payload, " pong"]),
+                                     nonce     => maps:get(to_nonce, Tx),
+                                     ttl       => maps:get(ttl, Tx, optional)
+                                   })),
+  SignedPing = aetx_sign:sign(PingTx, Account1#account.privkey),
+  SignedPong = aetx_sign:sign(PongTx, Account2#account.privkey),
+  [
+   request(Node, 'PostTx', #{tx => aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(SignedPing))}),
+   request(Node, 'PostTx', #{tx => aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(SignedPong))})].
+
+pingpong_next(S, Value, [_Node, #{from := From, from_nonce := FN, 
+                                   to := To, to_nonce := TN, fee := Fee}]) ->
+  Account1 = lists:keyfind(From, #user.name, S#state.accounts),
+  Account2 = lists:keyfind(To, #user.name, S#state.accounts),
+  Accounts = 
+    lists:keyreplace(Account1#user.name, #user.name,
+                     lists:keyreplace(Account2#user.name, #user.name, 
+                                      S#state.accounts, 
+                                      Account2#user{ balance =
+                                   Account2#user.balance - Fee, nonce = TN }),
+                     Account1#user{ balance = Account1#user.balance - Fee,
+                                    nonce = FN }),
+  S#state{accounts = Accounts,
+          tx_hashes = [{call, ?MODULE, ok200s, [Value, tx_hash]} | S#state.tx_hashes]}.
+
+pingpong_post(_S, [_Account1, _Account2], Res) ->
+  case Res of
+    [ {ok, 200, #{tx_hash := _}},
+      {ok, 200, #{tx_hash := _}} ] -> true;
+    _ ->
+      Res
+  end.
 
 
 %% --- Operation: open_channel ---
@@ -608,6 +756,92 @@ close_mutual_features(_S, [_, #{initiator_amount := InAmount, responder_amount :
 
 
 
+
+%% --- Operation: close_solo ---
+close_solo_pre(S) ->
+  S#state.http_ready =/= [] andalso 
+    lists:keymember(created, #channel.status, S#state.channels).
+
+close_solo_args(S) ->
+  ?LET({Channel, Fee, Party}, {elements([ Ch || #channel{status = created} = Ch <- S#state.channels]), fee(), 
+                        oneof([initiator, responder])},
+       begin
+         Account = channel_account(S, Channel, Party),
+         [elements(S#state.http_ready),
+          #{channel_id => Channel#channel.id,
+            from => Party,
+            payload => <<>>,  %% this means cloased according to last on_chain transaction (i.e. Channel)
+            ttl => ttl(S, ?DELTA_TTL), %% ttl (we need height for this)
+            poi => 2,
+            fee => Fee,
+            nonce => Account#user.nonce + 1}
+         ]
+       end).
+
+close_solo_pre(S, [Node, #{channel_id := Ch, nonce := Nonce, ttl := TTL, from := Party} = Tx]) ->
+  Channel = lists:keyfind(Ch, #channel.id, S#state.channels),
+  Account = channel_account(S, Channel, Party),
+  lists:member(Node, S#state.http_ready) andalso
+    Channel /= false andalso  %% Channel#channel.status == created andalso
+    Account /= false andalso Account#user.nonce + 1 == Nonce andalso
+    check_ttl(S, TTL) andalso
+    close_solo_valid(Channel, Tx).
+
+close_solo_valid(_Channel, #{fee := Fee}) ->
+  Fee >= aec_governance:minimum_tx_fee().
+
+%% poi may have to be replaced!
+close_solo_adapt(S, [Node, #{channel_id := Ch, ttl := TTL} = Tx]) ->
+  case channel_account(S, Ch, initiator) of
+    false -> false;
+    Account ->
+      [Node, Tx#{nonce => Account#user.nonce + 1, ttl => ttl(S, TTL)}]
+  end.
+
+close_solo(Node, #{channel_id := Ch, from := Party, poi := Poi} = Tx) ->
+  {Initiator, OrgNonce, Responder} = Ch,
+  [{_, In}] = ets:lookup(accounts, Initiator), 
+  [{_, Resp}] = ets:lookup(accounts, Responder),
+  Id = aesc_channels:id(In#account.pubkey, OrgNonce, Resp#account.pubkey),
+  ProofOfInclusion = poi([{In#account.pubkey, 12},
+                          {Resp#account.pubkey, 14}]),
+  From = if Party == initiator -> In;
+            Party == responder -> Resp
+         end,
+  EncodedTx = 
+    optional_ttl(Tx#{from => aec_base58c:encode(account_pubkey, From#account.pubkey),
+                     channel_id => aec_base58c:encode(channel, Id),
+                     poi => aec_base58c:encode(poi, <<Poi:16>>)}
+                ),
+  case request(Node, 'PostChannelCloseSolo', EncodedTx) of
+    {ok, 200, #{tx := TxObject}} ->
+      {ok, Bin} = aec_base58c:safe_decode(transaction, TxObject),
+      FromSignedTx = aetx_sign:sign(aetx:deserialize_from_binary(Bin), 
+                                    [From#account.privkey]),
+      Transaction = aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(FromSignedTx)),
+      request(Node, 'PostTx', #{tx => Transaction});
+    Error ->
+      Error
+  end.
+
+close_solo_next(S, _Value, [_Node, _Tx]) ->
+  S.
+
+close_solo_post(_S, [_Node, _Tx], Res) ->
+  case Res of
+    {ok, 200, #{tx_hash := _}} -> true;
+    _ -> 
+      Res
+  end.
+
+close_solo_features(S, [_Node, #{channel_id := Ch, fee := Fee}], _Res) ->
+  Channel = lists:keyfind(Ch, #channel.id, S#state.channels),
+  [ fee_more_than_total || Fee > Channel#channel.total ].
+
+
+poi(Accounts) ->  
+  aesc_test_utils:proof_of_inclusion(Accounts).
+
 %% one could add deposit of open, but not created channel, this may or may not return an error channel_id not found.
 
 
@@ -737,8 +971,9 @@ final_balances(Nodes, Accounts) ->
 final_transactions([], _) ->
   [];
 final_transactions([Node|_], Hashes) ->
+  TxHashes = lists:flatten([ eqc_symbolic:eval(TxHash) || TxHash <- Hashes ]),
   Objs = 
-    [ ok200(request(Node, 'GetTx', #{tx_hash => eqc_symbolic:eval(TxHash), tx_encoding => json}), transaction) || TxHash <- Hashes ],
+    [ ok200(request(Node, 'GetTx', #{tx_hash => TxHash, tx_encoding => json}), transaction) || TxHash <- TxHashes ],
   [ Obj || #{block_height := -1} = Obj <-Objs ].
 
 
@@ -761,9 +996,11 @@ tag(Tag, Other) -> {Tag, Other}.
 
 weight(S, open_channel) -> if length(S#state.accounts) > 1 -> 100; true -> 0 end;
 weight(S, deposit) -> if length(S#state.channels) > 0 -> 50; true -> 0 end;
-weight(S, withdraw) -> if length(S#state.channels) > 0 -> 50; true -> 0 end;
+weight(S, withdraw) -> if length(S#state.channels) > 0 -> 80; true -> 0 end;
 weight(_S, add_account) -> 10;
-weight(S, close_mutual) -> if length(S#state.channels) > 0 -> 30; true -> 0 end;
+weight(_S, create_account) -> 1;  %% tests timing
+weight(_S, pingpong) -> 200;
+weight(S, close_mutual) -> if length(S#state.channels) > 0 -> 10; true -> 0 end;
 weight(_S, start) -> 1;
 weight(_S, stop) -> 0;
 weight(_S, _) -> 1.
@@ -850,8 +1087,10 @@ prop_patron(FinalSleep, Patron, Backend) ->
     ets:insert(accounts, {patron, Patron#account{nonce = PatronNonce}}),
 
     {H, S, Res} = run_commands(Cmds, [{patron_nonce, PatronNonce + 1}]),
-    wait_blocks(NodeName, 1, S#state.tx_hashes, FinalSleep),  
-    wait_blocks(NodeName, 1, S#state.tx_hashes, FinalSleep),  %% this is a NOP if pool is empty
+   
+    eqc:format("final state ~p\n", [S]),
+    [ wait_blocks(NodeName, 1, S#state.tx_hashes, FinalSleep) || _ <- lists:seq(1, length(Nodes)) ],
+    %% this is a NOP if pool is empty
 
     FinalTransactions = final_transactions(S#state.http_ready, S#state.tx_hashes),
     eqc:format("Transaction pool: ~p\n", [FinalTransactions]),
@@ -882,12 +1121,12 @@ prop_commands(Cmd) ->
 check(Cmd) ->
   [Cmds] = eqc:counterexample(eqc:numtests(2000, prop_commands(Cmd))),
   io:format("------------------------------------------------------------\n"),
-  eqc:check(prop_transactions(), [[node1], Cmds, []]).
+  eqc:check(prop_transactions(), [[node1], Cmds, [{result, true}, {transactions, []}]]).
 
 %% -- helper functions
 
 request(Node, Id, Params) ->
-  Hidden =  ['GetTop', 'GetAccountBalance', 'GetAccountTransactions', 'GetTxs', 'PostTx', 'GetTx'],
+  Hidden = ['GetTop', 'GetAccountBalance', 'GetTxs', 'GetTx', 'GetBlockByHeight'], %% 'PostTx'
   aehttp_client:request(Id, Params, 
                         [{ext_http, aest_nodes_mgr:get_service_address(Node, ext_http)}, 
                          {ct_log, case not lists:member(Id, Hidden) of
@@ -920,6 +1159,9 @@ ok200({ok, 200, Value}) ->
 ok200(_) ->
   undefined.
 
+ok200s(Es, Field) when is_list(Es) ->
+  [ ok200(E, Field) || E <- Es ].
+
 gettop(Node, Height, Timeout) ->
   case top(Node) of
     {ok, 200, #{height := H} = Top} when H >= Height -> 
@@ -937,3 +1179,21 @@ top_height({ok, 200, #{height := H}}, _LastSeen) ->
   H;
 top_height(_, LastSeen) ->
   LastSeen.
+
+poll_tx_hash(Node, Hash, Timeout) ->
+  case Timeout > erlang:system_time(millisecond) of
+    true ->
+      case ok200(request(Node, 'GetTx', 
+                         #{tx_hash => Hash, tx_encoding => json}), transaction) of
+        #{block_height := H} when H == -1 ->
+          poll_tx_hash(Node, Hash, Timeout);
+        #{block_height := H} ->
+          ok;
+        Error ->
+          Error
+      end;
+    false ->
+      timeout
+  end.
+
+
