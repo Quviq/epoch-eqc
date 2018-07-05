@@ -168,7 +168,7 @@ add_account(Node, From, Nonce, {Name, Balance}, Fee, {SeenHeight, DeltaTTL}, Pay
                         nonce     => Sender#account.nonce + Nonce,
                         ttl       => SeenHeight + DeltaTTL
                         }),
-  SignedTx = aetx_sign:sign(Tx, Sender#account.privkey),
+  SignedTx = aec_test_utils:sign(Tx, Sender#account.privkey),
   Transaction = aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(SignedTx)),
   request(Node, 'PostTx', #{tx => Transaction}).
 
@@ -224,8 +224,8 @@ create_account(Node, From, Nonce, {Name, Balance}, Fee, {SeenHeight, DeltaTTL}, 
                         nonce     => Sender#account.nonce + Nonce,
                         ttl       => SeenHeight + DeltaTTL
                         }),
-  SignedTx = aetx_sign:sign(Tx, Sender#account.privkey),
-  Transaction = aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(SignedTx)),
+  SignedTx = aec_test_utils:sign(Tx, Sender#account.privkey),
+  Transaction = aec_base58c:encode(transaction, aec_test_utils:serialize_to_binary(SignedTx)),
   case ok200(request(Node, 'PostTx', #{tx => Transaction}), tx_hash) of
     Hash when is_binary(Hash) ->
       %% Within 5 seconds the transaction should have been accepted
@@ -308,8 +308,8 @@ pingpong(Node, #{fee := Fee} = Tx) ->
                                      nonce     => maps:get(to_nonce, Tx),
                                      ttl       => maps:get(ttl, Tx, optional)
                                    })),
-  SignedPing = aetx_sign:sign(PingTx, Account1#account.privkey),
-  SignedPong = aetx_sign:sign(PongTx, Account2#account.privkey),
+  SignedPing = aec_test_utils:sign(PingTx, Account1#account.privkey),
+  SignedPong = aec_test_utils:sign(PongTx, Account2#account.privkey),
   [
    request(Node, 'PostTx', #{tx => aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(SignedPing))}),
    request(Node, 'PostTx', #{tx => aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(SignedPong))})].
@@ -400,9 +400,9 @@ open_channel(Node, #{initiator := In, responder := Resp} = Tx) ->
   case request(Node, 'PostChannelCreate', EncodedTx) of
     {ok, 200, #{tx := TxObject}} ->
       {ok, Bin} = aec_base58c:safe_decode(transaction, TxObject),
-      InitiatorSignedTx = aetx_sign:sign(aetx:deserialize_from_binary(Bin), 
+      InitiatorSignedTx = aec_test_utils:sign(aetx:deserialize_from_binary(Bin), 
                                 [Initiator#account.privkey]),
-      ResponderSignedTx = aetx_sign:sign(aetx:deserialize_from_binary(Bin), 
+      ResponderSignedTx = aec_test_utils:sign(aetx:deserialize_from_binary(Bin), 
                                 [Responder#account.privkey]),
       BothSigned = 
         aetx_sign:add_signatures(ResponderSignedTx, aetx_sign:signatures(InitiatorSignedTx)),
@@ -519,9 +519,9 @@ deposit(Node, #{from := Party, channel_id := Ch, round := Round} = Tx) ->
   case request(Node, 'PostChannelDeposit', EncodedTx) of
     {ok, 200, #{tx := TxObject}} ->
       {ok, Bin} = aec_base58c:safe_decode(transaction, TxObject),
-      InitiatorSignedTx = aetx_sign:sign(aetx:deserialize_from_binary(Bin), 
+      InitiatorSignedTx = aec_test_utils:sign(aetx:deserialize_from_binary(Bin), 
                                 [In#account.privkey]),
-      ResponderSignedTx = aetx_sign:sign(aetx:deserialize_from_binary(Bin), 
+      ResponderSignedTx = aec_test_utils:sign(aetx:deserialize_from_binary(Bin), 
                                 [Resp#account.privkey]),
       BothSigned = 
         aetx_sign:add_signatures(ResponderSignedTx, aetx_sign:signatures(InitiatorSignedTx)),
@@ -618,9 +618,9 @@ withdraw(Node, #{to := Party, channel_id := Ch, round := Round} = Tx) ->
   case request(Node, 'PostChannelWithdrawal', EncodedTx) of
     {ok, 200, #{tx := TxObject}} ->
       {ok, Bin} = aec_base58c:safe_decode(transaction, TxObject),
-      InitiatorSignedTx = aetx_sign:sign(aetx:deserialize_from_binary(Bin), 
+      InitiatorSignedTx = aec_test_utils:sign(aetx:deserialize_from_binary(Bin), 
                                 [In#account.privkey]),
-      ResponderSignedTx = aetx_sign:sign(aetx:deserialize_from_binary(Bin), 
+      ResponderSignedTx = aec_test_utils:sign(aetx:deserialize_from_binary(Bin), 
                                 [Resp#account.privkey]),
       BothSigned = 
         aetx_sign:add_signatures(ResponderSignedTx, aetx_sign:signatures(InitiatorSignedTx)),
@@ -714,9 +714,9 @@ close_mutual(Node, #{channel_id := Ch} = Tx) ->
   case request(Node, 'PostChannelCloseMutual', EncodedTx) of
     {ok, 200, #{tx := TxObject}} ->
       {ok, Bin} = aec_base58c:safe_decode(transaction, TxObject),
-      InitiatorSignedTx = aetx_sign:sign(aetx:deserialize_from_binary(Bin), 
+      InitiatorSignedTx = aec_test_utils:sign(aetx:deserialize_from_binary(Bin), 
                                 [In#account.privkey]),
-      ResponderSignedTx = aetx_sign:sign(aetx:deserialize_from_binary(Bin), 
+      ResponderSignedTx = aec_test_utils:sign(aetx:deserialize_from_binary(Bin), 
                                 [Resp#account.privkey]),
       BothSigned = 
         aetx_sign:add_signatures(ResponderSignedTx, aetx_sign:signatures(InitiatorSignedTx)),
@@ -816,7 +816,7 @@ close_solo(Node, #{channel_id := Ch, from := Party, poi := Poi} = Tx) ->
   case request(Node, 'PostChannelCloseSolo', EncodedTx) of
     {ok, 200, #{tx := TxObject}} ->
       {ok, Bin} = aec_base58c:safe_decode(transaction, TxObject),
-      FromSignedTx = aetx_sign:sign(aetx:deserialize_from_binary(Bin), 
+      FromSignedTx = aec_test_utils:sign(aetx:deserialize_from_binary(Bin), 
                                     [From#account.privkey]),
       Transaction = aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(FromSignedTx)),
       request(Node, 'PostTx', #{tx => Transaction});
