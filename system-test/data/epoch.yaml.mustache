@@ -7,6 +7,8 @@ peers: {{^peers}}[]{{/peers}}
 
 sync:
     port: {{services.sync.port}}
+    ping_interval: 5000
+    single_outbound_per_group: false
 
 http:
     external:
@@ -32,6 +34,7 @@ chain:
     persist: true
 
 mining:
+    beneficiary: "ak$2VoAhMd7tVJrDYM5vPJwFRjueZyirDJumVJNeBWL9j1eNTHsRx"
     autostart: true
     cuckoo:
         miner:
