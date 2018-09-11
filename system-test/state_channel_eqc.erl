@@ -51,6 +51,10 @@
 initial_state() ->
   #state{}.
 
+postcondition_common(_S, _Call, {'EXIT', _}) ->
+    false;
+postcondition_common(_S, _Call, _Res) ->
+    true.
 
 %% -- Generators -------------------------------------------------------------
 
