@@ -1088,7 +1088,7 @@ prop_patron(FinalSleep, Patron, Backend) ->
     {H, S, Res} = run_commands(Cmds, [{patron_nonce, PatronNonce + 1}]),
    
     eqc:format("final state ~p\n", [S]),
-    catch aest_nodes:wait_for_value({txs_on_chain, S#state.tx_hashes}, S#state.http_ready, FinalSleep, []),
+    WaitForChain = (catch aest_nodes:wait_for_value({txs_on_chain, eqc_symbolic:eval(S#state.tx_hashes)}, S#state.http_ready, FinalSleep, [])),
     %% If this times out, then we have transactions in the mempool
 
     FinalTransactions = final_transactions(S#state.http_ready, S#state.tx_hashes),
