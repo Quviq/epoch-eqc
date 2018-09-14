@@ -834,7 +834,6 @@ close_solo_features(S, [_Node, #{channel_id := Ch, fee := Fee}], _Res) ->
 poi(Accounts) ->  
   aesc_test_utils:proof_of_inclusion(Accounts).
 
-%% one could add deposit of open, but not created channel, this may or may not return an error channel_id not found.
 
 
 %% --- Operation: balance ---
@@ -842,19 +841,22 @@ balance_pre(S) ->
   S#state.http_ready =/= [] andalso S#state.accounts =/= [].
 
 balance_args(S) ->
-  [ elements(S#state.http_ready),?LET(A, oneof(S#state.accounts), A#user.name) ].
+  [ elements(S#state.http_ready), ?LET(A, oneof(S#state.accounts), A#user.name), weighted_default({9, false}, {1, true}) ].
 
-balance_pre(S, [Node, Name]) ->
+balance_pre(S, [Node, Name, _]) ->
   lists:member(Node, S#state.http_ready) andalso lists:keymember(Name, #user.name, S#state.accounts).
 
-balance(Node, Name) ->
+balance(Node, Name, FaultInject) ->
     [{_, #account{pubkey = PubKey}}] = ets:lookup(accounts, Name),
     try
-        #{Node := #{PubKey := Balance}} = aest_nodes:wait_for_value({balance, PubKey, 0}, [Node], 20000, []),
+        #{Node := #{PubKey := Balance}} = aest_nodes:wait_for_value({balance, PubKey, 0}, [Node], 20000, [{fault_inject, #{pubkey => PubKey}} || FaultInject]),
         Balance
     catch
         _:Reason ->
-            {'EXIT', Reason}
+            case FaultInject andalso Reason == timeout of
+                true  -> undefined;
+                false -> {'EXIT', Reason}
+            end
     end.
 
 
@@ -962,7 +964,7 @@ top_post(_S, [_Node], Res) ->
 final_balances([], _) ->
   undefined;
 final_balances(Nodes, Accounts) ->
-  Balances = [ {Account#user.name, ok200(balance(Node, Account#user.name)), Account#user.balance} 
+  Balances = [ {Account#user.name, balance(Node, Account#user.name, false), Account#user.balance} 
                || Node <- Nodes, Account <- Accounts ],
   lists:usort(Balances).
 
