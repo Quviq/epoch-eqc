@@ -272,16 +272,15 @@ pingpong_valid(S, [_Node, #{from := From, to := To, fee := Fee}]) ->
     Account1#user.balance >= Fee + 1 andalso
     Account2#user.balance >= Fee.
 
-%% Adaption seems to break symbiolic call in _next !! fix QuickCheck
-%% pingpong_adapt(S, [Node, #{from := From, to := To, ttl := TTL} = Tx]) ->
-%%   case {lists:keyfind(From, #user.name, S#state.accounts), 
-%%         lists:keyfind(To, #user.name, S#state.accounts)} of
-%%     {false, _} -> false;
-%%     {_, false} -> false;
-%%     {Account1, Account2} ->
-%%       [Node, Tx#{from_nonce => Account1#user.nonce + 1, to_nonce =>
-%%                    Account2#user.nonce, ttl => ttl(S, TTL)}]
-%%   end.
+pingpong_adapt(S, [Node, #{from := From, to := To, ttl := TTL} = Tx]) ->
+  case {lists:keyfind(From, #user.name, S#state.accounts), 
+        lists:keyfind(To, #user.name, S#state.accounts)} of
+    {false, _} -> false;
+    {_, false} -> false;
+    {Account1, Account2} ->
+      [Node, Tx#{from_nonce => Account1#user.nonce + 1, to_nonce =>
+                   Account2#user.nonce, ttl => ttl(S, TTL)}]
+  end.
 
 pingpong(Node, #{fee := Fee} = Tx) ->
   [{_, Account1}] = ets:lookup(accounts, maps:get(from, Tx)),
