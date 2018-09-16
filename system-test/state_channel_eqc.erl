@@ -222,16 +222,21 @@ create_account(Node, From, Nonce, {Name, Balance}, Fee, {SeenHeight, DeltaTTL}, 
                                  Sender#account.nonce + Nonce, 
                                  #{ amount    => Receiver#account.balance,   %% we create it with this much
                                     fee       => Fee,
+                                    %% sender_id => aec_base58c:encode(Sender#account.pubkey), %% Error injection!!
                                     payload   => Payload}),
-  aest_nodes:wait_tx_on_chain(Node, TxHash, 5000). %% This is the difference to an add, we wait until it's there
+    #{Node := [{TxHash, Height}]} = aest_nodes:wait_for_value({txs_on_chain, [TxHash]}, [Node], 5000, []), 
+    Height.
+    %% This is the difference to an add, we wait until it's there
 
 create_account_next(S, Value, [_Node, _Sender, _Nonce, {Name, Balance}, _Fee, _TTL, _Payload]) ->
   %% We assume there are always enough tokens in patron account
   S#state{ accounts = S#state.accounts ++ [#user{name = Name, balance = Balance, nonce = 0}],
-           nonce_delta = S#state.nonce_delta + 1}.
+           nonce_delta = S#state.nonce_delta + 1,
+           height = Value  %% could not be far off
+         }.
 
 create_account_post(_S, [_Node, _Sender, _Nonce, _Receiver, _Fee, _TTL, _Payload], Res) ->
-  eq(Res, ok).
+  is_integer(Res).
 
 
 
@@ -1089,7 +1094,7 @@ prop_patron(FinalSleep, Patron, Backend) ->
    
     eqc:format("final state ~p\n", [S]),
     WaitForChain = (catch aest_nodes:wait_for_value({txs_on_chain, eqc_symbolic:eval(S#state.tx_hashes)}, S#state.http_ready, FinalSleep, [])),
-    %% If this times out, then we have transactions in the mempool
+    %% If this times out, then we have transactions in the mempool, or discareded transactions
 
     FinalTransactions = final_transactions(S#state.http_ready, S#state.tx_hashes),
     eqc:format("Transaction pool: ~p\n", [FinalTransactions]),
