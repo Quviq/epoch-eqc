@@ -336,7 +336,7 @@ pingpong_post(_S, [_Account1, _Account2], Res) ->
 
 %% --- Operation: open_channel ---
 open_channel_pre(S) ->
-  false andalso S#state.http_ready =/= [] andalso length(S#state.accounts) > 1.
+  S#state.http_ready =/= [] andalso length(S#state.accounts) > 1.
 
 open_channel_args(S) ->
   ?LET({Initiator, Fee}, {elements(S#state.accounts), fee()},
@@ -348,11 +348,12 @@ open_channel_args(S) ->
           responder => Responder#user.name,
           initiator_amount => at_most(Initiator#user.balance - Fee),
           responder_amount => at_most(Responder#user.balance),
+          push_amount => choose(0,5),  %% at most initiator_amount - reserve
           lock_period => choose(0,5), %% lock period
           ttl => ttl(S, ?DELTA_TTL), %% ttl (we need height for this)
           fee => Fee, %% fee
           channel_reserve => Reserve,
-          push_amount => noshrink(choose(0,200)),
+          %% We need delegate_ids = [], %% pubkey ids of users
           nonce => Initiator#user.nonce + 1}
        ])).
 
@@ -367,11 +368,12 @@ open_channel_pre(S, [Node, #{initiator := Initiator, responder := Responder,
     open_channel_valid(S, [Node, Tx]).
 
 open_channel_valid(S, [_Node, #{initiator := Initiator, responder := Responder, 
-                                fee := Fee} = Tx]) ->
+                                fee := Fee, push_amount := Push} = Tx]) ->
   InAccount = lists:keyfind(Initiator, #user.name, S#state.accounts),
   RespAccount = lists:keyfind(Responder, #user.name, S#state.accounts),
   Responder =/= Initiator andalso
-    Fee >= aec_governance:minimum_tx_fee() andalso 
+    Fee >= aec_governance:minimum_tx_fee() andalso
+    %% Push =<  maps:get(initiator_amount, Tx) - maps:get(channel_reserve, Tx) andalso
     InAccount#user.balance >= maps:get(initiator_amount, Tx) + Fee andalso
     maps:get(initiator_amount, Tx) >= maps:get(channel_reserve, Tx) andalso
     maps:get(responder_amount, Tx) >= maps:get(channel_reserve, Tx) andalso
@@ -390,23 +392,18 @@ open_channel(Node, #{initiator := In, responder := Resp} = Tx) ->
   [{_, Responder}] = ets:lookup(accounts, Resp),
   Round = 0,
   EncodedTx =
-    optional_ttl(Tx#{initiator => aec_base58c:encode(account_pubkey, Initiator#account.pubkey),
-                     responder => aec_base58c:encode(account_pubkey, Responder#account.pubkey),
-                     state_hash => aec_base58c:encode(state, <<Round:256>>)}),
-  case request(Node, 'PostChannelCreate', EncodedTx) of
-    {ok, 200, #{tx := TxObject}} ->
-      {ok, Bin} = aec_base58c:safe_decode(transaction, TxObject),
-      InitiatorSignedTx = aec_test_utils:sign(aetx:deserialize_from_binary(Bin), 
-                                [Initiator#account.privkey]),
-      ResponderSignedTx = aec_test_utils:sign(aetx:deserialize_from_binary(Bin), 
-                                [Responder#account.privkey]),
-      BothSigned = 
-        aetx_sign:add_signatures(ResponderSignedTx, aetx_sign:signatures(InitiatorSignedTx)),
-      Transaction = aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(BothSigned)),
-      request(Node, 'PostTx', #{tx => Transaction});
-    Error ->
-      Error
-  end.
+    optional_ttl(Tx#{initiator_id => aec_base58c:encode(account_pubkey, Initiator#account.pubkey),
+                     responder_id => aec_base58c:encode(account_pubkey, Responder#account.pubkey),
+                     state_hash => aec_base58c:encode(state, <<Round:256>>)}), %% this needs a data structure containg round!!
+  {ok, 200, #{tx := TxObject}} = request(Node, 'PostChannelCreate', EncodedTx),
+  {ok, Bin} = aec_base58c:safe_decode(transaction, TxObject),
+  InitiatorSignedTx = sign(aetx:deserialize_from_binary(Bin), Initiator#account.privkey),
+  ResponderSignedTx = sign(aetx:deserialize_from_binary(Bin), Responder#account.privkey),
+  BothSigned = 
+     aetx_sign:add_signatures(ResponderSignedTx, aetx_sign:signatures(InitiatorSignedTx)),
+  Transaction = aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(BothSigned)),
+  {ok, 200, #{tx_hash := OpenTx}} = request(Node, 'PostTransaction', #{tx => Transaction}),
+  OpenTx.
 
 open_channel_next(S, Value, [_Node, #{initiator := In, responder := Resp,
                                       fee := Fee, nonce := Nonce} = Tx]) ->
@@ -426,17 +423,9 @@ open_channel_next(S, Value, [_Node, #{initiator := In, responder := Resp,
                                                      total = maps:get(initiator_amount, Tx) + maps:get(responder_amount, Tx),
                                                      lock_period = maps:get(lock_period, Tx),
                                                      channel_reserve = maps:get(channel_reserve, Tx),
-                                                     push_amount = maps:get(push_amount, Tx),
                                                      ttl = maps:get(ttl, Tx)} ],
-           tx_hashes = [{call, ?MODULE, ok200, [Value, tx_hash]} | S#state.tx_hashes],
+           tx_hashes = [ Value | S#state.tx_hashes],
            accounts = Accounts }.
-
-open_channel_post(_S, [_Node, _], Res) ->
-  case Res of
-    {ok, 200, #{tx_hash := _}} -> true;
-    _ -> 
-      Res
-  end.
 
 open_channel_features(S, [_Node, #{responder := Resp} = Tx], _) ->
   Responder = lists:keyfind(Resp, #user.name, S#state.accounts),
