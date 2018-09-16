@@ -1102,6 +1102,7 @@ prop_patron(FinalSleep, Patron, Backend) ->
       aggregate(call_features(H),
         pretty_commands(?MODULE, Cmds, {H, S, Res},
                         conjunction([{result, Res == ok},
+                                     {balances, equals([{Name, B, MB} || FinalBalances =/= undefined, {Name, B, MB}<-FinalBalances, B=/=MB], [])},
                                      {transactions, equals([ Tx || Tx <- FinalTransactions ], [])}
                                     ]))))))
   end))))).
