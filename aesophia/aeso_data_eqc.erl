@@ -36,7 +36,10 @@ type(Depth, TypeRep) ->
     [ elements([word, string] ++ [typerep || TypeRep]) ] ++
     [ ?LETSHRINK([T], [type(Depth - 1, TypeRep)], {list, T})       || Depth > 0 ] ++
     [ ?LETSHRINK([T], [type(Depth - 1, TypeRep)], {option, T})     || Depth > 0 ] ++
-    [ ?LETSHRINK(Ts,  list(type(Depth - 1, TypeRep)), {tuple, Ts}) || Depth > 0 ]).
+    [ ?LETSHRINK(Ts,  list(type(Depth - 1, TypeRep)), {tuple, Ts}) || Depth > 0 ] ++
+    [ ?LETSHRINK([K, V], vector(2, type(Depth - 1, TypeRep)), {map, K, V}) || Depth > 0 ] ++
+    []
+    ).
 
 blob() ->
     ?LET(Blobs, list(oneof([ ?LET(Ws, words(), return(from_words(Ws)))
@@ -61,7 +64,19 @@ from_word(S) when is_list(S) ->
     Bin = <<(list_to_binary(S))/binary, 0:(32 - Len)/unit:8>>,
     <<Len:256, Bin/binary>>.
 
-typerep() -> ?LET(Depth, choose(0, 2), type(Depth, false)).
+typerep() -> ?LET(Depth, choose(0, 2),
+             ?LET(T, type(Depth, true), return(typerep(T)))).
+
+typerep(word)          -> word;
+typerep(string)        -> string;
+typerep(typerep)       -> typerep;
+typerep({tuple, Ts})   -> {tuple, typerep(Ts)};
+typerep({list, T})     -> {list, typerep(T)};
+typerep({variant, Cs}) -> {variant, typerep(Cs)};
+typerep({option, T})   -> {variant, [[], [typerep(T)]]};
+typerep({map, K, V})   -> {list, typerep({tuple, [K, V]})};
+typerep([])            -> [];
+typerep([T | Ts])      -> [typerep(T) | typerep(Ts)].
 
 value(word) ->
     <<N:256>> = <<(-1):256>>,
@@ -75,7 +90,12 @@ value({list, T}) ->
 value({option, T}) ->
     weighted_default({1, none}, {3, {some, value(T)}});
 value({tuple, Ts}) ->
-    ?LET(Vs, [ value(T) || T <- Ts ], list_to_tuple(Vs)).
+    ?LET(Vs, [ value(T) || T <- Ts ], list_to_tuple(Vs));
+value({map, K, V}) ->
+    map(value(K), value(V));
+value({variant, Cs}) ->
+    ?LET(I, choose(0, length(Cs) - 1),
+    {variant, I, [ value(T) || T <- lists:nth(I + 1, Cs) ]}).
 
 typed_val() ->
     ?LET(T, type(), ?LET(V, value(T), return({T, V}))).
@@ -84,5 +104,37 @@ prop_roundtrip() ->
     ?FORALL(T, type(),
     ?FORALL(V, value(T),
     ?FORALL(B, choose(0, 4),
-    equals(aeso_data:from_binary(B * 32, T, aeso_data:to_binary(V, B * 32)),
+    equals(aeso_data:from_binary(T, aeso_data:to_binary(V, B * 32), B * 32),
            {ok, V})))).
+
+prop_binary_to_heap() ->
+    ?FORALL(Type, type(),
+    ?FORALL(Value, value(Type),
+    ?FORALL(Offs, choose(0, 16),
+    begin
+      BaseAddr = Offs * 32,
+      Binary = aeso_data:to_binary(Value),
+      case aeso_data:binary_to_heap(Type, Binary, BaseAddr) of
+        {ok, Ptr, Heap} ->
+          ?WHENFAIL(io:format("Ptr = ~p\nHeap = ~p\n", [Ptr, aeso_test_utils:dump_words(Heap)]),
+          equals(aeso_data:from_heap(Type, <<0:BaseAddr/unit:8, Heap/binary>>, Ptr),
+                 {ok, Value}));
+        Err = {error, _} -> equals(Err, ok)
+      end
+    end))).
+
+prop_heap_to_binary() ->
+    ?FORALL(Type,  type(),
+    ?FORALL(Value, value(Type),
+    ?FORALL(Offs,  choose(0, 16),
+    begin
+      BaseAddr = Offs * 32,
+      <<Ptr:256, _/binary>> = Heap = aeso_data:to_binary(Value, BaseAddr),
+      case aeso_data:heap_to_binary(Type, <<0:BaseAddr/unit:8, Heap/binary>>, Ptr) of
+        {ok, Binary} ->
+          ?WHENFAIL(io:format("Binary = ~p\n", [aeso_test_utils:dump_words(Binary)]),
+          equals(aeso_data:from_binary(Type, Binary),
+                 {ok, Value}));
+        Err = {error, _} -> equals(Err, ok)
+      end
+    end))).
