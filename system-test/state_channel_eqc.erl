@@ -44,7 +44,7 @@
                   responder,
                   lock_period,
                   channel_reserve,
-                  push_amount,
+                  state,
                   ttl,
                   round = 0  %% this is also placeholder for computing state hash
                  }). 
@@ -58,6 +58,7 @@ postcondition_common(_S, _Call, {'EXIT', _}) ->
     false;
 postcondition_common(_S, _Call, _Res) ->
     true.
+
 
 %% -- Generators -------------------------------------------------------------
 
@@ -387,23 +388,15 @@ open_channel_adapt(S, [Node, #{initiator := Initiator,  ttl := TTL} = Tx]) ->
       [Node, Tx#{nonce => InAccount#user.nonce + 1, ttl => ttl(S, TTL)}]
   end.
 
-open_channel(Node, #{initiator := In, responder := Resp} = Tx) ->
+open_channel(Node, #{initiator := In, responder := Resp, nonce := Nonce} = Tx) ->
   [{_, Initiator}] = ets:lookup(accounts, In),
   [{_, Responder}] = ets:lookup(accounts, Resp),
-  Round = 0,
-  EncodedTx =
-    optional_ttl(Tx#{initiator_id => aec_base58c:encode(account_pubkey, Initiator#account.pubkey),
-                     responder_id => aec_base58c:encode(account_pubkey, Responder#account.pubkey),
-                     state_hash => aec_base58c:encode(state, <<Round:256>>)}), %% this needs a data structure containg round!!
-  {ok, 200, #{tx := TxObject}} = request(Node, 'PostChannelCreate', EncodedTx),
-  {ok, Bin} = aec_base58c:safe_decode(transaction, TxObject),
-  InitiatorSignedTx = sign(aetx:deserialize_from_binary(Bin), Initiator#account.privkey),
-  ResponderSignedTx = sign(aetx:deserialize_from_binary(Bin), Responder#account.privkey),
-  BothSigned = 
-     aetx_sign:add_signatures(ResponderSignedTx, aetx_sign:signatures(InitiatorSignedTx)),
-  Transaction = aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(BothSigned)),
-  {ok, 200, #{tx_hash := OpenTx}} = request(Node, 'PostTransaction', #{tx => Transaction}),
-  OpenTx.
+  #{tx_hash := TxHash} = 
+        aest_nodes:post_create_state_channel_tx(Node, 
+                                                #{pubkey => Initiator#account.pubkey, privkey => Initiator#account.privkey}, 
+                                                #{pubkey => Responder#account.pubkey, privkey => Responder#account.privkey}, 
+                                                maps:without([initiator, responder], optional_ttl(Tx))),
+  TxHash.
 
 open_channel_next(S, Value, [_Node, #{initiator := In, responder := Resp,
                                       fee := Fee, nonce := Nonce} = Tx]) ->
@@ -455,7 +448,7 @@ deposit_args(S) ->
        begin
          From = channel_account(S, Channel, Party),
          [elements(S#state.http_ready),
-          #{from => Party,
+          #{from_id => Party,
             channel_id => Channel#channel.id,
             amount => at_most(From#user.balance),
             ttl => ttl(S, ?DELTA_TTL),
@@ -466,7 +459,7 @@ deposit_args(S) ->
        end).
 
 deposit_pre(S, [Node,
-                #{channel_id := Ch, from := Party, nonce := Nonce, ttl := TTL} = Tx]) ->
+                #{channel_id := Ch, from_id := Party, nonce := Nonce, ttl := TTL} = Tx]) ->
   Channel = lists:keyfind(Ch, #channel.id, S#state.channels),
   Account = channel_account(S, Channel, Party),
   lists:member(Node, S#state.http_ready) andalso
@@ -476,48 +469,60 @@ deposit_pre(S, [Node,
     check_ttl(S, TTL) andalso
     deposit_valid(S, Tx).
 
-deposit_valid(S, #{channel_id := Ch, from := Party, amount := Amount, fee := Fee}) ->
+deposit_valid(S, #{channel_id := Ch, from_id := Party, amount := Amount, fee := Fee}) ->
   Account = channel_account(S, Ch, Party),
   Fee >= aec_governance:minimum_tx_fee() andalso 
     Account#user.balance >= Amount + Fee.
 
 %% channel.round is monotonically increasing, no need to adapt when leaving out some
-deposit_adapt(S, [Node, #{from := Party, channel_id := Ch, ttl := TTL} = Tx]) ->
+deposit_adapt(S, [Node, #{from_id := Party, channel_id := Ch, ttl := TTL} = Tx]) ->
   case channel_account(S, Ch, Party) of
     false -> false;
     Account ->
       [Node, Tx#{nonce => Account#user.nonce + 1, ttl => ttl(S, TTL)}]
   end.
 
-deposit(Node, #{from := Party, channel_id := Ch, round := Round} = Tx) ->
+deposit(Node, #{from_id := Party, channel_id := Ch, nonce := Nonce} = Tx) ->
   {Initiator, OrgNonce, Responder} = Ch,
   [{_, In}] = ets:lookup(accounts, Initiator), 
-  [{_, Resp}] = ets:lookup(accounts, Responder), 
-  Id = aesc_channels:id(In#account.pubkey, OrgNonce, Resp#account.pubkey),
-  From = if Party == initiator -> In;
-            Party == responder -> Resp
-         end,
-  EncodedTx = 
-    optional_ttl(Tx#{from => aec_base58c:encode(account_pubkey, From#account.pubkey),
-                     channel_id => aec_base58c:encode(channel, Id),
-                     state_hash => aec_base58c:encode(state, <<Round:256>>)}),
-  case request(Node, 'PostChannelDeposit', EncodedTx) of
-    {ok, 200, #{tx := TxObject}} ->
-      {ok, Bin} = aec_base58c:safe_decode(transaction, TxObject),
-      InitiatorSignedTx = aec_test_utils:sign(aetx:deserialize_from_binary(Bin), 
-                                [In#account.privkey]),
-      ResponderSignedTx = aec_test_utils:sign(aetx:deserialize_from_binary(Bin), 
-                                [Resp#account.privkey]),
-      BothSigned = 
-        aetx_sign:add_signatures(ResponderSignedTx, aetx_sign:signatures(InitiatorSignedTx)),
-      Transaction = aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(BothSigned)),
-      request(Node, 'PostTx', #{tx => Transaction});
-    Error ->
-      Error
-  end.
+  [{_, Resp}] = ets:lookup(accounts, Responder),
+  Id = aec_id:create(channel, aesc_channels:pubkey(In#account.pubkey, OrgNonce, Resp#account.pubkey)),
+  #{tx_hash := TxHash} = 
+        aest_nodes:post_deposit_state_channel_tx(Node, 
+                                                 #{pubkey => Initiator#account.pubkey, privkey => Initiator#account.privkey}, 
+                                                 #{pubkey => Responder#account.pubkey, privkey => Responder#account.privkey},
+                                                 Id, maps:without([channel_id, from_id], optional_ttl(Tx))),
+  TxHash.
+
+
+%% %% possible encode pubkeys?
+%%   Round = 0,
+%%   Id = aesc_channels:pubkey(In#account.pubkey, OrgNonce, Resp#account.pubkey),
+%%   From = if Party == initiator -> In;
+%%             Party == responder -> Resp
+%%          end,
+%%   EncodedTx = 
+%%     optional_ttl(Tx#{from_id => aec_base58c:encode(account_pubkey, From#account.pubkey),
+%%                      channel_id => aec_base58c:encode(channel, Id),
+%%                      state_hash => aec_base58c:encode(state, <<Round:256>>)}),
+%%   case request(Node, 'PostChannelDeposit', EncodedTx) of
+%%     {ok, 200, #{tx := TxObject}} ->
+%%       {ok, Bin} = aec_base58c:safe_decode(transaction, TxObject),
+%%       InitiatorSignedTx = sign(aetx:deserialize_from_binary(Bin), In#account.privkey),
+%%       ResponderSignedTx = sign(aetx:deserialize_from_binary(Bin), Resp#account.privkey),
+%%       BothSigned = 
+%%         aetx_sign:add_signatures(ResponderSignedTx, aetx_sign:signatures(InitiatorSignedTx)),
+%%       Transaction = aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(BothSigned)),
+%%       case request(Node, 'PostTransaction', #{tx => Transaction}) of
+%%           {ok, 200, #{tx_hash := TxHash}} -> TxHash;
+%%           Err -> Err
+%%       end;
+%%     Error ->
+%%       Error
+%%   end.
 
 %% Due to adapt, Channel is the one we have in the state
-deposit_next(S, Value, [_Node, #{channel_id := Ch, from := Party, fee := Fee, amount := Amount, 
+deposit_next(S, Value, [_Node, #{channel_id := Ch, from_id := Party, fee := Fee, amount := Amount, 
                                  nonce := Nonce, round := Round}]) ->
   Channel = lists:keyfind(Ch, #channel.id, S#state.channels),
   Account = channel_account(S, Channel, Party),
@@ -529,18 +534,20 @@ deposit_next(S, Value, [_Node, #{channel_id := Ch, from := Party, fee := Fee, am
   NewChannel = Channel#channel{total = Channel#channel.total + Amount, round = Round},
   Channels = lists:keyreplace(Ch, #channel.id, S#state.channels, NewChannel),
   S#state{ channels = Channels,
-           tx_hashes = [{call, ?MODULE, ok200, [Value, tx_hash]} | S#state.tx_hashes],
+           tx_hashes = [Value | S#state.tx_hashes],
            accounts = Accounts }.
 
 deposit_post(_S, [_Node, _], Res) ->
-  case Res of
-    {ok, 200, #{tx_hash := _}} -> true;
-    _ -> 
-      Res
+  case aec_base58c:safe_decode(tx_hash, Res) of
+      {ok, _} -> true;
+      _ -> {Res, not_tx_hash}
   end.
 
-deposit_features(_S, [_, #{from := Party}], _Res) ->
+deposit_features(_S, [_, #{from_id := Party}], _Res) ->
   [{channel_deposit, Party}].
+
+%% one could add deposit of open, but not created channel, this may or may not return an error channel_id not found.
+
 
 %% --- Operation: withdraw ---
 withdraw_pre(S) ->
@@ -553,7 +560,7 @@ withdraw_args(S) ->
        begin
          From = channel_account(S, Channel, Party),
          [elements(S#state.http_ready),
-          #{to => Party,
+          #{to_id => Party,
             channel_id => Channel#channel.id,
             amount => at_most(Channel#channel.total),
             ttl => ttl(S, ?DELTA_TTL),
@@ -564,7 +571,7 @@ withdraw_args(S) ->
        end).
 
 withdraw_pre(S, [Node,
-                #{channel_id := Ch, to := Party, nonce := Nonce, ttl := TTL} = Tx]) ->
+                #{channel_id := Ch, to_id := Party, nonce := Nonce, ttl := TTL} = Tx]) ->
   Channel = lists:keyfind(Ch, #channel.id, S#state.channels),
   Account = channel_account(S, Channel, Party),
   lists:member(Node, S#state.http_ready) andalso
@@ -574,49 +581,50 @@ withdraw_pre(S, [Node,
     check_ttl(S, TTL) andalso
     withdraw_valid(S, Tx).
 
-withdraw_valid(S, #{channel_id := Ch, to := Party, amount := Amount, fee := Fee}) ->
+withdraw_valid(S, #{channel_id := Ch, to_id := Party, amount := Amount, fee := Fee}) ->
   Account = channel_account(S, Ch, Party),
   Channel = lists:keyfind(Ch, #channel.id, S#state.channels),
   Fee >= aec_governance:minimum_tx_fee() andalso 
     Account#user.balance >= Fee andalso
     Channel#channel.total =< Amount.
 
-withdraw_adapt(S, [Node, #{to := Party, channel_id := Ch, ttl := TTL} = Tx]) ->
+withdraw_adapt(S, [Node, #{to_id := Party, channel_id := Ch, ttl := TTL} = Tx]) ->
   case channel_account(S, Ch, Party) of
     false -> false;
     Account ->
       [Node, Tx#{nonce => Account#user.nonce + 1, ttl => ttl(S, TTL)}]
   end.
 
-withdraw(Node, #{to := Party, channel_id := Ch, round := Round} = Tx) ->
+withdraw(Node, #{to_id := Party, channel_id := Ch, round := Round} = Tx) ->
   {Initiator, OrgNonce, Responder} = Ch,
   [{_, In}] = ets:lookup(accounts, Initiator), 
   [{_, Resp}] = ets:lookup(accounts, Responder), 
-  Id = aesc_channels:id(In#account.pubkey, OrgNonce, Resp#account.pubkey),
+  Id = aesc_channels:pubkey(In#account.pubkey, OrgNonce, Resp#account.pubkey),
   From = if Party == initiator -> In;
             Party == responder -> Resp
          end,
   EncodedTx = 
-    optional_ttl(Tx#{to => aec_base58c:encode(account_pubkey, From#account.pubkey),
+    optional_ttl(Tx#{to_id => aec_base58c:encode(account_pubkey, From#account.pubkey),
                      channel_id => aec_base58c:encode(channel, Id),
                      state_hash => aec_base58c:encode(state, <<Round:256>>)}),
-  case request(Node, 'PostChannelWithdrawal', EncodedTx) of
+  case request(Node, 'PostChannelWithdraw', EncodedTx) of
     {ok, 200, #{tx := TxObject}} ->
       {ok, Bin} = aec_base58c:safe_decode(transaction, TxObject),
-      InitiatorSignedTx = aec_test_utils:sign(aetx:deserialize_from_binary(Bin), 
-                                [In#account.privkey]),
-      ResponderSignedTx = aec_test_utils:sign(aetx:deserialize_from_binary(Bin), 
-                                [Resp#account.privkey]),
+      InitiatorSignedTx = sign(aetx:deserialize_from_binary(Bin), In#account.privkey),
+      ResponderSignedTx = sign(aetx:deserialize_from_binary(Bin), Resp#account.privkey),
       BothSigned = 
         aetx_sign:add_signatures(ResponderSignedTx, aetx_sign:signatures(InitiatorSignedTx)),
       Transaction = aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(BothSigned)),
-      request(Node, 'PostTx', #{tx => Transaction});
+      case request(Node, 'PostTransaction', #{tx => Transaction}) of
+          {ok, 200, #{tx_hash := TxHash}} -> TxHash;
+          Err -> Err
+      end;
     Error ->
       Error
   end.
 
 %% Due to adapt, Channel is the one we have in the state
-withdraw_next(S, Value, [_Node, #{channel_id := Ch, to := Party, fee := Fee, amount := Amount, 
+withdraw_next(S, Value, [_Node, #{channel_id := Ch, to_id := Party, fee := Fee, amount := Amount, 
                                   nonce := Nonce, round := Round}]) ->
   Channel = lists:keyfind(Ch, #channel.id, S#state.channels),
   Account = channel_account(S, Channel, Party),
@@ -629,17 +637,16 @@ withdraw_next(S, Value, [_Node, #{channel_id := Ch, to := Party, fee := Fee, amo
     Channel#channel{total = Channel#channel.total - Amount, round = Round},
   Channels = lists:keyreplace(Ch, #channel.id, S#state.channels, NewChannel),
   S#state{ channels = Channels,
-           tx_hashes = [{call, ?MODULE, ok200, [Value, tx_hash]} | S#state.tx_hashes],
+           tx_hashes = [ Value | S#state.tx_hashes],
            accounts = Accounts }.
 
 withdraw_post(_S, [_Node, _], Res) ->
-  case Res of
-    {ok, 200, #{tx_hash := _}} -> true;
-    _ -> 
-      Res
+  case aec_base58c:safe_decode(tx_hash, Res) of
+      {ok, _} -> true;
+      _ -> {Res, not_tx_hash}
   end.
 
-withdraw_features(_S, [_, #{to := Party}], _Res) ->
+withdraw_features(_S, [_, #{to_id := Party}], _Res) ->
   [{channel_withdraw, Party}].
 
 
@@ -689,27 +696,17 @@ close_mutual_adapt(S, [Node, #{channel_id := Ch, ttl := TTL} = Tx]) ->
       [Node, Tx#{nonce => Account#user.nonce + 1, ttl => ttl(S, TTL)}]
   end.
 
-close_mutual(Node, #{channel_id := Ch} = Tx) ->
+close_mutual(Node, #{channel_id := Ch, nonce := Nonce} = Tx) ->
   {Initiator, OrgNonce, Responder} = Ch,
   [{_, In}] = ets:lookup(accounts, Initiator), 
-  [{_, Resp}] = ets:lookup(accounts, Responder), 
-  Id = aesc_channels:id(In#account.pubkey, OrgNonce, Resp#account.pubkey),
-  EncodedTx =
-    optional_ttl(Tx#{channel_id => aec_base58c:encode(channel, Id)}),
-  case request(Node, 'PostChannelCloseMutual', EncodedTx) of
-    {ok, 200, #{tx := TxObject}} ->
-      {ok, Bin} = aec_base58c:safe_decode(transaction, TxObject),
-      InitiatorSignedTx = aec_test_utils:sign(aetx:deserialize_from_binary(Bin), 
-                                [In#account.privkey]),
-      ResponderSignedTx = aec_test_utils:sign(aetx:deserialize_from_binary(Bin), 
-                                [Resp#account.privkey]),
-      BothSigned = 
-        aetx_sign:add_signatures(ResponderSignedTx, aetx_sign:signatures(InitiatorSignedTx)),
-      Transaction = aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(BothSigned)),
-      request(Node, 'PostTx', #{tx => Transaction});
-    Error ->
-      Error
-  end.
+  [{_, Resp}] = ets:lookup(accounts, Responder),
+  Id = aec_id:create(channel, aesc_channels:pubkey(In#account.pubkey, OrgNonce, Resp#account.pubkey)),
+  #{tx_hash := TxHash} = 
+        aest_nodes:post_close_mutual_state_channel_tx(Node, 
+                                                      #{pubkey => Initiator#account.pubkey, privkey => Initiator#account.privkey}, 
+                                                      #{pubkey => Responder#account.pubkey, privkey => Responder#account.privkey},
+                                                      Id, maps:without([channel_id], optional_ttl(Tx))),
+  TxHash.
 
 close_mutual_next(S, Value, [_Node,  #{channel_id := Ch, nonce := Nonce, 
                                        initiator_amount := IA, responder_amount := RA}]) ->
@@ -723,15 +720,15 @@ close_mutual_next(S, Value, [_Node,  #{channel_id := Ch, nonce := Nonce,
                                      nonce = Nonce }),
                      Responder#user{ balance = Responder#user.balance + RA } ),
   S#state{ channels = lists:keydelete(Ch, #channel.id, S#state.channels),
-           tx_hashes = [{call, ?MODULE, ok200, [Value, tx_hash]} | S#state.tx_hashes],
+           tx_hashes = [ Value | S#state.tx_hashes],
            accounts = Accounts }.
 
 close_mutual_post(_S, [_Node, _], Res) ->
-  case Res of
-    {ok, 200, #{tx_hash := _}} -> true;
-    _ -> 
-      Res
+  case aec_base58c:safe_decode(tx_hash, Res) of
+      {ok, _} -> true;
+      _ -> {Res, not_tx_hash}
   end.
+
 
 close_mutual_features(_S, [_, #{initiator_amount := InAmount, responder_amount := RespAmount, fee := Fee}], _Res) ->
   [{close_mutual, even} ||  (InAmount + RespAmount ) rem 2 == 0 ] ++
@@ -801,8 +798,7 @@ close_solo(Node, #{channel_id := Ch, from := Party, poi := Poi} = Tx) ->
   case request(Node, 'PostChannelCloseSolo', EncodedTx) of
     {ok, 200, #{tx := TxObject}} ->
       {ok, Bin} = aec_base58c:safe_decode(transaction, TxObject),
-      FromSignedTx = aec_test_utils:sign(aetx:deserialize_from_binary(Bin), 
-                                    [From#account.privkey]),
+      FromSignedTx = sign(aetx:deserialize_from_binary(Bin), From#account.privkey),
       Transaction = aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(FromSignedTx)),
       request(Node, 'PostTx', #{tx => Transaction});
     Error ->
@@ -876,15 +872,16 @@ waitforblock(Node, Hashes) ->
         {'EXIT', Reason}
     end.
 
-%% Now some transactions should be on chain
-waitforblock_next(S, Value, [_Node, _]) ->
+%% Now all transactions should be on chain and we can forget about them
+waitforblock_next(S, Value, [_Node, Hashes]) ->
   Channels =
     [ case Channel#channel.status of
         open ->
           Channel#channel{status = created};
         _ -> Channel
       end || Channel <- S#state.channels ],
-  S#state{channels = Channels, 
+  S#state{channels = Channels,
+          tx_hashes = {call, lists, subtract, [S#state.tx_hashes, Hashes]},
           height = Value %% postcondition guarantees that this is an integer at runtime.
          }.
 
@@ -906,10 +903,18 @@ transaction_pool_pre(S, [Node]) ->
   lists:member(Node, S#state.http_ready).
 
 transaction_pool(Node) ->
-    Transactions = aest_nodes:get_mempool(Node),
-    %% I might have saved them encoded in memory, need to re-encode if I want to compare
-    Txs = [ Tx || #{tx := Tx} <- Transactions ],
-    Txs.
+    case catch aest_nodes:get_mempool(Node) of 
+        {'EXIT', Reason} ->
+            io:format("\n\nTransactions ~p\n\n", [Reason]),
+            %% on uat crashes (no internal interface accessible)
+            [];
+        Transactions ->
+            io:format("\n\nTransactions ~p\n\n", [Transactions]),
+            %% I might have saved them encoded in memory, need to re-encode if I want to compare
+            Txs = [ Tx || #{tx := Tx} <- Transactions ],
+            io:format("\n\nTransactions ~p\nTxs ~p\n\n", [Transactions, Txs]),
+            Txs
+    end.
 
 %% transaction_pool(Node) ->
 %%   case request(Node, 'GetTxs', #{}) of
@@ -965,7 +970,7 @@ final_balances(Nodes, Accounts) ->
 final_transactions([], _) ->
   [];
 final_transactions([Node|_], Hashes) ->
-  aest_nodes:get_mempool(Node).
+  transaction_pool(Node).
 
 
 try_get_nonce(Node, PubKey) ->
@@ -1002,6 +1007,8 @@ gen_key_pair() ->
 account_gen(NatGen) ->
     ?LET({[Name], Balance}, {eqc_erlang_program:words(1), NatGen}, {Name, Balance}).
 
+check_ttl(S, Number) when is_integer(Number) ->
+  true;
 check_ttl(S, {Height, _}) ->
   Height == S#state.height;
 check_ttl(_S, optional) ->
@@ -1012,7 +1019,9 @@ optional_ttl(Tx) ->
     optional -> 
       maps:without([ttl], Tx);
     {Height, DTTL} ->
-      Tx#{ttl => Height + DTTL}
+          Tx#{ttl => Height + DTTL};
+     Absolute ->
+          Tx#{ttl => Absolute}
   end.
 
 fee() ->
