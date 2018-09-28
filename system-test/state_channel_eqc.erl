@@ -225,7 +225,7 @@ create_account(Node, From, Nonce, {Name, Balance}, Fee, {SeenHeight, DeltaTTL}, 
                                     fee       => Fee,
                                     %% sender_id => aec_base58c:encode(Sender#account.pubkey), %% Error injection!!
                                     payload   => Payload}),
-    #{Node := [{TxHash, Height}]} = aest_nodes:wait_for_value({txs_on_chain, [TxHash]}, [Node], 5000, []), 
+    #{Node := [{TxHash, Height}]} = aest_nodes:wait_for_value({txs_on_chain, [TxHash]}, [Node], 5000, [{key_blocks, 1}]), 
     Height.
     %% This is the difference to an add, we wait until it's there
 
@@ -326,7 +326,7 @@ pingpong_next(S, Value, [_Node, #{from := From, from_nonce := FN,
                      Account1#user{ balance = Account1#user.balance - Fee,
                                     nonce = FN }),
   S#state{accounts = Accounts,
-          tx_hashes = {call, lists, append, [Value , S#state.tx_hashes]}}.
+          tx_hashes = {call, ?MODULE, append, [Value , S#state.tx_hashes]}}.
 
 pingpong_post(_S, [_Account1, _Account2], Res) ->
   case Res of
@@ -334,6 +334,12 @@ pingpong_post(_S, [_Account1, _Account2], Res) ->
     _ ->
       Res
   end.
+
+append({exception, _}, L) ->
+  L;
+append(L1, L2) ->
+  L1 ++ L2.
+
 
 %% --- Operation: open_channel ---
 open_channel_pre(S) ->
@@ -838,7 +844,10 @@ balance_pre(S, [Node, Name, _]) ->
 balance(Node, Name, FaultInject) ->
     [{_, #account{pubkey = PubKey}}] = ets:lookup(accounts, Name),
     try
-        #{Node := #{PubKey := Balance}} = aest_nodes:wait_for_value({balance, PubKey, 0}, [Node], 20000, [{fault_inject, #{pubkey => PubKey}} || FaultInject]),
+        #{Node := #{PubKey := Balance}} = aest_nodes:wait_for_value({balance, PubKey, 0}, [Node], case FaultInject of
+                                                                                                      true -> 1000;
+                                                                                                      false -> 20000
+                                                                                                  end, [{fault_inject, #{pubkey => PubKey}} || FaultInject]),
         Balance
     catch
         _:Reason ->
@@ -865,7 +874,7 @@ waitforblock_adapt(S, [Node, _Hashes]) ->
   
 waitforblock(Node, Hashes) ->
     try 
-        aest_nodes:wait_for_value({txs_on_chain, Hashes}, [Node], 10000, []),
+        aest_nodes:wait_for_value({txs_on_chain, Hashes}, [Node], 10000, [{key_blocks, 0}]),
         #{ height := H } = aest_nodes:get_top(Node), 
         H
     catch _:Reason ->
@@ -1090,7 +1099,8 @@ prop_patron(FinalSleep, Patron, Backend) ->
     {H, S, Res} = run_commands(Cmds, [{patron_nonce, PatronNonce + 1}]),
    
     eqc:format("final state ~p\n", [S]),
-    WaitForChain = (catch aest_nodes:wait_for_value({txs_on_chain, eqc_symbolic:eval(S#state.tx_hashes)}, S#state.http_ready, FinalSleep, [])),
+    WaitForChain = (catch aest_nodes:wait_for_value({txs_on_chain, eqc_symbolic:eval(S#state.tx_hashes)}, 
+                                                    S#state.http_ready, FinalSleep, [{key_blocks, 1}])),
     %% If this times out, then we have transactions in the mempool, or discareded transactions
 
     FinalTransactions = final_transactions(S#state.http_ready, S#state.tx_hashes),
@@ -1100,6 +1110,8 @@ prop_patron(FinalSleep, Patron, Backend) ->
     eqc:format("Balances ~p\n", [FinalBalances]),
 
     ets:delete(Table),
+    aest_nodes_mgr:dump_logs(),
+
     aest_nodes_mgr:stop(),
     if Backend =/= aest_uat -> timer:sleep(10000);
        true -> ok
