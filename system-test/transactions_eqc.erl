@@ -1,9 +1,18 @@
 %%% @author Thomas Arts 
-%%% @doc We test whether transactions posted on one node can be picked up by miner on
-%%%      a different node.
+%%% @doc Testing state channel fsm at system test level.
+%%%
+%%%      The idea is that these tests could run on UAT as well.
+%%%      For that reason, we cannot assume any specific height or nonces of the root account.
+%%%      The Patron is the account that has a lot of tokens and we start by reading 
+%%%      that account and creating working accounts from it.
+%%%
+%%%      Running: rebar3 as system_test, test shell
+%%%      cd("eqc/system-test").
+%%%
 %%%
 %%% @end
-%%% Created : 14 Mar 2018 by Thomas Arts 
+%%% Created : 17 May 2018 by Thomas Arts 
+%%% Updated : 30 Sep 2018 by Thomas Arts
 
 -module(transactions_eqc).
 
@@ -13,46 +22,51 @@
 -compile([export_all, nowarn_export_all]).
 
 %% -- State and state functions ----------------------------------------------
--record(state,{nodes = [], accounts = [], running = [], names = [], invalid_transactions = []}).
+-record(state,{nodes = [], accounts = [], nonce_delta = 1, 
+               running = [], http_ready = [],
+               height = 0,
+               tx_hashes = [], %% symbolic !
+               users = []
+              }).
 
--record(account, { pubkey, 
+-record(user, {name, balance, nonce}).
+
+-record(account, { pubkey,
                    balance,
                    privkey,
                    nonce = 0}).
 
+-define(DELTA_TTL, 10).  %% times 3? minutes on UAT
 
 initial_state() ->
   #state{}.
 
-balance_of(PubKey, Accounts) ->
-  case lists:keyfind(PubKey, #account.pubkey, Accounts) of
-    Account when is_record(Account, account) ->
-      Account#account.balance;
-    false ->
-      0
-  end.
-
-nonce_of(PubKey, Accounts) ->
-  case lists:keyfind(PubKey, #account.pubkey, Accounts) of
-    Account when is_record(Account, account) ->
-      Account#account.nonce;
-    false ->
-      0
-  end.
+postcondition_common(_S, _Call, {'EXIT', _}) ->
+    false;
+postcondition_common(_S, _Call, _Res) ->
+    true.
 
 
 %% -- Generators -------------------------------------------------------------
 
 systems(N) ->
-  Names = [ list_to_atom(lists:concat([node, Name])) || Name <- lists:seq(1,N) ],
-  [ #{name => Name,
-      peers => ?LET(Disconnect, sublist(Names), Names -- [Name | Disconnect]),
-      source => {pull, oneof(["aeternity/epoch:local"])}
-     } || Name <- Names ].
+  [ list_to_atom(lists:concat([node, Name])) || Name <- lists:seq(1,N) ].
 
-%% -- Common pre-/post-conditions --------------------------------------------
-command_precondition_common(S, Cmd) ->
-  Cmd == start orelse S#state.running =/= [].
+%% Absolute TTLs are hard to test, thinking required
+gen_ttl(Height) ->
+  ?LET(TTL, choose(0, 20), Height + (200 - TTL)).
+
+ttl(S, N) when is_integer(N) ->
+  {S#state.height, N};
+ttl(S, {_H, Gen}) ->
+  {S#state.height, Gen};
+ttl(_S, optional) ->
+  optional.
+
+
+at_most(X) ->
+  noshrink(choose(0, max(0, X))).
+  
 
 %% -- Operations -------------------------------------------------------------
 
@@ -61,258 +75,341 @@ start_pre(S) ->
   length(S#state.nodes) > length(S#state.running).
 
 start_args(S) ->
-  [elements([ Name || #{name := Name} <- S#state.nodes, 
+  [elements([ Name || Name <- S#state.nodes, 
                       not lists:member(Name, S#state.running)])].
 
 start_pre(S, [Node]) ->
   not lists:member(Node, S#state.running).
 
 start(Node) ->
-  aest_nodes_mgr:start_node(Node),
-  timer:sleep(2000). %% http interface needs time to start
+  aest_nodes_mgr:start_node(Node).
 
 start_next(S, _Value, [Node]) ->
-  S#state{running = S#state.running ++ [Node]}.
+  S#state{ running = S#state.running ++ [Node]}.
 
-%% --- Operation: stop ---
-stop_pre(S) ->
+%% --- Operation: patron ---
+http_ready_pre(S) ->
   S#state.running =/= [].
 
-%% stop_args(S) ->
-%%   [elements(S#state.running)].
-
-stop_pre(S, [Node]) ->
-  lists:member(Node, S#state.running).
-
-stop(Node) ->
-  aest_nodes_mgr:stop_node(Node, infinity).
-
-stop_next(S, _Value, [Node]) ->
-  S#state{running = S#state.running -- [Node]}.
-
-%% --- add_account ---
-add_account_args(S) ->
-  noshrink(
-  [elements(S#state.running), 
-   elements(S#state.accounts), account_gen(elements([5, 10, 23, 71, 200, 0])), 
-   choose(0,5), <<"quickcheck">>]).
-
-add_account_pre(S, [Node, Sender, _Receiver, _Fee, _Payload]) ->
-  lists:member(Sender, S#state.accounts) andalso
-    lists:member(Node, S#state.running).
-
-%% Doesn't work if S#state.running is []
-%% add_account_adapt(S, [Node, Sender, Receiver, Fee, Payload]) ->
-%%   [Sender, Receiver, Fee, hd(S#state.running)].
-
-add_account(Node, Sender, Receiver, Fee, Payload) ->
-  {ok, Tx} =
-    aec_spend_tx:new(#{ sender    => Sender#account.pubkey,
-                        recipient => Receiver#account.pubkey,
-                        amount    => Receiver#account.balance,   %% we create it with this much
-                        fee       => Fee,
-                        payload   => Payload,
-                        nonce     => Sender#account.nonce + 1
-                        }),
-  SignedTx = aetx_sign:sign(Tx, Sender#account.privkey),
-  Transaction = aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(SignedTx)),
-  file:write_file("stats.txt", "t", [append]),
-  file:write_file("txs.erl", 
-                  io_lib:format("{ok, 200, #{}} = aehttp_client:request('PostTx', #{tx => ~p}, "
-                                "[{ext_http, maps:get(~p, Nodes)}, "
-                                " {ct_log, fun log/2}]),\n",
-                                [Transaction, Node]), [append]),
-  request(Node, 'PostTx', #{tx => Transaction}).
-
-add_account_next(S, _V, [_Node, Sender = #account{ balance = PB, nonce = PN },
-                         Receiver = #account{ balance = NB }, Fee, Payload]) ->
-  case is_invalid(Sender, Receiver, Fee, Payload) of
-    true ->
-      {ok, Tx} =
-        aec_spend_tx:new(#{ sender    => Sender#account.pubkey,
-                            recipient => Receiver#account.pubkey,
-                            amount    => Receiver#account.balance,
-                            fee       => Fee,
-                            payload   => Payload,
-                            nonce     => Sender#account.nonce + 1
-                          }),
-      S#state{invalid_transactions = S#state.invalid_transactions ++ [ Tx ]};
-    false ->
-      case PB >= NB + Fee of
-        false -> S;  %% not enough balance
-        true ->
-          Accounts = lists:keyreplace(Sender#account.privkey, #account.privkey, S#state.accounts, 
-                                      Sender#account{ balance = PB - NB - Fee, nonce = PN + 1 }),
-          S#state{ accounts = Accounts ++ [Receiver] }
-      end
-  end.
-
-add_account_post(_S, [_Node, _Sender, _Receiver, _Fee, _Payload], Res) ->
-  eq(Res, {ok, 200, #{}}).
-
-is_invalid(_Sender, _Receiver, Fee, _Payload) ->
-  Fee < aec_governance:minimum_tx_fee().
-
-%% --- Operation: balance ---
-%% balance_pre(S) ->
-%%   S#state.running =/= [].
-
-balance_args(S) ->
-  [ elements(S#state.running), 
-    ?LET(Account, oneof(S#state.accounts), Account#account.pubkey) ].
-
-balance_pre(S, [Node, PubKey]) ->
-  lists:member(Node, S#state.running) andalso lists:keymember(PubKey, #account.pubkey, S#state.accounts).
-
-balance(Node, PubKey) ->
-  request(Node, 'GetAccountBalance',  #{account_pubkey => aec_base58c:encode(account_pubkey, PubKey)}).
-
-balance_post(_S, [_, _PubKey], Res) ->
-  case Res of
-    {ok, 200, #{balance := _B}} ->
-      true;  %% We don't know what the actual balance is.
-    {ok, 404, #{reason := <<"Account not found">>}} ->
-      true;  %% unless we mine extensively, this could happen
-    Other ->
-      Other
-  end.
-
-
-
-
-
-%% --- Operation: transaction_pool ---
-transaction_pool_args(S) ->
+http_ready_args(S) ->
   [elements(S#state.running)].
 
-transaction_pool_pre(S, [Node]) ->
-  lists:member(Node, S#state.running).
+http_ready_pre(S, [Node]) ->
+  lists:member(Node, S#state.running) andalso not lists:member(Node, S#state.http_ready).
 
-transaction_pool(Node) ->
-  case request(Node, 'GetTxs', #{}) of
-    {ok, 200, Transactions} ->
-      Txs = [ begin
-                {transaction, Trans} = aec_base58c:decode(T),
-                %% Not sure all transactions in pool must be signed???
-                aetx_sign:tx(aetx_sign:deserialize_from_binary(Trans))
-              end || #{tx := T} <- Transactions ],
-      io:format("\n\nTransactions ~p\nTxs ~p\n\n", [Transactions, Txs]),
-      Txs;
-    Res ->
+http_ready(Node) ->
+  try 
+      %% possibly add {node_startup_time, 20000} to options list
+      aest_nodes:wait_for_startup([Node], 0, [{ct_log,  false}]),
+      aest_nodes:get_top(Node)
+  catch _:Reason ->
+      {'EXIT', Reason}
+  end.
+
+http_ready_next(S, Value, [Node]) ->
+  S#state{http_ready = S#state.http_ready ++ [Node],
+          height = {call, ?MODULE, top_height, [Value, S#state.height]} }.
+
+
+%% --- add_account ---
+add_account_pre(S) ->
+  S#state.http_ready =/= [].
+
+add_account_args(S) ->
+  noshrink(
+  [elements(S#state.http_ready), 
+   patron, S#state.nonce_delta, account_gen(oneof([71, 200, 500, 1000])), 
+   fee(), ttl(S, ?DELTA_TTL), <<"quickcheck">>]).
+
+add_account_pre(S, [Node, _Sender, Nonce, {Name, _Balance}, Fee, TTL, _Payload]) ->
+  not lists:keymember(Name, #user.name, S#state.accounts) andalso
+    lists:member(Node, S#state.http_ready) andalso 
+    check_ttl(S, TTL) andalso
+    S#state.nonce_delta == Nonce andalso
+    %% and valid
+    Fee >= aec_governance:minimum_tx_fee().
+
+add_account_adapt(S, [Node, Sender, _Nonce, NewAccount, Fee, TTL, Payload]) ->
+  [Node, Sender, S#state.nonce_delta, NewAccount, Fee, ttl(S, TTL), Payload].
+
+add_account(Node, From, Nonce, {Name, Balance}, Fee, _, Payload) ->
+  #{ public := PubKey, secret := PrivKey} = enacl:sign_keypair(),
+  Receiver = #account{ pubkey = PubKey, balance = Balance, privkey = PrivKey },
+  ets:insert(accounts, {Name, Receiver}),
+  [{_, Sender}] = ets:lookup(accounts, From),
+  #{tx_hash := TxHash} = 
+        aest_nodes:post_spend_tx(Node, 
+                                 #{pubkey => Sender#account.pubkey,
+                                   privkey =>Sender#account.privkey}, 
+                                 #{pubkey => Receiver#account.pubkey}, 
+                                 Sender#account.nonce + Nonce, 
+                                 #{ amount    => Receiver#account.balance,   %% we create it with this much
+                                    fee       => Fee,
+                                    payload   => Payload}),
+    TxHash.
+
+add_account_next(S, Value, [_Node, _Sender, _Nonce, {Name, Balance}, _Fee, _TTL, _Payload]) ->
+  %% We assume there are always enough tokens in patron account
+  S#state{ accounts = S#state.accounts ++ [#user{name = Name, balance = Balance, nonce = 0}],
+           tx_hashes = [Value | S#state.tx_hashes],
+           nonce_delta = S#state.nonce_delta + 1}.
+
+add_account_features(S, [_Node, _Sender, _Nonce, _Receiver, _Fee, {SeenHeight, DeltaTTL}, _Payload], _Res) ->
+  [ {accounts, length(S#state.accounts) + 1},
+    {accounts, ttl_delta_overshoot, (SeenHeight + DeltaTTL) - S#state.height} ] .
+
+
+
+%% --- Operation: pingpong ---
+pingpong_pre(S) ->
+  S#state.http_ready =/= [] andalso length(S#state.accounts) > 1.
+
+pingpong_args(S) ->
+  ?LET({[Account1, Account2 | _], Fee, TTL},
+       {shuffle(S#state.accounts), fee(), ttl(S, ?DELTA_TTL)},
+       [elements(S#state.http_ready), 
+        #{from => Account1#user.name, 
+          from_nonce => Account1#user.nonce + 1, 
+          to => Account2#user.name,
+          to_nonce => Account2#user.nonce + 1,
+          fee => Fee, ttl => TTL}]).
+       
+pingpong_pre(S, [Node, #{from := From, from_nonce := FNonce, to := To,
+                         to_nonce := TNonce, ttl := TTL} = Tx]) ->
+  Account1 = lists:keyfind(From, #user.name, S#state.accounts),
+  Account2 = lists:keyfind(To, #user.name, S#state.accounts),
+  lists:member(Node, S#state.http_ready) andalso 
+    Account1 /= false andalso Account2 /= false andalso
+    Account1#user.nonce + 1 == FNonce andalso
+    Account2#user.nonce + 1 == TNonce andalso
+    check_ttl(S, TTL) andalso 
+    pingpong_valid(S, [Node, Tx]).
+
+pingpong_valid(S, [_Node, #{from := From, to := To, fee := Fee}]) ->
+  Account1 = lists:keyfind(From, #user.name, S#state.accounts),
+  Account2 = lists:keyfind(To, #user.name, S#state.accounts),
+  Fee >= aec_governance:minimum_tx_fee() andalso
+    Account1#user.balance >= Fee + 1 andalso
+    Account2#user.balance >= Fee.
+
+pingpong_adapt(S, [Node, #{from := From, to := To, ttl := TTL} = Tx]) ->
+  case {lists:keyfind(From, #user.name, S#state.accounts), 
+        lists:keyfind(To, #user.name, S#state.accounts)} of
+    {false, _} -> false;
+    {_, false} -> false;
+    {Account1, Account2} ->
+      [Node, Tx#{from_nonce => Account1#user.nonce + 1, to_nonce =>
+                   Account2#user.nonce, ttl => ttl(S, TTL)}]
+  end.
+
+pingpong(Node, #{fee := Fee} = Tx) ->
+  [{_, Account1}] = ets:lookup(accounts, maps:get(from, Tx)),
+  [{_, Account2}] = ets:lookup(accounts, maps:get(to, Tx)),
+  Payload = integer_to_list(aeu_time:now_in_msecs()) ++ " quickcheck",
+  TTL = case maps:get(ttl, Tx, 0) of
+            optional -> 0; %% not supported yet
+            {H, Delta} -> H + Delta
+        end,
+  #{tx_hash := PingTx} = 
+        aest_nodes:post_spend_tx(Node, 
+                                 #{pubkey =>  Account1#account.pubkey,
+                                   privkey => Account1#account.privkey}, 
+                                 #{pubkey => Account2#account.pubkey}, 
+                                 maps:get(from_nonce, Tx), 
+                                 #{ amount    => 1,   %% we create it with this much
+                                    fee       => Fee,
+                                    ttl       => TTL,
+                                    payload   => iolist_to_binary([Payload, " ping"])}),
+  #{tx_hash := PongTx} = 
+        aest_nodes:post_spend_tx(Node, 
+                                 #{pubkey =>  Account2#account.pubkey,
+                                   privkey => Account2#account.privkey}, 
+                                 #{pubkey => Account1#account.pubkey}, 
+                                 maps:get(to_nonce, Tx), 
+                                 #{ amount    => 1,   %% we create it with this much
+                                    fee       => Fee,
+                                    ttl       => TTL,
+                                    payload   => iolist_to_binary([Payload, " pong"])}),
+  [PingTx, PongTx].
+
+pingpong_next(S, Value, [_Node, #{from := From, from_nonce := FN, 
+                                   to := To, to_nonce := TN, fee := Fee}]) ->
+  Account1 = lists:keyfind(From, #user.name, S#state.accounts),
+  Account2 = lists:keyfind(To, #user.name, S#state.accounts),
+  Accounts = 
+    lists:keyreplace(Account1#user.name, #user.name,
+                     lists:keyreplace(Account2#user.name, #user.name, 
+                                      S#state.accounts, 
+                                      Account2#user{ balance =
+                                   Account2#user.balance - Fee, nonce = TN }),
+                     Account1#user{ balance = Account1#user.balance - Fee,
+                                    nonce = FN }),
+  S#state{accounts = Accounts,
+          tx_hashes = {call, ?MODULE, append, [Value , S#state.tx_hashes]}}.
+
+pingpong_post(_S, [_Account1, _Account2], Res) ->
+  case Res of
+    [ _, _] -> true;
+    _ ->
       Res
   end.
 
+
+append({exception, _}, L) ->
+  L;
+append(L1, L2) ->
+  L1 ++ L2.
+
+
+%% --- Operation: balance ---
+balance_pre(S) ->
+  S#state.http_ready =/= [] andalso S#state.accounts =/= [].
+
+balance_args(S) ->
+  [ elements(S#state.http_ready), ?LET(A, oneof(S#state.accounts), A#user.name), weighted_default({99, #{}}, 
+                                                                                                  {1, #{pubkey => binary()}}) ].
+
+balance_pre(S, [Node, Name, _]) ->
+  lists:member(Node, S#state.http_ready) andalso lists:keymember(Name, #user.name, S#state.accounts).
+
+balance(Node, Name, FaultInject) ->
+    [{_, #account{pubkey = PubKey}}] = ets:lookup(accounts, Name),
+    try
+        #{Node := #{PubKey := Balance}} = aest_nodes:wait_for_value({balance, PubKey, 0}, [Node], 2000,
+                                                                    [{fault_inject, FaultInject}]),
+        Balance
+    catch
+        _:Reason ->
+            case FaultInject =/= #{} andalso Reason == timeout of
+                true  -> undefined;
+                false -> {'EXIT', Reason, erlang:get_stacktrace()}
+            end
+    end.
+
+
+%% --- Operation: transaction_pool ---
+transaction_pool_pre(S) ->
+  S#state.http_ready =/= [].
+
+transaction_pool_args(S) ->
+  [elements(S#state.http_ready)].
+
+transaction_pool_pre(S, [Node]) ->
+  lists:member(Node, S#state.http_ready).
+
+transaction_pool(Node) ->
+    case catch aest_nodes:get_mempool(Node) of 
+        {'EXIT', Reason} ->
+            io:format("\n\nTransactions ~p\n\n", [Reason]),
+            %% on uat crashes (no internal interface accessible)
+            [];
+        Transactions ->
+            io:format("\n\nTransactions ~p\n\n", [Transactions]),
+            %% I might have saved them encoded in memory, need to re-encode if I want to compare
+            Txs = [ Tx || #{tx := Tx} <- Transactions ],
+            io:format("\n\nTransactions ~p\nTxs ~p\n\n", [Transactions, Txs]),
+            Txs
+    end.
 
 transaction_pool_post(_S, [_Node], Res) ->
   is_list(Res).
 
 
-%% --- Operation: name_preclaim ---
-%% name_preclaim_pre(S) ->
-%%     S#state.running /= [].
-
-%% name_preclaim_args(_S) ->
-%%   [elements(S#state.running), elements(S#state.accounts), choose(0,5), utf8()].
-
-name_preclaim_pre(S, [Node, _, _, _]) ->
-  lists:member(Node, S#state.running).
-
-name_preclaim(Node, Sender, Fee, Commitment) ->
-  {ok, Tx} =
-    aens_preclaim_tx:new(#{account    => Sender#account.pubkey,
-                           nonce      => Sender#account.nonce + 1,
-                           commitment => Commitment,
-                           fee        => Fee}),
-  SignedTx = aetx_sign:sign(Tx, Sender#account.privkey),
-  Transaction = aec_base58c:encode(transaction, aetx_sign:serialize_to_binary(SignedTx)),
-  request(Node, 'PostNamePreclaim',  #{tx => Transaction}).
-
-name_preclaim_next(S, _Value, [ _Node, #account{ balance = PB, nonce = PN } = Sender, Fee, Commitment]) ->
-  case PB >= Fee of
-    false -> S;  %% not enough balance
-    true ->
-      Accounts = lists:keyreplace(Sender#account.privkey, #account.privkey, S#state.accounts, 
-                                  Sender#account{ balance = PB - Fee, nonce = PN + 1 }),
-      S#state{ accounts = Accounts, names = S#state.names ++ [{Sender#account.pubkey, Commitment, preclaim}] }
-  end.
-
-name_preclaim_post(_S, [_Name], Res) ->
-  case Res of 
-    {ok, 200, _} -> true;
-    {error, socket_closed_remotely} ->
-      file:write_file("stats.txt", "C", [append]),
-      timer:sleep(1000),
-      socket_closed;
-    _ -> eq(Res, ok)
-  end.
-
-%% --- Operation: wait ---
-%% wait_args(_S) ->
-%%   [1000].
-
-%% wait(MSec) ->
-%%   timer:sleep(MSec).
-
 
 %% --- Operation: top ---
 top_pre(S) ->
-  S#state.running =/= [].
+  S#state.http_ready =/= [].
 
 top_args(S) ->
-  [elements(S#state.running)].
+  [elements(S#state.http_ready)].
 
 top_pre(S, [Node]) ->
-  lists:member(Node, S#state.running).
+  lists:member(Node, S#state.http_ready).
 
 top(Node) ->
-  request(Node, 'GetTop', #{}).
+    aest_nodes:get_top(Node).
+
+top_next(S, Value, [_Node]) ->
+  S#state{height = {call, ?MODULE, top_height, [Value, S#state.height]} }.
 
 top_post(_S, [_Node], Res) ->
   case Res of 
-    {ok, 200, _} -> true;
+    #{ height := _ }  -> true;
     _ -> eq(Res, ok)
   end.
 
 
+%%% -----------------------------------------------------------------------
+
 final_balances([], _) ->
-  {undefined, []};
-final_balances(Nodes, PubKeys) ->
-  TxPools = lists:append([ transaction_pool(Node) || Node <- Nodes ]),
-  Balances = [ balance(Node, PubKey) || Node <- Nodes, PubKey <- PubKeys ],
-  {lists:usort(Balances), lists:usort(TxPools)}.
+  undefined;
+final_balances(Nodes, Accounts) ->
+  Balances = [ {Account#user.name, balance(Node, Account#user.name, #{}), Account#user.balance} 
+               || Node <- Nodes, Account <- Accounts ],
+  lists:usort(Balances).
+
+%% Return all transactions that we genearated but are not yet on chain
+final_transactions([], _) ->
+  [];
+final_transactions([Node|_], _Hashes) ->
+  transaction_pool(Node).
+
+
+try_get_nonce(Node, PubKey) ->
+    case request(Node, 'GetAccountByPubkey', #{pubkey => aec_base58c:encode(account_pubkey, PubKey)}) of
+        {ok, 200, #{nonce := Nonce}} -> 
+            Nonce;
+        Reason -> 
+            eqc:format("error getting patron nonce ~p -> ~p\n", [Node, Reason]),
+            0
+    end.
+
+
 
 tag(_Tag, true) -> true;
 tag(Tag, false) -> Tag;
 tag(Tag, Other) -> {Tag, Other}. 
 
-weight(_S, start) -> 10;
-weight(S, add_account) -> 
-  if S#state.running == [] -> 0;
-     true -> 20
-  end;
-weight(_S, stop) -> 1;
-weight(_S, _) -> 2.
+weight(_S, add_account) -> 10;
+weight(_S, pingpong) -> 200;
+weight(_S, start) -> 1;
+weight(_S, balance) -> 0;
+weight(_S, transaction_pool) -> 0;
+weight(_S, _) -> 1.
 
 
-%% -- Property ---------------------------------------------------------------
-
-gen_ttl() ->
-    {delta, choose(3, 10)}.
-
+%% -- Generators -------------------------------------------------------------
 gen_key_pair() ->
     return(crypto:generate_key(ecdh, crypto:ec_curve(secp256k1))).
 
 account_gen(NatGen) ->
-    ?LET(Balance, NatGen,
-         begin
-           #{ public := PubKey, secret := PrivKey} = enacl:sign_keypair(),
-           #account{ pubkey = PubKey, balance = Balance, privkey = PrivKey }
-         end).
+    ?LET({[Name], Balance}, {eqc_erlang_program:words(1), NatGen}, {Name, Balance}).
 
+check_ttl(_S, Number) when is_integer(Number) ->
+  true;
+check_ttl(S, {Height, _}) ->
+  Height == S#state.height;
+check_ttl(_S, optional) ->
+  true.
+
+optional_ttl(Tx) ->
+  case maps:get(ttl, Tx) of
+    optional -> 
+      maps:without([ttl], Tx);
+    {Height, DTTL} ->
+          Tx#{ttl => Height + DTTL};
+     Absolute ->
+          Tx#{ttl => Absolute}
+  end.
+
+fee() ->
+  choose(1,5).
+
+%% -- Property ---------------------------------------------------------------
 
 %% UAT keys: https://github.com/aeternity/testnet-keys/tree/master/accounts/UAT_sender_account
 prop_transactions() ->
-  prop_transactions(10000, [#account{ pubkey = <<206,167,173,228,112,201,249,157,157,78,64,8,128,168,111,
+  prop_patron(10000, #account{ pubkey = <<206,167,173,228,112,201,249,157,157,78,64,8,128,168,111,
                                                  29,73,187,68,75,98,241,26,158,187,100,187,207,235,115,
                                                  254,243>>,
                                       privkey = <<230,169,29,99,60,119,207,87,113,50,157,51,84,179,188,
@@ -320,134 +417,165 @@ prop_transactions() ->
                                                   183,77,206,167,173,228,112,201,249,157,157,78,64,8,128,
                                                   168,111,29,73,187,68,75,98,241,26,158,187,100,187,207,
                                                   235,115,254,243>>,
-                                      balance = 1000000,
-                                      nonce = 19}]).
+                                      balance = 1000000 %% ensure at least this much in patron account
+                                   }, aest_docker).
 
+prop_uat() ->
+  prop_patron(7*60*1000, #account{ pubkey = <<206,167,173,228,112,201,249,157,157,78,64,8,128,168,111,
+                                                 29,73,187,68,75,98,241,26,158,187,100,187,207,235,115,
+                                                 254,243>>,
+                                      privkey = <<230,169,29,99,60,119,207,87,113,50,157,51,84,179,188,
+                                                  239,27,197,224,50,196,61,112,182,211,90,249,35,206,30,
+                                                  183,77,206,167,173,228,112,201,249,157,157,78,64,8,128,
+                                                  168,111,29,73,187,68,75,98,241,26,158,187,100,187,207,
+                                                  235,115,254,243>>,
+                                      balance = 1000000 %% ensure at least this much in patron account
+                                   }, aest_uat).
 
-prop_transactions(FinalSleep) ->
-  ?FORALL(Accounts, noshrink(non_empty(list(account_gen(1000000)))),
-          prop_transactions(FinalSleep, Accounts)).
+prop_dev2() ->
+   prop_patron(7*60*1000, #account{ pubkey = <<206,167,173,228,112,201,249,157,157,78,64,8,128,168,111,
+                                                 29,73,187,68,75,98,241,26,158,187,100,187,207,235,115,
+                                                 254,243>>,
+                                    privkey = <<230,169,29,99,60,119,207,87,113,50,157,51,84,179,188,
+                                                  239,27,197,224,50,196,61,112,182,211,90,249,35,206,30,
+                                                  183,77,206,167,173,228,112,201,249,157,157,78,64,8,128,
+                                                  168,111,29,73,187,68,75,98,241,26,158,187,100,187,207,
+                                                  235,115,254,243>>,
+                                    balance = 1000000 %% ensure at least this much in patron account
+                                   }, aest_dev2).  %% 31.13.249.78
 
-prop_transactions(FinalSleep, Accounts) ->
-  ?SETUP(fun() ->
-             
-             fun() -> ok end
-         end,
-         prop_patron(FinalSleep, Accounts)).
-
-prop_patron(FinalSleep, Accounts) ->
-  ?FORALL(Nodes, systems(2),
-  ?IMPLIES(all_connected(Nodes), 
-  ?FORALL(Cmds, more_commands(20, commands(?MODULE, #state{nodes = Nodes, accounts = Accounts})),
-  ?SOMETIMES(2,
+%% One could run this with an arbitrary generated account 
+prop_patron(FinalSleep, Patron, Backend) ->
+  eqc:dont_print_counterexample(
+  ?LET(Shrinking, parameter(shrinking, false),
+  ?FORALL([NodeName|_] = Nodes, systems(1),
+  ?FORALL(Cmds, more_commands(20, commands(?MODULE, #state{nodes = Nodes, running = [NodeName]})),
+  ?SOMETIMES(if not (Shrinking orelse Backend == aest_uat) -> 1; 
+                true -> 1 end,
   begin
+    %% file:write_file("exs.txt", io_lib:format("Cmds = ~p\n", [Cmds]), [append]),
     DataDir = filename:absname("data"),
     Genesis = filename:join(DataDir, "accounts.json"),
     JSON = 
       jsx:encode(
-        [ { aec_base58c:encode(account_pubkey, PK), B} || #account{ pubkey = PK, balance = B } <- Accounts ]),
+        [ { aec_base58c:encode(account_pubkey, Patron#account.pubkey), Patron#account.balance } ]),
     ok = filelib:ensure_dir(Genesis),
     ok = file:write_file(Genesis, JSON),
-    file:write_file("stats.txt", "|", [append]),
+    aest_nodes_mgr:start_link([Backend], #{ data_dir => DataDir
+                                          , temp_dir => "/tmp"
+                                          , log_fun => fun(Fmt, As) -> io:format(Fmt ++ ["\n"], As) end}
+                                          %% , log_fun => fun(Fmt, _As) -> io:format("#") end}
+                             ),
+    aest_nodes_mgr:setup_nodes(
+      aest_nodes:cluster(Nodes, #{ genesis => Genesis,
+                                   source => {pull, "aeternity/epoch:local"},
+                                   backend => Backend })),
+    %% eqc:format("Cmds = ~p\n", [Cmds]),
+    start(NodeName),
+    http_ready(NodeName),
+    PatronNonce = try_get_nonce(NodeName, Patron#account.pubkey),
+    eqc:format("Patron nonce ~p\n", [PatronNonce]),
+    Table = ets:new(accounts, [named_table]),
+    ets:insert(accounts, {patron, Patron#account{nonce = PatronNonce}}),
 
-    aest_nodes_mgr:start([aest_docker], #{data_dir => DataDir,
-                                          temp_dir => "/tmp"}),
-    aest_nodes_mgr:setup_nodes([ Node#{ genesis => Genesis,
-                                        backend => aest_docker
-                                      } || Node <- Nodes ]),
-    {H, S, Res} = run_commands(Cmds),
-    timer:sleep(FinalSleep),
-    {FinalBalances, TransactionPool} = final_balances(S#state.running, [ A#account.pubkey || A <-S#state.accounts]),
+    {H, S, Res} = run_commands(Cmds, [{patron_nonce, PatronNonce + 1}]),
+   
+    eqc:format("final state ~p\n", [S]),
+    WaitForChain =
+          case eqc_symbolic:eval(S#state.tx_hashes) of
+              [] -> [];
+              TxHashes ->
+                  OnNode = aest_nodes:wait_for_value({txs_on_node, TxHashes}, S#state.http_ready, 2000, []),
+                  case lists:usort([ Tx || {Tx, At} <- lists:append(maps:values(OnNode)),  At < 0 ]) of
+                      [] -> [];
+                      MemPool ->
+                          (catch aest_nodes:wait_for_value({txs_on_chain, MemPool}, 
+                                                           S#state.http_ready, FinalSleep, [{key_blocks, 0}]))
+                  end
+          end,
+    eqc:format("Wait for chain ~p\n", [WaitForChain]),
+    %% If this times out, then we have transactions in the mempool, or discareded transactions
+
+    FinalBalances = final_balances(S#state.http_ready, S#state.accounts),
     eqc:format("Balances ~p\n", [FinalBalances]),
-    NonceGapTxs = nonce_gaps(S#state.accounts, TransactionPool),
-    eqc:format("Nonces ~p\n", [NonceGapTxs]),
+
+    ets:delete(Table),
+    aest_nodes_mgr:dump_logs(),
 
     aest_nodes_mgr:stop(),
-    timer:sleep(8000),
+    if Backend =/= aest_uat -> timer:sleep(10000);
+       true -> ok
+    end,
 
     check_command_names(Cmds,
       measure(length, commands_length(Cmds),
-      measure(spend_tx, length([ 1 || {_, add_account, _} <- command_names(Cmds)]),
+      measure(spend_tx, lists:sum([ case Cmd of
+                                        add_account -> 1;
+                                        pingpong -> 2;
+                                        _ -> 0
+                                    end || {_, Cmd, _} <- command_names(Cmds)]),
+      aggregate(call_features(H),
         pretty_commands(?MODULE, Cmds, {H, S, Res},
                         conjunction([{result, Res == ok},
-                                     {transactions, equals([ Tx || Tx <- TransactionPool, 
-                                                                   is_possible(S#state.accounts, Tx),
-                                                                   not in_nonce_gap(NonceGapTxs, Tx)
-                                                           ], [])},
-                                     {nonce_gap, true}, %% equals(NonceGapTxs, [])
-                                     {invalid_transactions, subset(S#state.invalid_transactions, TransactionPool)}])))))
-  end)))).
+                                     {balances, equals([{Name, B, MB} || FinalBalances =/= undefined, {Name, B, MB}<-FinalBalances, B=/=MB], [])},
+                                     {transactions, equals(WaitForChain, [])}
+                                    ]))))))
+  end))))).
 
+prop_commands(Cmd) ->
+  ?FORALL(Cmds, commands(?MODULE, #state{nodes = [node1], running = [node1]}),
+          not lists:keymember(Cmd, 2, command_names(Cmds))).
 
-is_possible(Accounts, Tx) ->
-  From = aetx:origin(Tx),
-  FromBalance = balance_of(From, Accounts),
-  Type = aetx:tx_type(Tx),
-  Fee = aetx:fee(Tx),
-  Amount = 
-    case Type of
-      <<"spend_tx">> ->
-        %% Why is there no amount API ??? Utterly ugly.
-        {aetx,spend_tx,aec_spend_tx,
-         {spend_tx, _, _, A, _, _, _}} = Tx,
-        A
-      end,
-  Amount + Fee < FromBalance andalso Fee >= aec_governance:minimum_tx_fee().
-
-nonce_gaps(Accounts, Txs) ->
-  Unprocessed = 
-    lists:foldl(fun(Tx, Map) ->
-                    Sender = aetx:origin(Tx),
-                    Nonce = aetx:nonce(Tx),
-                    maps:put(Sender, lists:sort([Nonce | maps:get(Sender, Map, [])]), Map)
-                end, #{}, Txs), 
-  maps:fold(fun(Sender, Nonces, Acc) ->
-                [{Sender, dropped(nonce_of(Sender, Accounts), lists:reverse(Nonces))}] ++ Acc
-            end, [], Unprocessed).
-
-in_nonce_gap(Gaps, Tx) ->
-  Sender = aetx:origin(Tx),
-  Nonce = aetx:nonce(Tx),
-  case lists:keyfind(Sender, 1, Gaps) of
-    false ->
-      false;
-    {_, Nonces} ->
-      lists:member(Nonce, Nonces)
-  end.
-
-dropped(_Max, []) ->
-  [];
-dropped(Max, [N | Ns]) when Max > N ->
-  [N | Ns];
-dropped(Max, [Max | Ns]) ->
-  dropped(Max -1, Ns);
-dropped(_, _Ns) ->
-  [].
-
-
-
-
-%% There are no invalid transactions left in the pool.
-subset(Txs, Pool) ->
-  ?WHENFAIL(eqc:format("Txs = ~p =/= TransactionPool = ~p\n", [Txs, Pool]),
-            (Txs -- Pool) == Txs).
+check(Cmd) ->
+  [Cmds] = eqc:counterexample(eqc:numtests(2000, prop_commands(Cmd))),
+  io:format("------------------------------------------------------------\n"),
+  eqc:check(prop_transactions(), [[node1], Cmds, [{result, true}, {transactions, []}]]).
 
 %% -- helper functions
 
-all_connected(Nodes) ->
-  Graph = digraph:new(),
-  [ digraph:add_vertex(Graph, Name) || #{name := Name} <- Nodes ],
-  [ digraph:add_edge(Graph, Name, Peer) || #{name := Name, peers := Peers} <- Nodes, Peer <- Peers ],
-  Result = length(digraph_utils:components(Graph)) == 1,
-  digraph:delete(Graph),
-  Result.
-
-
 request(Node, Id, Params) ->
-  io:format("request ~p\n", [Id]),
-  aehttp_client:request(Id, Params, 
-                        [{ext_http, aest_nodes_mgr:get_service_address(Node, ext_http)}, 
-                         {ct_log, fun(Fmt, Args) -> io:format(Fmt++["\n"], Args) end }]).
+  io:format("------- ~p ~p\n", [Id, Params]),
+  aest_nodes:request(Node, Id, Params).
+
+wait_blocks(Node, N, Timeout) ->
+  Top = aest_nodes:get_top(Node),
+  H = maps:get(height, Top),
+  aest_nodes:wait_for_value({height, H + N}, [Node], Timeout, [{ct_log,  false}]).
+
+wait_blocks(Node, N, Hashes, Timeout) ->
+  Pool = final_transactions([Node], Hashes),
+  Top = aest_nodes:get_top(Node),
+  H = maps:get(height, Top),
+  case Pool of
+    [] ->
+      %% We're done, no transactions hanging
+      H;
+    _ ->
+      wait_blocks(Node, H+N, Timeout)
+  end.
+
+ok200(Resp, Field) ->
+  case ok200(Resp) of
+    M when is_map(M) ->
+      maps:get(Field, M, undefined);
+    _ -> undefined
+  end.
+                     
+ok200({ok, 200, Value}) ->
+  Value;
+ok200(_) ->
+  undefined.
+
+ok200s(Es, Field) when is_list(Es) ->
+  [ ok200(E, Field) || E <- Es ].
 
 
+top_height(#{height := H}, _LastSeen) ->
+  H;
+top_height(_, LastSeen) ->
+  LastSeen.
 
+sign(Tx, PrivKey) ->
+  Bin = aetx:serialize_to_binary(Tx),
+  Signatures = [ enacl:sign_detached(Bin, PrivKey) ],
+  aetx_sign:new(Tx, Signatures).
