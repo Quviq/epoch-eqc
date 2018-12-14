@@ -1,3 +1,6 @@
 system-test/data/aecore/.genesis
 system-test/data/accounts.json
 system-test/data/keys
+*.beam
+current_counterexample.eqc
+aefate/cover
