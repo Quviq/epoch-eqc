@@ -18,6 +18,9 @@ gen_nibble() -> choose(16#0, 16#F).
 gen_key() -> ?LET(Xs, non_empty(list(gen_nibble())),
                   return(<< <<X:4>> || X <- Xs >>)).
 
+gen_fixed_len_key(Len) -> ?LET(Xs, vector(Len, gen_nibble()),
+                               return(<< <<X:4>> || X <- Xs >>)).
+
 gen_put_key([]) -> gen_key();
 gen_put_key(Existing) ->
     frequency([{1, gen_key()},
@@ -79,6 +82,8 @@ alter_proof(DB) ->
         {Hash, BogusDB}
     end).
 
+long_list(N, Gen) ->
+    ?SIZED(X, resize(N * X, list(Gen))).
 
 %% -- Properties -------------------------------------------------------------
 prop_all_trees_ok() ->
@@ -214,7 +219,7 @@ prop_iterator_from() ->
     end)).
 
 prop_iterator_from_next() ->
-    ?FORALL({_Keys, Tree}, gen_tree(),
+    ?FORALL({_Keys, Tree}, ?SIZED(C, resize(2*C, gen_tree())),
     ?FORALL(Key, gen_key(),
     begin
         I = aeu_mp_trees:iterator_from(Key, Tree),
@@ -246,6 +251,46 @@ prop_iterator_depth() ->
         Keys = [ K || K <- Keys0, bit_size(K) div 4 =< MaxDepth ],
         equals(IterKeys, Keys)
     end)).
+
+prop_subtrees() ->
+    ?FORALL({Keys, Tree}, gen_tree(),
+    begin
+        lists:foldl(
+            fun(K, {ok, _}) -> aeu_mp_trees:read_only_subtree(K, Tree);
+               (_K, Err)    -> Err end, ok, Keys) == ok
+    end).
+
+%% Tobias idea - create a number of keys w. length 4 bytes, split them at 2
+%% bytes and insert all the prefix keys. Now iterate over all subtrees at the
+%% prefix keys and you should get exactly all (suffix) keys.
+prop_iterator_subtrees() ->
+    ?FORALL(Keys0, non_empty(long_list(10, gen_fixed_len_key(8))),
+    begin
+        Keys = lists:usort(Keys0),
+
+        Tree0 = lists:foldl(fun(K, T) -> tree_put(K, <<1>>, T) end, aeu_mp_trees:new(), Keys),
+
+        {ShortKeys0, ShortVals} =
+            lists:unzip([ {<<Prefix:16>>, Rest} || <<Prefix:16, Rest/binary>> <- Keys ]),
+
+        ShortKeys = lists:usort(ShortKeys0),
+
+        Tree1 = lists:foldl(fun(K, T) -> tree_put(K, <<1>>, T) end, Tree0, ShortKeys),
+
+        SubTrees = [ T || K <- ShortKeys, {ok, T} <- [aeu_mp_trees:read_only_subtree(K, Tree1)] ],
+
+        Elems = lists:concat([ iterate(aeu_mp_trees:iterator(ST)) || ST <- SubTrees ]),
+
+        equals(Elems, ShortVals)
+    end).
+
+%% Compute the subtree values from the list, and check that it matches.
+prop_subtrees2() ->
+    ?FORALL({Keys, Tree}, gen_tree(),
+    begin
+        SubTrees = find_subtrees(Keys),
+        [true] == lists:usort([true] ++ [ check_subtree(ST, Tree) || ST <- SubTrees ])
+    end).
 
 
 %% -- Helper functions -------------------------------------------------------
@@ -329,3 +374,22 @@ iterate(Iter) ->
         {Key, _Val, NextIter} -> [Key | iterate(NextIter)];
         '$end_of_table' -> []
     end.
+
+check_subtree({K, Vs}, Tree) ->
+    {ok, ST} = aeu_mp_trees:read_only_subtree(K, Tree),
+    Vs1 = iterate(aeu_mp_trees:iterator(ST)),
+    Vs == Vs1.
+
+find_subtrees(Keys) ->
+    find_subtrees(Keys, Keys).
+
+find_subtrees([K | Ks], All) ->
+    [{K, subkeys(K, erlang:bit_size(K), All -- [K])} | find_subtrees(Ks, All)];
+find_subtrees([], _) -> [].
+
+subkeys(K, L, [K2 | Keys]) ->
+    case K2 of
+        <<K:L/bitstring, Rest/bitstring>> -> [Rest | subkeys(K, L, Keys)];
+        _ -> subkeys(K, L, Keys)
+    end;
+subkeys(_, _, []) -> [].
