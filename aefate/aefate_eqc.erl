@@ -29,6 +29,15 @@ prop_format() ->
                           collect([FateData, unicode:characters_to_binary(String, latin1)], true)
                       end)).
 
+prop_format_scan() ->
+    ?FORALL(FateData, fate_type(),
+            ?WHENFAIL(eqc:format("Trying to format ~p failed~n",[FateData]),
+                      begin
+                          String = aefa_data:format(FateData),
+                          Scanned = aeso_scan:scan(unicode:characters_to_list(String)),
+                          true
+                      end)).
+
 fate_type() ->
     ?SIZED(Size, fate_type(Size, [map])).
 
