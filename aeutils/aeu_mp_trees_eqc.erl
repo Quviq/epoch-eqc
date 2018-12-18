@@ -6,8 +6,10 @@
 -compile(export_all).
 
 -include_lib("eqc/include/eqc.hrl").
+-include_lib("eqc/include/eqc_statem.hrl").
 
 %% -- Generators -------------------------------------------------------------
+
 gen_data() ->
     ?LET(Keys, list(gen_key()),
          ?LET(Vals, vector(length(Keys), gen_value()),
@@ -16,22 +18,31 @@ gen_data() ->
 gen_nibble() -> choose(16#0, 16#F).
 
 gen_key() -> ?LET(Xs, non_empty(list(gen_nibble())),
-                  return(<< <<X:4>> || X <- Xs >>)).
+                  return(nibbles(Xs))).
 
 gen_fixed_len_key(Len) -> ?LET(Xs, vector(Len, gen_nibble()),
-                               return(<< <<X:4>> || X <- Xs >>)).
+                               return(nibbles(Xs))).
+
+nibbles(Xs) -> << <<X:4>> || X <- Xs >>.
 
 gen_put_key([]) -> gen_key();
 gen_put_key(Existing) ->
     frequency([{1, gen_key()},
-               {1, ?LET({K, N}, {elements(Existing), gen_nibble()}, return(<<K/bitstring, N:4>>))}]).
+               {1, ?LET({K, Ns}, {elements(Existing), list(gen_nibble())},
+                        return(<<K/bitstring, (nibbles(Ns))/bitstring>>))}]).
 
 gen_delete_key([]) -> gen_key();
 gen_delete_key(Existing) ->
     frequency([{1, gen_key()},
                {1 + length(Existing) div 2, elements(Existing)}]).
 
-gen_value() -> weighted_default({5, gen_decodable()}, {1, binary(36)}).
+gen_subtree_key(Existing) ->
+    frequency([{1, <<>>},
+               {5, gen_delete_key(Existing)}]).
+
+gen_value() ->
+    frequency([{1, <<>>},
+               {9, weighted_default({5, gen_decodable()}, {1, binary(36)})}]).
 
 gen_decodable() -> ?SIZED(Size, gen_decodable(Size)).
 
@@ -85,7 +96,475 @@ alter_proof(DB) ->
 long_list(N, Gen) ->
     ?SIZED(X, resize(N * X, list(Gen))).
 
+gen_syllable() ->
+    elements(
+        ["ing", "er", "a", "ly", "ed", "i", "es", "re", "tion", "in", "e",
+         "con", "y", "ter", "ex", "al", "de", "com", "o", "di", "en", "an",
+         "ty", "ry", "u", "ti", "ri", "be", "per", "to", "pro", "ac", "ad",
+         "ar", "ers", "ment", "or", "tions", "ble", "der", "ma", "na", "si",
+         "un", "at", "dis", "ca", "cal", "man", "ap", "po", "sion", "vi", "el",
+         "est", "la", "lar", "pa", "ture", "for", "is", "mer", "pe", "ra", "so",
+         "ta", "as", "col", "fi", "ful", "ger", "low", "ni", "par", "son",
+         "tle", "day", "ny", "pen", "pre", "tive", "car", "ci", "mo", "on",
+         "ous", "pi", "se", "ten", "tor", "ver", "ber", "can", "dy", "et", "it",
+         "mu", "no", "ple", "cu", "fac", "fer", "gen", "ic", "land", "light",
+         "ob", "of", "pos", "tain", "den", "ings", "mag", "ments", "set",
+         "some", "sub", "sur", "ters", "tu", "af", "au", "cy", "fa", "im", "li",
+         "lo", "men", "min", "mon", "op", "out", "rec", "ro", "sen", "side",
+         "tal", "tic", "ties", "ward", "age", "ba", "but", "cit", "cle", "co",
+         "cov", "da", "dif", "ence", "ern", "eve", "hap", "ies", "ket", "lec",
+         "main", "mar", "mis", "my", "nal", "ness", "ning", "nu", "oc", "pres",
+         "sup", "te", "ted", "tem", "tin", "tri", "tro", "up"]).
+
+gen_word() ->
+    ?LET(Xs, ?SUCHTHAT(Ys, noshrink(eqc_gen:list(4, gen_syllable())), length(Ys) > 1),
+    return(lists:append(Xs))).
+
+gen_tree_id() -> gen_word().
+
+gen_iterator_opts() ->
+    weighted_default(
+        {5, none},
+        {1, eqc_gen:list(1, {max_path_length, choose(1, 20)})}).
+
+%% -- State ------------------------------------------------------------------
+
+-type(sym(A)) :: {var, integer()} | A.
+
+-record(state, {trees = #{} :: #{id() => tree()},
+                snapshots = [] :: [snapshot()] }).
+-record(tree, { contents    = []    :: [{key(), val()}],
+                db          = []    :: [{key(), val()}],
+                cache       = []    :: [sym(hash())],
+                db_hashes   = []    :: [sym(hash())],
+                is_readonly = false :: boolean(),
+                prefix      = <<>>  :: key() }).
+
+-type tree() :: #tree{}.
+-type id()  :: string().
+-type key() :: binary().
+-type val() :: iolist().
+-type hash() :: string().
+-type snapshot() :: {sym(hash()), [{key(), val()}]}.
+
+get_tree(Id, S) -> maps:get(Id, S#state.trees).
+
+get_data(Id, S) -> (get_tree(Id, S))#tree.contents.
+get_db(Id, S) -> (get_tree(Id, S))#tree.db.
+
+get_tree(Id) -> get({mp_tree, Id}).
+put_tree(Id, Tree) -> put({mp_tree, Id}, Tree).
+
+gen_tree_id(S) ->
+    elements(maps:keys(S#state.trees)).
+
+gen_tree_id_with_keys(S) ->
+    ?LET(Id, gen_tree_id(S),
+    return({Id, tree_keys(get_tree(Id, S))})).
+
+is_tree(Id, S) -> maps:is_key(Id, S#state.trees).
+
+is_readonly(Id, S) ->
+    (get_tree(Id, S))#tree.is_readonly.
+
+is_key(Key, Id, S) ->
+    lists:keymember(Key, 1, get_data(Id, S)).
+
+set_tree(Id, Tree, S) ->
+    S#state{ trees = (S#state.trees)#{ Id => Tree } }.
+
+on_tree(Id, Fun, S) ->
+    Tree = get_tree(Id, S),
+    set_tree(Id, Fun(Tree), S).
+
+on_data(Id, Fun, S) ->
+    on_tree(Id, fun(T) -> T#tree{ contents = Fun(T#tree.contents) } end, S).
+
+tree_keys(#tree{contents = Xs}) -> [ K || {K, _} <- Xs ].
+
+get_snapshot(Hash, S) ->
+    proplists:get_value(Hash, S#state.snapshots).
+
+add_snapshot(Hash, Id, S) ->
+    Tree = get_tree(Id, S),
+    case lists:sort(Tree#tree.contents) of
+        []   -> S;
+        Data ->
+            case lists:keyfind(Data, 2, S#state.snapshots) of
+                {Hash1, _} ->
+                    set_tree(Id, Tree#tree{ cache = [Hash1 | Tree#tree.cache -- [Hash1]] }, S);
+                false ->
+                    set_tree(Id, Tree#tree{ cache = [Hash | Tree#tree.cache] },
+                             S#state{ snapshots = [{Hash, Data} | S#state.snapshots] })
+            end
+    end.
+
+hashes(S) -> [ H || {H, _} <- S#state.snapshots ].
+
+reachable_hashes(T, S) ->
+    reachable_hashes(cache, T, S) ++ reachable_hashes(db, T, S).
+
+reachable_hashes(cache, T, S) ->
+    [ H || H <- T#tree.cache, is_reachable(H, T, S) ];
+reachable_hashes(db, T, S) ->
+    [ H || H <- T#tree.db_hashes, is_reachable(H, T, S) ].
+
+is_reachable(Hash, Tree, S) ->
+    lists:sort(Tree#tree.contents) == get_snapshot(Hash, S).
+
+initial_state() -> #state{}.
+
+%% -- Commands ---------------------------------------------------------------
+
+%% --- new ---
+
+new_args(_S) -> [gen_tree_id()].
+
+new_pre(S) -> #{} == S#state.trees.
+
+new_pre(S, [Id]) -> not is_tree(Id, S).
+
+new(Id) ->
+    put_tree(Id, aeu_mp_trees:new()),
+    ok.
+
+new_next(S, _V, [Id]) ->
+    set_tree(Id, #tree{}, S).
+
+%% --- put ---
+
+put_pre(S) -> #{} /= S#state.trees.
+
+put_args(S) ->
+    ?LET({Id, Keys}, gen_tree_id_with_keys(S),
+    [gen_put_key(Keys), gen_value(), return(Id)]).
+
+put_pre(S, [_Key, _Val, Id]) ->
+    is_tree(Id, S) andalso
+    not is_readonly(Id, S).
+
+put(Key, Val, Id) ->
+    NewTree = aeu_mp_trees:put(Key, Val, get_tree(Id)),
+    put_tree(Id, NewTree),
+    root_hash58(NewTree).
+
+put_next(S, V, [Key, <<>>, Id]) ->
+    delete_next(S, V, [Key, Id]);
+put_next(S, V, [Key, Val, Id]) ->
+    S1 = on_data(Id, fun(Data) -> [{Key, Val} | lists:keydelete(Key, 1, Data)] end, S),
+    add_snapshot(V, Id, S1).
+
+%% --- get ---
+
+get_args(S) ->
+    ?LET({Id, Keys}, gen_tree_id_with_keys(S),
+    [gen_delete_key(Keys), return(Id)]).
+
+get_pre(S) -> #{} /= S#state.trees.
+get_pre(S, [_Key, Id]) -> is_tree(Id, S).
+
+get(Key, Id) ->
+    aeu_mp_trees:get(Key, get_tree(Id)).
+
+get_post(S, [Key, Id], V) ->
+    eq(V, proplists:get_value(Key, get_data(Id, S), <<>>)).
+
+%% --- delete ---
+
+delete_args(S) ->
+    ?LET({Id, Keys}, gen_tree_id_with_keys(S),
+    [gen_delete_key(Keys), return(Id)]).
+
+delete_pre(S) -> #{} /= S#state.trees.
+delete_pre(S, [_Key, Id]) ->
+    is_tree(Id, S) andalso not is_readonly(Id, S).
+
+delete(Key, Id) ->
+    NewTree = aeu_mp_trees:delete(Key, get_tree(Id)),
+    put_tree(Id, NewTree),
+    root_hash58(NewTree).
+
+delete_next(S, V, [Key, Id]) ->
+    S1 = on_data(Id, fun(Data) -> lists:keydelete(Key, 1, Data) end, S),
+    add_snapshot(V, Id, S1).
+
+%% --- to_list ---
+
+to_list_args(S) ->
+    [gen_tree_id(S), gen_iterator_opts()].
+
+to_list_pre(S) -> #{} /= S#state.trees.
+to_list_pre(S, [Id, _Opts]) -> is_tree(Id, S).
+
+to_list(Id, Opts) ->
+    It = case Opts of
+            none -> aeu_mp_trees:iterator(get_tree(Id));
+            _    -> aeu_mp_trees:iterator(get_tree(Id), Opts)
+         end,
+    iterator_to_list(It).
+
+to_list_post(S, [Id, Opts], V) ->
+    eq(V, lists:sort([ E || E = {K, _} <- get_data(Id, S),
+                            bit_size(K) div 4 =< max_len(Opts)])).
+
+max_len(none) -> infinity;
+max_len(Opts) -> proplists:get_value(max_path_length, Opts, infinity).
+
+%% --- to_list_from ---
+
+to_list_from_args(S) ->
+    ?LET({Id, Keys}, gen_tree_id_with_keys(S),
+    [gen_delete_key(Keys), return(Id), gen_iterator_opts()]).    %% TODO: better key gen?
+
+to_list_from_pre(S) -> #{} /= S#state.trees.
+to_list_from_pre(S, [_Key, Id, _Opts]) -> is_tree(Id, S).
+
+to_list_from(Key, Id, Opts) ->
+    It = case Opts of
+            none -> aeu_mp_trees:iterator_from(Key, get_tree(Id));
+            _    -> aeu_mp_trees:iterator_from(Key, get_tree(Id), Opts)
+         end,
+    iterator_to_list(It).
+
+to_list_from_post(S, [Key, Id, Opts], V) ->
+    eq(V, lists:sort([ E || E = {K, _} <- get_data(Id, S),
+                            K > Key, bit_size(K) div 4 =< max_len(Opts) ])).
+
+%% --- to_sublist ---
+
+to_sublist_args(S) ->
+    ?LET({Id, Keys}, gen_tree_id_with_keys(S),
+    [gen_delete_key(Keys), return(Id)]).    %% TODO: better key gen?
+
+to_sublist_pre(S) -> #{} /= S#state.trees.
+to_sublist_pre(S, [_Key, Id]) -> is_tree(Id, S).
+
+to_sublist(Key, Id) ->
+    It = aeu_mp_trees:iterator_from(Key, get_tree(Id), [{with_prefix, Key}]),
+    iterator_to_list(It).
+
+to_sublist_post(S, [Key, Id], V) ->
+    eq(V, lists:sort([ E || E = {K, _} <- get_data(Id, S),
+                            strict_prefix(Key, K) ])).
+
+%% --- root_hash ---
+
+root_hash_args(S) -> [gen_tree_id(S)].
+
+root_hash_pre(S) -> #{} /= S#state.trees.
+root_hash_pre(S, [Id]) ->
+    is_tree(Id, S) andalso
+    not is_readonly(Id, S) andalso
+    [] /= get_data(Id, S).
+
+root_hash(Id) ->
+    base58:binary_to_base58(aeu_mp_trees:root_hash(get_tree(Id))).
+
+root_hash_post(S, [Id], Res) ->
+    Tree   = get_tree(Id, S),
+    Prefix = Tree#tree.prefix,
+    Fresh  = safe_build_tree([ {put, <<Prefix/bits, K/bits>>, V} || {K, V} <- Tree#tree.contents ]),
+    eq(Res, base58:binary_to_base58(aeu_mp_trees:root_hash(Fresh))).
+
+%% --- restore ---
+
+restore_args(S) -> [gen_tree_id(S), elements(hashes(S))].
+
+restore_pre(S) ->
+    #{} /= S#state.trees andalso
+    []  /= S#state.snapshots.
+
+restore_pre(S, [Id, Hash]) ->
+    is_tree(Id, S) andalso
+    not is_readonly(Id, S) andalso
+    lists:member(Hash, hashes(S)).
+
+restore(Id, Hash) ->
+    Tree = get_tree(Id),
+    try
+        put_tree(Id, aeu_mp_trees:new(from_base58(Hash), aeu_mp_trees:db(Tree))),
+        true
+    catch _:{hash_not_present_in_db, _} ->
+        false
+    end.
+
+restore_next(S, _V, [Id, Hash]) ->
+    Tree = get_tree(Id, S),
+    case restore_ok(S, Id, Hash) of
+        false -> S;
+        true  ->
+            set_tree(Id, Tree#tree{ contents = get_snapshot(Hash, S) }, S)
+    end.
+
+restore_ok(S, Id, Hash) ->
+    Tree = get_tree(Id, S),
+    lists:member(Hash, Tree#tree.cache ++ Tree#tree.db_hashes).
+
+restore_post(S, [Id, Hash], V) ->
+  eq(V, restore_ok(S, Id, Hash)).
+
+%% --- subtree ---
+
+subtree_args(S) ->
+    ?LET({Id, Keys}, gen_tree_id_with_keys(S),
+    [gen_tree_id(), gen_subtree_key(Keys), return(Id)]).
+
+subtree_pre(S) -> #{} /= S#state.trees.
+subtree_pre(S, [New, Key, Id]) ->
+    is_tree(Id, S) andalso
+    not is_tree(New, S) andalso
+    (is_key(Key, Id, S) orelse
+     Key == <<>> andalso (get_tree(Id, S))#tree.is_readonly).
+
+subtree(NewId, Key, Id) ->
+    case aeu_mp_trees:read_only_subtree(Key, get_tree(Id)) of
+        {ok, Tree} -> put_tree(NewId, Tree), true;
+        {error, no_such_subtree} -> false
+    end.
+
+subtree_next(S, _V, [NewId, Key, Id]) ->
+    case subtree_ok(S, Key, Id) of
+        false -> S;
+        true ->
+            Data = get_data(Id, S),
+            NewData = [ {K1, V} || {K, V} <- Data, {ok, K1} <- [strip_prefix(Key, K)] ],
+            Subtree = #tree{ is_readonly = true, prefix = Key, contents = NewData },
+            set_tree(NewId, Subtree, S)
+    end.
+
+subtree_post(S, [_NewId, Key, Id], V) ->
+    eq(V, subtree_ok(S, Key, Id)).
+
+subtree_ok(_, _, _) -> true.
+
+%% --- commit ---
+
+commit_args(S) -> [gen_tree_id(S)].
+
+commit_pre(S) -> #{} /= S#state.trees.
+commit_pre(S, [Id]) -> is_tree(Id, S) andalso not is_readonly(Id, S).
+
+commit(Id) ->
+    put_tree(Id, aeu_mp_trees:commit_reachable_to_db(get_tree(Id))),
+    ok.
+
+commit_next(S, _V, [Id]) ->
+  on_tree(Id, fun(T) -> T#tree{ db        = T#tree.contents,
+                                cache     = [],
+                                db_hashes = reachable_hashes(cache, T, S) ++ T#tree.db_hashes } end, S).
+
+%% --- gc_cache ---
+
+gc_cache_args(S) -> [gen_tree_id(S)].
+
+gc_cache_pre(S) -> #{} /= S#state.trees.
+gc_cache_pre(S, [Id]) -> is_tree(Id, S) andalso not is_readonly(Id, S).
+
+gc_cache(Id) ->
+    put_tree(Id, aeu_mp_trees:gc_cache(get_tree(Id))),
+    ok.
+
+gc_cache_next(S, _V, [Id]) ->
+    on_tree(Id, fun(T) -> T#tree{ cache = reachable_hashes(cache, T, S) } end, S).
+
+%% --- new_from_reachable ---
+
+new_from_reachable_args(S) -> [gen_tree_id(S)].
+
+new_from_reachable_pre(S) -> #{} /= S#state.trees.
+new_from_reachable_pre(S, [Id]) ->
+    is_tree(Id, S) andalso
+    [] /= get_data(Id, S).
+
+new_from_reachable(Id) ->
+    Tree = get_tree(Id),
+    RootHash = aeu_mp_trees:root_hash(Tree),
+    VisitFun =
+        fun(Hash, BinNode, DB) ->
+            case aeu_mp_trees_db:get(Hash, DB) of
+                none ->
+                    {continue, aeu_mp_trees_db:put(Hash, BinNode, DB)};
+                {value, _} -> stop
+            end
+        end,
+    DB = aeu_mp_trees:visit_reachable_hashes(Tree, new_dict_db(), VisitFun),
+    NewTree = aeu_mp_trees:new(RootHash, DB),
+    put_tree(Id, NewTree),
+    ok.
+
+new_from_reachable_next(S, _V, [Id]) ->
+    on_tree(Id, fun(T) -> T#tree{ db = [],
+                                  db_hashes = [],
+                                  cache = reachable_hashes(T, S) } end, S).
+
+%% --- visit_reachable ---
+
+visit_reachable_args(S) -> [gen_tree_id(S)].
+
+visit_reachable_pre(S) -> #{} /= S#state.trees.
+visit_reachable_pre(S, [Id]) ->
+    is_tree(Id, S) andalso
+    [] /= get_data(Id, S).
+
+visit_reachable(Id) ->
+    Tree = get_tree(Id),
+    Hashes =
+        aeu_mp_trees:visit_reachable_hashes(Tree, [],
+            fun(Hash, _Node, Acc) -> {continue, [Hash | Acc]} end),
+    [ base58:binary_to_base58(H) || H <- Hashes ].
+
+visit_reachable_post(S, [Id], V) ->
+  eq([], lists:usort(reachable_hashes(get_tree(Id, S), S)) -- V).
+
+%% --- unfold ---
+
+unfold_args(S) ->
+    ?LET({Id, Keys}, gen_tree_id_with_keys(S),
+    [gen_delete_key(Keys), return(Id)]).
+
+unfold_pre(S) -> #{} /= S#state.trees.
+unfold_pre(S, [_Key, Id]) ->
+    is_tree(Id, S).
+
+unfold(Key, Id) ->
+    Tree = get_tree(Id),
+    Hash = aeu_mp_trees:root_hash(Tree),
+    aeu_mp_trees:unfold(Key, Hash, Tree).
+
+unfold_post(_S, [_Key, _Id], V) ->
+    is_list(V).
+
+%% -- Common ----------------------------------------------------------------
+
+weight(_, put)                -> 5;
+weight(_, get)                -> 5;
+weight(_, delete)             -> 3;
+weight(_, new_from_reachable) -> 3;
+weight(_, subtree)            -> 3;
+weight(_, to_list)            -> 3;
+weight(_, to_list_from)       -> 3;
+weight(_, to_sublist)         -> 3;
+weight(_, new)                -> 1;
+weight(_, root_hash)          -> 1;
+weight(_, commit)             -> 1;
+weight(_, gc_cache)           -> 1;
+weight(_, unfold)             -> 1;
+weight(_, _)                  -> 3.
+
 %% -- Properties -------------------------------------------------------------
+
+prop_ok() ->
+  ?FORALL(Cmds, commands(?MODULE),
+  begin
+    erase(),
+    HSR={_, _, Res} = run_commands(Cmds),
+    pretty_commands(?MODULE, Cmds, HSR,
+    check_command_names(?MODULE, Cmds,
+      Res == ok))
+  end).
+
+%% -- Old properties ---------------------------------------------------------
+
 prop_all_trees_ok() ->
     ?FORALL(Ops, gen_ops(),
     begin
@@ -196,7 +675,7 @@ prop_iterator() ->
         equals(IterKeys, Keys)
     end).
 
-prop_iterator_next() ->
+prop_iterator_next1() ->
     ?FORALL({Keys, Tree}, gen_tree(),
     ?IMPLIES(length(Keys) > 1,
     begin
@@ -218,7 +697,7 @@ prop_iterator_from() ->
         true
     end)).
 
-prop_iterator_from_next() ->
+prop_iterator_from_next1() ->
     ?FORALL({_Keys, Tree}, ?SIZED(C, resize(2*C, gen_tree())),
     ?FORALL(Key, gen_key(),
     begin
@@ -294,6 +773,7 @@ prop_subtrees2() ->
 
 
 %% -- Helper functions -------------------------------------------------------
+
 tree_put(K, V, Tree) ->
     aeu_mp_trees:put(K, V, Tree).
 
@@ -307,7 +787,23 @@ tree_hash(Tree) ->
     aeu_mp_trees:root_hash(Tree).
 
 tree_construct_proof(Key, Tree) ->
-    aeu_mp_trees:construct_proof(Key, aeu_mp_trees_db:new(dict_db_spec()), Tree).
+    aeu_mp_trees:construct_proof(Key, new_dict_db(), Tree).
+
+root_hash58(Tree) ->
+    base58:binary_to_base58(aeu_mp_trees:root_hash(Tree)).
+
+from_base58(S) -> base58:base58_to_binary(S).
+
+new_dict_db() -> aeu_mp_trees_db:new(dict_db_spec()).
+
+iterator_to_list(It) ->
+    Iter = fun Iter(I, Acc) ->
+                case aeu_mp_trees:iterator_next(I) of
+                    '$end_of_table' -> lists:reverse(Acc);
+                    {Key, Val, Next} ->
+                        Iter(Next, [{Key, Val} | Acc])
+                end end,
+    Iter(It, []).
 
 ops_keys(Ops) ->
     lists:usort([ K || {K, _} <- build_ref(Ops) ]).
@@ -357,17 +853,19 @@ dict_db_spec() ->
      , cache  => dict:new()
      , get    => {?MODULE, dict_db_get}
      , put    => {?MODULE, dict_db_put}
-     , commit => {?MODULE, dict_db_commit}
+     , drop_cache => {?MODULE, dict_db_drop_cache}
      }.
 
 dict_db_get(Key, Dict) ->
-    {value, dict:fetch(Key, Dict)}.
+    case dict:find(Key, Dict) of
+        {ok, Val} -> {value, Val};
+        error -> none
+    end.
 
 dict_db_put(Key, Val, Dict) ->
     dict:store(Key, Val, Dict).
 
-dict_db_commit(Cache, DB) ->
-    {ok, dict:new(), dict:merge(fun(_, _, Val) -> Val end, Cache, DB)}.
+dict_db_drop_cache(_) -> dict:new().
 
 iterate(Iter) ->
     case aeu_mp_trees:iterator_next(Iter) of
@@ -393,3 +891,21 @@ subkeys(K, L, [K2 | Keys]) ->
         _ -> subkeys(K, L, Keys)
     end;
 subkeys(_, _, []) -> [].
+
+is_prefix(Prefix, Key) -> Prefix == Key orelse strict_prefix(Prefix, Key).
+
+strict_prefix(Prefix, Key) ->
+    case strip_prefix(Prefix, Key) of
+        {ok, _} -> true;
+        {error, not_a_prefix} -> false
+    end.
+
+strip_prefix(Key, Key) -> {error, not_a_prefix};
+strip_prefix(<<>>, Key) ->
+    {ok, Key};
+strip_prefix(Prefix, Key) ->
+    S = bit_size(Prefix),
+    case Key of
+        <<Prefix:S/bits, Rest/bits>> -> {ok, Rest};
+        _ -> {error, not_a_prefix}
+    end.
