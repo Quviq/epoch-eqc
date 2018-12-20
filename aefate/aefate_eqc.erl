@@ -54,7 +54,7 @@ fate_type(Size, Options) ->
     oneof([?LAZY(fate_type(Size - 1, Options)),
            ?LAZY(fate_list( Smaller )),
            ?LAZY(fate_tuple( list( Smaller ))),
-           ?LAZY(fate_variant( choose(0,255), fate_tuple(list( Smaller))))
+           ?LAZY(fate_variant( choose(0,255), ?LET(L, list( Smaller), list_to_tuple(L))))
           ] ++ 
               [
                ?LAZY(fate_map( fate_type(Size div 3, Options -- [map, void]),
