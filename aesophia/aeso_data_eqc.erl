@@ -114,11 +114,17 @@ prop_binary_to_heap() ->
     begin
       BaseAddr = Offs * 32,
       Binary = aeso_data:to_binary(Value),
-      case aeso_data:binary_to_heap(Type, Binary, BaseAddr) of
-        {ok, Ptr, Heap} ->
+      Typerep = typerep(Type),
+      case aeso_data:binary_to_heap(Typerep, Binary, BaseAddr) of
+        {ok, HeapValue} ->
+          Ptr  = aeso_data:heap_value_pointer(HeapValue),
+          Heap = aeso_data:heap_value_heap(HeapValue),
+          FromHeap = aeso_data:from_heap(Type, <<0:BaseAddr/unit:8, Heap/binary>>, Ptr),
+          Binary1  = aeso_data:heap_to_binary(Typerep, HeapValue),
           ?WHENFAIL(io:format("Ptr = ~p\nHeap = ~p\n", [Ptr, aeso_test_utils:dump_words(Heap)]),
-          equals(aeso_data:from_heap(Type, <<0:BaseAddr/unit:8, Heap/binary>>, Ptr),
-                 {ok, Value}));
+          conjunction(
+            [ {from_heap, equals(FromHeap, {ok, Value})},
+              {heap_to_binary, equals(Binary1, {ok, Binary}) }]));
         Err = {error, _} -> equals(Err, ok)
       end
     end))).
@@ -129,12 +135,16 @@ prop_heap_to_binary() ->
     ?FORALL(Offs,  choose(0, 16),
     begin
       BaseAddr = Offs * 32,
+      Typerep  = typerep(Type),
       <<Ptr:256, _/binary>> = Heap = aeso_data:to_binary(Value, BaseAddr),
-      case aeso_data:heap_to_binary(Type, <<0:BaseAddr/unit:8, Heap/binary>>, Ptr) of
+      HeapValue = aeso_data:heap_value(Ptr, Heap, BaseAddr),
+      ?WHENFAIL(io:format("Heap = ~p\n", [aeso_test_utils:dump_words(Heap)]),
+      case aeso_data:heap_to_binary(Typerep, HeapValue) of
         {ok, Binary} ->
           ?WHENFAIL(io:format("Binary = ~p\n", [aeso_test_utils:dump_words(Binary)]),
           equals(aeso_data:from_binary(Type, Binary),
                  {ok, Value}));
         Err = {error, _} -> equals(Err, ok)
-      end
+      end)
     end))).
+

@@ -14,7 +14,7 @@ gen_sci() ->
              {1, ?LET(X, choose(16#8000,16#FFFF), (16#21 bsl 24) + X)}]).
 
 prop_roundtrip_basic() ->
-  ?FORALL(X, choose(1, ?HIGHEST_TARGET_INT),
+  ?FORALL(X, choose(0, ?HIGHEST_TARGET_INT),
   ?TIMEOUT(100,
   begin
     Sci = aec_pow:integer_to_scientific(X),
