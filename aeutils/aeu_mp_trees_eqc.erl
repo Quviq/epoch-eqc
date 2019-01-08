@@ -8,6 +8,8 @@
 -include_lib("eqc/include/eqc.hrl").
 -include_lib("eqc/include/eqc_statem.hrl").
 
+-import(eqc_statem, [tag/2]).
+
 %% -- Generators -------------------------------------------------------------
 
 gen_data() ->
@@ -469,70 +471,74 @@ gc_cache_next(S, _V, [Id]) ->
 
 %% --- new_from_reachable ---
 
-new_from_reachable_args(S) -> [gen_tree_id(S)].
+new_from_reachable_args(S) -> [gen_tree_id(), gen_tree_id(S)].
 
 new_from_reachable_pre(S) -> #{} /= S#state.trees.
-new_from_reachable_pre(S, [Id]) ->
+new_from_reachable_pre(S, [NewId, Id]) ->
     is_tree(Id, S) andalso
+    not is_tree(NewId, S) andalso
     [] /= get_data(Id, S).
 
-new_from_reachable(Id) ->
-    Tree = get_tree(Id),
-    RootHash = aeu_mp_trees:root_hash(Tree),
-    VisitFun =
-        fun(Hash, BinNode, DB) ->
-            case aeu_mp_trees_db:get(Hash, DB) of
-                none ->
-                    {continue, aeu_mp_trees_db:put(Hash, BinNode, DB)};
-                {value, _} -> stop
-            end
-        end,
-    DB = aeu_mp_trees:visit_reachable_hashes(Tree, new_dict_db(), VisitFun),
-    NewTree = aeu_mp_trees:new(RootHash, DB),
-    put_tree(Id, NewTree),
+new_from_reachable(NewId, Id) ->
+    NewTree = new_from_reachable(get_tree(Id)),
+    put_tree(NewId, NewTree),
     ok.
 
-new_from_reachable_next(S, _V, [Id]) ->
-    on_tree(Id, fun(T) -> T#tree{ db = [],
-                                  db_hashes = [],
-                                  cache = reachable_hashes(T, S) } end, S).
+reachable_hashes(Tree) ->
+    VisitFun = fun(Hash, BinNode, Acc) -> {continue, [{Hash, BinNode} | Acc]} end,
+    aeu_mp_trees:visit_reachable_hashes(Tree, [], VisitFun).
 
-%% --- visit_reachable ---
+new_from_hashes(Root, DBHashes) ->
+    DB = lists:foldl(fun({Hash, BinNode}, DB) -> aeu_mp_trees_db:put(Hash, BinNode, DB) end,
+                     new_dict_db(), DBHashes),
+    aeu_mp_trees:new(Root, DB).
 
-visit_reachable_args(S) -> [gen_tree_id(S)].
+new_from_reachable(Tree) ->
+    Root = aeu_mp_trees:root_hash(Tree),
+    new_from_hashes(Root, reachable_hashes(Tree)).
 
-visit_reachable_pre(S) -> #{} /= S#state.trees.
-visit_reachable_pre(S, [Id]) ->
-    is_tree(Id, S) andalso
-    [] /= get_data(Id, S).
+new_from_reachable_next(S, _V, [NewId, Id]) ->
+    T = get_tree(Id, S),
+    set_tree(NewId, T#tree{ db = [],
+                            db_hashes = [],
+                            cache = reachable_hashes(T, S) }, S).
 
-visit_reachable(Id) ->
-    Tree = get_tree(Id),
-    Hashes =
-        aeu_mp_trees:visit_reachable_hashes(Tree, [],
-            fun(Hash, _Node, Acc) -> {continue, [Hash | Acc]} end),
-    [ base58:binary_to_base58(H) || H <- Hashes ].
-
-visit_reachable_post(S, [Id], V) ->
-  eq([], lists:usort(reachable_hashes(get_tree(Id, S), S)) -- V).
+new_from_reachable_post(S, [_NewId, Id], _) ->
+    %% Check that we can't delete anything from the database without breaking
+    %% the tree.
+    Tree        = get_tree(Id),
+    Root        = tree_hash(Tree),
+    DBHashes    = reachable_hashes(Tree),
+    {Hashes, _} = lists:unzip(DBHashes),
+    Data        = lists:sort(get_data(Id, S)),
+    BrokenTree  = fun(Hash) -> new_from_hashes(Root, lists:keydelete(Hash, 1, DBHashes)) end,
+    eq([], [ to_base58(Hash) || Hash <- Hashes, Data == (catch lists:sort(to_list(BrokenTree(Hash), none))) ]).
 
 %% --- unfold ---
 
-unfold_args(S) ->
-    ?LET({Id, Keys}, gen_tree_id_with_keys(S),
-    [gen_delete_key(Keys), return(Id)]).
+unfold_tree_args(S) -> [gen_tree_id(S)].
 
-unfold_pre(S) -> #{} /= S#state.trees.
-unfold_pre(S, [_Key, Id]) ->
-    is_tree(Id, S).
+unfold_tree_pre(S) -> #{} /= S#state.trees.
+unfold_tree_pre(S, [Id]) -> is_tree(Id, S).
 
-unfold(Key, Id) ->
+unfold_tree(Id) ->
     Tree = get_tree(Id),
-    Hash = aeu_mp_trees:root_hash(Tree),
-    aeu_mp_trees:unfold(Key, Hash, Tree).
+    do_unfold([{node, <<>>, dummy}], Tree, []).
 
-unfold_post(_S, [_Key, _Id], V) ->
-    is_list(V).
+unfold_tree_post(S, [Id], V) ->
+    {Keys, _} = lists:unzip(get_data(Id, S)),       %% BUG: Unfold drops "interior" keys
+    Missing = [ K || K <- Keys -- V, not lists:any(fun(K1) -> strict_prefix(K, K1) end, Keys) ],
+    Extra   = V -- Keys,
+    conj([tag(extra, eq(Extra, [])),
+          tag(missing, eq(Missing, []))]).
+
+do_unfold([], _Tree, Acc) -> lists:reverse(Acc);
+do_unfold([Node | Nodes], Tree, Acc) ->
+    case Node of
+        {leaf, Path} -> do_unfold(Nodes, Tree, [Path | Acc]);
+        {node, Path, Enc} ->
+            do_unfold(aeu_mp_trees:unfold(Path, Enc, Tree) ++ Nodes, Tree, Acc)
+    end.
 
 %% -- Common ----------------------------------------------------------------
 
@@ -792,6 +798,7 @@ tree_construct_proof(Key, Tree) ->
 root_hash58(Tree) ->
     base58:binary_to_base58(aeu_mp_trees:root_hash(Tree)).
 
+to_base58(S)   -> base58:binary_to_base58(S).
 from_base58(S) -> base58:base58_to_binary(S).
 
 new_dict_db() -> aeu_mp_trees_db:new(dict_db_spec()).
