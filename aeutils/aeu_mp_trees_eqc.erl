@@ -512,7 +512,14 @@ new_from_reachable_post(S, [_NewId, Id], _) ->
     {Hashes, _} = lists:unzip(DBHashes),
     Data        = lists:sort(get_data(Id, S)),
     BrokenTree  = fun(Hash) -> new_from_hashes(Root, lists:keydelete(Hash, 1, DBHashes)) end,
-    eq([], [ to_base58(Hash) || Hash <- Hashes, Data == (catch lists:sort(to_list(BrokenTree(Hash), none))) ]).
+    IsBroken    = fun(Hash) ->
+            try lists:sort(to_list(BrokenTree(Hash), none)) of
+                Data                                    -> same_tree;
+                Data1 when length(Data1) < length(Data) -> true;
+                Data1                                   -> {same_size, Data1}
+            catch _:_ -> true end
+        end,
+    eq([], [ {to_base58(Hash), Why} || Hash <- Hashes, Why <- [IsBroken(Hash)], Why /= true ]).
 
 %% --- unfold ---
 
