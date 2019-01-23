@@ -15,11 +15,12 @@
 -include_lib("eqc/include/eqc_statem.hrl").
 
 -compile([export_all, nowarn_export_all]).
--define(REMOTE_NODE, 'oldepoch@localhost'). 
+-define(REMOTE_NODE, 'oldepoch@localhost').
+-define(Patron, <<1, 1, 0:240>>).
 
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
-    #{}.
+    #{accounts => []}.
 
 %% -- Generators -------------------------------------------------------------
 
@@ -40,13 +41,19 @@ init_pre(S) ->
     not maps:is_key(trees, S).
 
 init_args(_S) ->
-    [aec_trees:new(), aetx_env:tx_env(0, 1)].
+    [aetx_env:tx_env(0, 1)].
 
-init(_, _) ->
-    ok.
+init(_) ->
+    Trees = rpc(aec_trees, new_without_backend, []),
+    EmptyAccountTree = rpc(aec_trees, accounts, [Trees]),
+    Account = rpc(aec_accounts, new, [?Patron, 1200000]), 
+    AccountTree = rpc(aec_accounts_trees, enter, [Account, EmptyAccountTree]),
+    rpc(aec_trees, set_accounts, [Trees, AccountTree]).
 
-init_next(S, _Value, [Trees, TxEnv]) ->
-    S#{trees => Trees, tx_env => TxEnv}.
+init_next(S, Value, [TxEnv]) ->
+    S#{trees => Value, 
+       tx_env => TxEnv, 
+       accounts => [{?Patron, 1200000, 1}]}.
 
 %% --- Operation: mine ---
 mine_pre(S) ->
@@ -54,24 +61,61 @@ mine_pre(S) ->
 
 mine_args(#{trees := Trees, tx_env := TxEnv}) ->
     Height = aetx_env:height(TxEnv),
-    {Local, Remote} = rpc(aec_trees, perform_pre_transformations, [Trees, Height + 1]),
-    [Local, Remote, Height].
+    [Trees, Height].
 
-mine_pre(#{tx_env := TxEnv}, [_, _, H]) ->
+mine_pre(#{tx_env := TxEnv}, [_, H]) ->
     aetx_env:height(TxEnv) == H.
 
-mine(Local, Remote, _Height) ->
-    Local == Remote.
+mine(Trees, Height) ->
+    rpc(aec_trees, perform_pre_transformations, [Trees, Height + 1]).
 
-mine_next(#{tx_env := TxEnv} = S, _Value, [Local, _Remote, H]) ->
-    S#{trees => Local, tx_env => aetx_env:set_height(TxEnv, H + 1)}.
-
-mine_post(_S, [_, _, _], Bool) ->
-    Bool.
+mine_next(#{tx_env := TxEnv} = S, Value, [_, H]) ->
+    S#{trees => Value, tx_env => aetx_env:set_height(TxEnv, H + 1)}.
 
 
+%% --- Operation: spend ---
+spend_pre(S) ->
+    maps:is_key(trees, S).
 
-%% --- ... more operations
+spend_args(#{accounts := Accounts, trees := Trees, tx_env := Env}) ->
+    ?LET([{Sender, _, Nonce}, {Receiver, _, _}], 
+         vector(2, gen_account_pubkey(Accounts)), 
+         [Trees, Env, 
+          #{sender_id => aec_id:create(account, Sender), 
+            recipient_id => aec_id:create(account, Receiver), 
+            amount => nat(), 
+            fee => choose(1, 100), 
+            nonce => Nonce,
+            payload => utf8()},
+          lists:keymember(Sender, 1, Accounts)
+         ]).
+
+spend_pre(_S, [_Trees, _Env, _Tx, _]) ->
+    true.
+
+spend(Trees, Env, Tx, Correct) ->
+    {ok, AeTx} = rpc(aec_spend_tx, new, [Tx]),
+    {_CB, SpendTx} = aetx:specialize_callback(AeTx),
+    
+    %% old version
+    Remote = 
+        case rpc:call(?REMOTE_NODE, aec_spend_tx, check, [SpendTx, Trees, Env]) of
+            {ok, Ts} ->
+                rpc:call(?REMOTE_NODE, aec_spend_tx, process, [SpendTx, Ts, Env]);
+            OldError ->
+                OldError
+        end,
+
+    Local = rpc:call(node(), aec_spend_tx, process, [SpendTx, Trees, Env]),
+    eq_rpc(Local, Remote, Correct).
+
+spend_next(S, Value, [_, _, _, Correct]) ->
+    if Correct -> S#{trees => Value};
+       not Correct -> S
+    end.
+
+
+
 
 %% -- Property ---------------------------------------------------------------
 prop_tx_primops() ->
@@ -94,5 +138,34 @@ bugs(Time, Bugs) ->
 
 rpc(Module, Fun, Args) ->
     Local = rpc:call(node(), Module, Fun, Args),
-    Remote =  rpc:call(?REMOTE_NODE, Module, Fun, Args),
-    {Local, Remote}.
+    Remote = rpc:call(?REMOTE_NODE, Module, Fun, Args),
+    eq_rpc(Local, Remote, false).
+
+eq_rpc(Local, Remote, Unwrap) ->
+    case Local == Remote of
+        true  ->
+            case Local of
+                {ok, Res} when Unwrap -> Res;
+                _ when Unwrap -> exit({unexpected_failure, Local});
+                _ -> Local
+            end;
+        false ->
+            case {Local, Remote} of
+                {{badrpc, {'EXIT', {E1, _}}},{badrpc, {'EXIT', {E2, _}}}} when E1 == E2 ->
+                    %% The stack traces are different...
+                    if Unwrap -> exit({unexpected_failure, Local, Remote});
+                       not Unwrap -> Local
+                    end;
+                _ -> exit({different, Local, Remote})
+            end
+    end.
+    
+%% -- Generators -------------------------------------------------------------
+
+gen_account_pubkey() ->
+    {binary(32), 0, 0}.
+
+gen_account_pubkey(Accounts) ->
+    oneof(Accounts ++ [gen_account_pubkey()]).
+
+
