@@ -21,14 +21,6 @@ sandbox(Code) ->
         {error, loop}
     end.
 
-prop_from_binary() ->
-    ?FORALL({T, Bin}, {type(), blob()},
-    begin
-    Tag = fun(X) when is_atom(X) -> X; (X) when is_tuple(X) -> element(1, X) end,
-    case ?SANDBOX(aeso_data:from_binary(T, Bin)) of
-        {ok, Res} -> collect({Tag(T), element(1, Res)}, true);
-        Err       -> equals(Err, {ok, '_'})
-    end end).
 
 type() -> ?LET(Depth, choose(0, 2), type(Depth, true)).
 type(Depth, TypeRep) ->
@@ -100,12 +92,6 @@ value({variant, Cs}) ->
 typed_val() ->
     ?LET(T, type(), ?LET(V, value(T), return({T, V}))).
 
-prop_roundtrip() ->
-    ?FORALL(T, type(),
-    ?FORALL(V, value(T),
-    ?FORALL(B, choose(0, 4),
-    equals(aeso_data:from_binary(T, aeso_data:to_binary(V, B * 32), B * 32),
-           {ok, V})))).
 
 prop_binary_to_heap() ->
     ?FORALL(Type, type(),
