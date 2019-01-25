@@ -18,11 +18,11 @@
 -define(REMOTE_NODE, 'oldepoch@localhost').
 -define(Patron, <<1, 1, 0:240>>).
 
--record(account, {key, amount, nonce, name}).
+-record(account, {key, amount, nonce}).
 
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
-    #{accounts => []}.
+    #{}.
 
 %% -- Generators -------------------------------------------------------------
 
@@ -40,7 +40,7 @@ postcondition_common(_S, _Call, _Res) ->
 
 %% --- Operation: init ---
 init_pre(S) ->
-    not maps:is_key(trees, S).
+    not maps:is_key(accounts, S).
 
 init_args(_S) ->
     [aetx_env:tx_env(0, 1)].
@@ -52,16 +52,16 @@ init(_) ->
     AccountTree = rpc(aec_accounts_trees, enter, [Account, EmptyAccountTree]),
     InitialTrees = rpc(aec_trees, set_accounts, [Trees, AccountTree], fun hash_equal/2),
     put(trees, InitialTrees),
-    InitialTrees.
+    InitialTrees, 
+    ok.
 
 init_next(S, _Value, [TxEnv]) ->
-    S#{trees => init, 
-       tx_env => TxEnv, 
-       accounts => [#account{key = ?Patron, amount = 1200000, nonce = 1, name = "patron"}]}.
+    S#{tx_env => TxEnv, 
+       accounts => [#account{key = ?Patron, amount = 1200000, nonce = 1}]}.
 
 %% --- Operation: mine ---
 mine_pre(S) ->
-    maps:is_key(trees, S).
+    maps:is_key(accounts, S).
 
 mine_args(#{tx_env := TxEnv}) ->
     Height = aetx_env:height(TxEnv),
@@ -74,7 +74,8 @@ mine(Height) ->
     Trees = get(trees),
     NewTrees = rpc(aec_trees, perform_pre_transformations, [Trees, Height + 1], fun hash_equal/2),
     put(trees, NewTrees),
-    NewTrees.
+    NewTrees,
+    ok.
 
 mine_next(#{tx_env := TxEnv} = S, _Value, [H]) ->
     S#{tx_env => aetx_env:set_height(TxEnv, H + 1)}.
@@ -82,13 +83,13 @@ mine_next(#{tx_env := TxEnv} = S, _Value, [H]) ->
 
 %% --- Operation: spend ---
 spend_pre(S) ->
-    maps:is_key(trees, S).
+    maps:is_key(accounts, S).
 
 spend_args(#{accounts := Accounts, tx_env := Env}) ->
-    ?LET([Sender, Receiver], 
+    ?LET([{SenderTag, Sender}, {ReceiverTag, Receiver}], 
          vector(2, gen_account_pubkey(Accounts)),
          ?LET(Amount, nat(), 
-              [Env, Sender, Receiver,
+              [Env, {SenderTag, Sender#account.key}, {ReceiverTag, Receiver#account.key},
                #{sender_id => aec_id:create(account, Sender#account.key), 
                  recipient_id => aec_id:create(account, Receiver#account.key), 
                  amount => Amount, 
@@ -98,10 +99,27 @@ spend_args(#{accounts := Accounts, tx_env := Env}) ->
                true  %% adapt depending on generation
               ])).
 
+spend_pre(#{accounts := Accounts}, [_Env, {SenderTag, Sender}, {ReceiverTag, Receiver}, Tx, Correct]) ->
+    Correct == spend_valid(Accounts, Sender, Receiver, Tx).
+
+spend_valid(Accounts, Sender, Receiver, Tx) ->
+    case lists:keyfind(Sender, #account.key, Accounts) of
+        false -> false;
+        SenderAccount ->
+            SenderAccount#account.nonce == maps:get(nonce, Tx) andalso
+                SenderAccount#account.amount >= maps:get(amount, Tx) + maps:get(fee, Tx) 
+    end.
+    
+
+spend_adapt(_S, [Env, Sender, Receiver, Tx, Correct]) ->
+    %% We only get here if spend is not Correct
+    [Env, Sender, Receiver, Tx, not Correct].
+    
+
 spend(Env, _Sender, _Receiver, Tx, _Correct) ->
+    Trees = get(trees),
     {ok, AeTx} = rpc(aec_spend_tx, new, [Tx]),
     {_CB, SpendTx} = aetx:specialize_callback(AeTx),
-    Trees = get(trees),
 
     %% old version
     Remote = 
@@ -113,24 +131,39 @@ spend(Env, _Sender, _Receiver, Tx, _Correct) ->
         end,
 
     Local = rpc:call(node(), aec_spend_tx, process, [SpendTx, Trees, Env], 1000),
-    case Local of
-        {ok, NewTrees} -> put(trees, NewTrees);
-        _ -> ok
-    end,
-    eq_rpc(Local, Remote, fun hash_equal/2).
+    case eq_rpc(Local, Remote, fun hash_equal/2) of
+        {ok, NewTrees} ->
+            put(trees, NewTrees),
+            ok;
+        Other -> Other
+    end.
 
 
 spend_next(#{accounts := Accounts} = S, _Value, 
-           [_Env, SAccount, RAccount, Tx, Correct]) ->
+           [_Env, {SenderTag, Sender}, {ReceiverTag, Receiver}, Tx, Correct]) ->
 
     if Correct ->
-            %% SAccount = lists:keyfind(Sender, #account.name, Accounts),
-            %% RAccount = lists:keyfind(Receiver, #account.name, Accounts),
-            S#{accounts => 
-                   (Accounts -- [RAccount, SAccount]) ++ 
-                   [SAccount#account{amount = SAccount#account.amount - maps:get(amount,Tx) - maps:get(fee, Tx), 
-                                     nonce = maps:get(nonce, Tx) + 1},
-                    RAccount#account{amount = maps:get(amount,Tx) + RAccount#account.amount}]};  %% add to end of list
+            %% Classical mistake if sender and receiver are the same! Update carefully
+            SAccount = lists:keyfind(Sender, #account.key, Accounts),
+            RAccount = 
+                case ReceiverTag of
+                    new -> #account{key = Receiver, amount = 0, nonce = 1};
+                    existing ->
+                        lists:keyfind(Receiver, #account.key, Accounts)
+                end,
+            case Sender == Receiver of
+                false ->
+                    S#{accounts => 
+                           (Accounts -- [RAccount, SAccount]) ++
+                           [SAccount#account{amount = SAccount#account.amount - maps:get(amount,Tx) - maps:get(fee, Tx), 
+                                             nonce = maps:get(nonce, Tx) + 1},
+                            RAccount#account{amount = maps:get(amount,Tx) + RAccount#account.amount}]};  %% add to end of list
+                true ->
+                    S#{accounts => 
+                           (Accounts -- [SAccount]) ++
+                           [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx), 
+                                             nonce = maps:get(nonce, Tx) + 1}]}
+            end;
        not Correct -> 
             S
     end.
@@ -142,10 +175,10 @@ spend_post(_S, [_Env, _, _, _Tx, Correct], Res) ->
     end.
 
 
-spend_features(S, [_Env, _, _, _Tx, Correct], _Res) ->
+spend_features(S, [_Env, _, _, _Tx, Correct], Res) ->
     [{spend_accounts, length(maps:get(accounts, S))}, 
-     {spend_correct, Correct}].
-
+     {spend_correct, Correct}] ++
+        [{spend_error, Res} || is_tuple(Res) andalso element(1, Res) == error].
 
 
 
@@ -222,13 +255,13 @@ eq_rpc(Local, Remote, InterpretResult) ->
 
 
 gen_account_pubkey(Accounts) ->
-    oneof(Accounts ++ 
-              [ ?LAZY(#account{key = binary(32), amount = 0, nonce = 0, name = unique_name(Accounts) })]).
+    oneof([?LAZY({existing, elements(Accounts)}), 
+           ?LAZY({new, #account{key = noshrink(binary(32)), amount = 0, nonce = 0 }})]).
 
-unique_name(Accounts) ->
+unique_name(List) ->
     ?LET([W], 
-         ?SUCHTHAT([Word], 
-                   eqc_erlang_program:words(1), lists:keyfind(Word, #account.name, Accounts) == false), 
+         noshrink(?SUCHTHAT([Word], 
+                            eqc_erlang_program:words(1), not lists:member(Word, List))), 
          W).
 
 
