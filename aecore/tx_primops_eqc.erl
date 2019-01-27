@@ -86,34 +86,42 @@ spend_pre(S) ->
     maps:is_key(accounts, S).
 
 spend_args(#{accounts := Accounts, tx_env := Env}) ->
+    ?LET(Args, 
     ?LET([{SenderTag, Sender}, {ReceiverTag, Receiver}], 
          vector(2, gen_account_pubkey(Accounts)),
-         ?LET(Amount, nat(), 
+         ?LET([Amount, Nonce], [nat(), oneof([0, 1, Sender#account.nonce, 100])],
               [Env, {SenderTag, Sender#account.key}, {ReceiverTag, Receiver#account.key},
                #{sender_id => aec_id:create(account, Sender#account.key), 
                  recipient_id => aec_id:create(account, Receiver#account.key), 
                  amount => Amount, 
-                 fee => choose(1, 100), 
-                 nonce => Sender#account.nonce,
-                 payload => utf8()},
-               true  %% adapt depending on generation
-              ])).
+                 fee => choose(1, 10), 
+                 nonce => Nonce,
+                 payload => utf8()}])),
+         Args ++ [spend_valid(Accounts, [lists:nth(2, Args), lists:last(Args)])]).
 
-spend_pre(#{accounts := Accounts}, [_Env, {SenderTag, Sender}, {ReceiverTag, Receiver}, Tx, Correct]) ->
-    Correct == spend_valid(Accounts, Sender, Receiver, Tx).
+spend_pre(#{accounts := Accounts}, [_Env, Sender, {ReceiverTag, Receiver}, Tx, Correct]) ->
+    Valid = spend_valid(Accounts, [Sender, Tx]),
+    ReceiverOk = 
+        case ReceiverTag of 
+            new -> lists:keyfind(Receiver, #account.key, Accounts) == false;
+            existing -> lists:keyfind(Receiver, #account.key, Accounts) =/= false
+        end,
+    ReceiverOk andalso Correct == Valid.
 
-spend_valid(Accounts, Sender, Receiver, Tx) ->
+spend_valid(Accounts, [{_, Sender}, Tx]) ->
     case lists:keyfind(Sender, #account.key, Accounts) of
         false -> false;
         SenderAccount ->
             SenderAccount#account.nonce == maps:get(nonce, Tx) andalso
-                SenderAccount#account.amount >= maps:get(amount, Tx) + maps:get(fee, Tx) 
+                SenderAccount#account.amount >= maps:get(amount, Tx) + maps:get(fee, Tx) andalso
+                maps:get(fee, Tx) >= 0   %% it seems fee == 0 does not return error
     end.
-    
 
-spend_adapt(_S, [Env, Sender, Receiver, Tx, Correct]) ->
-    %% We only get here if spend is not Correct
-    [Env, Sender, Receiver, Tx, not Correct].
+
+%% Don't get adapt to work! Needs investigation.
+%% spend_adapt(_S, [Env, Sender, Receiver, Tx, Correct]) ->
+%%     %% We only get here if spend is not Correct
+%%     [Env, Sender, Receiver, Tx, not Correct].
     
 
 spend(Env, _Sender, _Receiver, Tx, _Correct) ->
@@ -140,8 +148,7 @@ spend(Env, _Sender, _Receiver, Tx, _Correct) ->
 
 
 spend_next(#{accounts := Accounts} = S, _Value, 
-           [_Env, {SenderTag, Sender}, {ReceiverTag, Receiver}, Tx, Correct]) ->
-
+           [_Env, {_SenderTag, Sender}, {ReceiverTag, Receiver}, Tx, Correct]) ->
     if Correct ->
             %% Classical mistake if sender and receiver are the same! Update carefully
             SAccount = lists:keyfind(Sender, #account.key, Accounts),
@@ -175,9 +182,12 @@ spend_post(_S, [_Env, _, _, _Tx, Correct], Res) ->
     end.
 
 
-spend_features(S, [_Env, _, _, _Tx, Correct], Res) ->
+spend_features(S, [_Env, {_, Sender}, {_, Receiver}, Tx, Correct], Res) ->
     [{spend_accounts, length(maps:get(accounts, S))}, 
      {spend_correct, Correct}] ++
+        [ spend_to_self || Sender == Receiver andalso Correct] ++
+             [ {spend, zero} || maps:get(amount, Tx) == 0 andalso Correct] ++
+             [ {spend, zero_fee} ||  maps:get(fee, Tx) == 0 ] ++
         [{spend_error, Res} || is_tuple(Res) andalso element(1, Res) == error].
 
 
@@ -188,10 +198,10 @@ prop_tx_primops() ->
     ?FORALL(Cmds, commands(?MODULE),
     ?TIMEOUT(3000,
     begin
-        io:format("Pinging ~p~n", [?REMOTE_NODE]),
+        %% io:format("Pinging ~p~n", [?REMOTE_NODE]),
 
         pong = net_adm:ping(?REMOTE_NODE),
-        io:format("Start run test ~p~n", [Cmds]),
+        %% io:format("Start run test ~p~n", [Cmds]),
 
         {H, S, Res} = run_commands(Cmds),
         Height = 
@@ -199,7 +209,7 @@ prop_tx_primops() ->
                 undefined -> 0;
                 TxEnv -> aetx_env:height(TxEnv)
             end,
-        io:format("Did run test"),
+        %% io:format("Did run test"),
         check_command_names(Cmds,
             measure(length, commands_length(Cmds),
             measure(height, Height,
