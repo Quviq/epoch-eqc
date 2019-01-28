@@ -43,7 +43,9 @@ init_pre(S) ->
     not maps:is_key(accounts, S).
 
 init_args(_S) ->
-    [aetx_env:tx_env(0, 1)].
+    %% CBE: tx_env only accepts one argument
+    %%[aetx_env:tx_env(0, 1)].
+    [aetx_env:tx_env(0)].
 
 init(_) ->
     Trees = rpc(aec_trees, new_without_backend, [], fun hash_equal/2),
@@ -99,12 +101,15 @@ spend_args(#{accounts := Accounts, tx_env := Env}) ->
                  payload => utf8()}])),
          Args ++ [spend_valid(Accounts, [lists:nth(2, Args), lists:last(Args)])]).
 
-spend_pre(#{accounts := Accounts}, [_Env, Sender, {ReceiverTag, Receiver}, Tx, Correct]) ->
-    Valid = spend_valid(Accounts, [Sender, Tx]),
+spend_pre(#{accounts := Accounts}, [_Env, {SenderTag,Sender}, {ReceiverTag, Receiver}, Tx, Correct]) ->
+    Valid = spend_valid(Accounts, [{SenderTag,Sender}, Tx]),
     ReceiverOk = 
         case ReceiverTag of 
             new -> lists:keyfind(Receiver, #account.key, Accounts) == false;
-            existing -> lists:keyfind(Receiver, #account.key, Accounts) =/= false
+            existing -> lists:keyfind(Receiver, #account.key, Accounts) =/= false andalso
+                        %CBE: the following is needed to avoid an error
+                        % in the old version
+                        Receiver =/= Sender
         end,
     ReceiverOk andalso Correct == Valid.
 
@@ -241,6 +246,10 @@ hash_equal(X, Y) ->
                  true -> X;
                  false -> exit({hash_differs, X, Y})
              end;
+        %CBE: here we list the error msgs that are ok since they are expected
+        %from the differences in the old and new versions of the code
+        {{error, account_nonce_too_low},{error, insufficient_funds}} -> X;
+        {{error, account_nonce_too_high},{error, insufficient_funds}} -> X;
          {E, E} -> E;
          _ -> exit({different, X, Y}) 
      end.
