@@ -17,14 +17,14 @@
 -compile([export_all, nowarn_export_all]).
 -define(REMOTE_NODE, 'oldepoch@localhost').
 -define(Patron, <<1, 1, 0:240>>).
+-define(NAMEFRAGS, ["foo", "bar", "baz"]).
 
 -record(account, {key, amount, nonce}).
+-record(preclaim,{name, salt}).
 
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
     #{}.
-
-%% -- Generators -------------------------------------------------------------
 
 %% -- Common pre-/post-conditions --------------------------------------------
 command_precondition_common(_S, _Cmd) ->
@@ -40,7 +40,7 @@ postcondition_common(_S, _Call, _Res) ->
 
 %% --- Operation: init ---
 init_pre(S) ->
-    not maps:is_key(accounts, S).
+    not maps:is_key(accounts, S) and not maps:is_key(preclaims, S).
 
 init_args(_S) ->
     %% CBE: tx_env only accepts one argument
@@ -59,7 +59,8 @@ init(_) ->
 
 init_next(S, _Value, [TxEnv]) ->
     S#{tx_env => TxEnv, 
-       accounts => [#account{key = ?Patron, amount = 1200000, nonce = 1}]}.
+       accounts => [#account{key = ?Patron, amount = 1200000, nonce = 1}],
+      preclaims => []}.
 
 %% --- Operation: mine ---
 mine_pre(S) ->
@@ -132,7 +133,7 @@ spend_valid(Accounts, [{_, Sender}, Tx]) ->
 spend(Env, _Sender, _Receiver, Tx, _Correct) ->
     Trees = get(trees),
     {ok, AeTx} = rpc(aec_spend_tx, new, [Tx]),
-    {_CB, SpendTx} = aetx:specialize_callback(AeTx),
+    {_, SpendTx} = aetx:specialize_type(AeTx),
 
     %% old version
     Remote = 
@@ -195,6 +196,117 @@ spend_features(S, [_Env, {_, Sender}, {_, Receiver}, Tx, Correct], Res) ->
              [ {spend, zero_fee} ||  maps:get(fee, Tx) == 0 ] ++
         [{spend_error, Res} || is_tuple(Res) andalso element(1, Res) == error].
 
+
+%% --- Operation: name_preclaim ---
+
+name_preclaim_pre(S) ->
+    maps:is_key(accounts, S).
+
+
+%% @doc name_preclaim_pre/1 - Precondition for generation
+-spec name_preclaim_pre(S :: eqc_statem:symbolic_state()) -> boolean().
+name_preclaim_pre(S, [_Env, {SenderTag,Sender}, Tx, Correct]) ->
+    name_preclaim_valid(S, [{SenderTag,Sender}, Tx]) == Correct.
+
+name_preclaim_valid(#{accounts := Accounts} = S, 
+		    [{_, Sender}, Tx]) ->
+    case lists:keyfind(Sender, #account.key, Accounts) of
+        false -> false;
+        SenderAccount ->
+            SenderAccount#account.nonce == maps:get(nonce, Tx) andalso
+                SenderAccount#account.amount >= maps:get(fee, Tx) andalso
+		different_preclaim(S,Tx)
+		
+    end.
+
+different_preclaim(#{preclaims := Preclaims}, Tx) ->
+    Name = maps:get(name,Tx),
+    Salt = maps:get(salt,Tx),
+    case lists:member({Name, Salt}, Preclaims) of
+	true ->
+	    false;
+        _ -> case lists:keyfind(Name, #preclaim.name, Preclaims) of
+		 false ->
+		     true;
+		 Preclaim ->
+		     Preclaim#preclaim.salt =/= Salt
+	     end
+    end.
+
+%% @doc name_preclaim_args - Argument generator
+-spec name_preclaim_args(S :: eqc_statem:symbolic_state()) -> eqc_gen:gen([term()]).
+name_preclaim_args(#{accounts := Accounts, tx_env := Env} = S) ->
+    ?LET(Args,
+	 ?LET({SenderTag, Sender}, gen_account_pubkey(Accounts),
+	      [Env, {SenderTag, Sender#account.key},
+	       #{account_id => aec_id:create(account, Sender#account.key),
+		 name => gen_name(),
+		 salt => choose(270,280),
+		 fee => choose(1, 10), 
+		 nonce => oneof([0, 1, Sender#account.nonce, 100])}]), 
+	 Args ++ [name_preclaim_valid(S,  [lists:nth(2, Args), lists:last(Args)])]).
+
+
+%% @doc name_preclaim - The actual operation
+name_preclaim(Env, _Sender, Tx, _Correct) ->
+    Trees = get(trees),
+    Commitment = aens_hash:commitment_hash(list_to_binary(maps:get(name,Tx)), 
+					   maps:get(salt,Tx)),
+    {ok, NTx} = rpc(aens_preclaim_tx, new, 
+		    [Tx#{commitment_id => aec_id:create(commitment, Commitment)}]),
+    {_, NameTx} = aetx:specialize_type(NTx),
+
+    %% old version
+    Remote = 
+        case rpc:call(?REMOTE_NODE, aens_preclaim_tx, check, [NameTx, Trees, Env], 1000) of
+            {ok, Ts} ->
+                rpc:call(?REMOTE_NODE, aens_preclaim_tx, process, [NameTx, Ts, Env], 1000);
+            OldError ->
+                OldError
+        end,
+
+    Local = rpc:call(node(), aens_preclaim_tx, process, [NameTx, Trees, Env], 1000),
+    case eq_rpc(Local, Remote, fun hash_equal/2) of
+        {ok, NewTrees} ->
+            put(trees, NewTrees),
+            ok;
+        Other -> Other
+    end.
+
+
+%% @doc name_preclaim_next - Next state function
+-spec name_preclaim_next(S, Var, Args) -> NewS
+    when S    :: eqc_statem:symbolic_state() | eqc_state:dynamic_state(),
+         Var  :: eqc_statem:var() | term(),
+         Args :: [term()],
+         NewS :: eqc_statem:symbolic_state() | eqc_state:dynamic_state().
+name_preclaim_next(#{accounts := Accounts, preclaims := Preclaims} = S,
+		   _Value, [_Env,{_,Sender},Tx,Correct]) ->
+    if Correct ->
+	    SAccount = lists:keyfind(Sender, #account.key, Accounts),
+	    S#{accounts => 
+		   (Accounts -- [SAccount]) ++
+		   [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx), 
+				     nonce = maps:get(nonce, Tx) + 1}],
+		preclaims => Preclaims ++ [#preclaim{name = maps:get(name, Tx), salt = maps:get(salt,Tx)}]};
+       not Correct ->
+	    S
+    end.
+
+%% @doc name_preclaim_post - Postcondition for name_preclaim
+-spec name_preclaim_post(S, Args, Res) -> true | term()
+    when S    :: eqc_state:dynamic_state(),
+         Args :: [term()],
+         Res  :: term().
+name_preclaim_post(_S, [_Env,_Sender,_Tx,Correct], Res) ->
+    case Res of
+        {error, _} -> not Correct;
+        ok -> Correct
+    end.
+
+name_preclaim_features(S, [_Env, {_, Sender}, Tx, Correct], Res) ->
+    [{name_preclaim_accounts, Res},{name_preclaim_correct, Correct}].
+    
 
 
 
@@ -283,4 +395,7 @@ unique_name(List) ->
                             eqc_erlang_program:words(1), not lists:member(Word, List))), 
          W).
 
+gen_name() ->
+    ?LET(NFs, non_empty(list(elements(?NAMEFRAGS))),
+    return(lists:join(".",NFs ++ ["test"]))).
 
