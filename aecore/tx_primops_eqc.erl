@@ -222,7 +222,7 @@ name_preclaim_valid(#{accounts := Accounts} = S,
 different_preclaim(#{preclaims := Preclaims}, Tx) ->
     Name = maps:get(name,Tx),
     Salt = maps:get(salt,Tx),
-    case lists:member({Name, Salt}, Preclaims) of
+    case lists:member(#preclaim{name = Name, salt = Salt}, Preclaims) of
 	true ->
 	    false;
         _ -> case lists:keyfind(Name, #preclaim.name, Preclaims) of
