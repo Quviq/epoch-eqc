@@ -17,11 +17,12 @@
 -compile([export_all, nowarn_export_all]).
 -define(REMOTE_NODE, 'oldepoch@localhost').
 -define(Patron, <<1, 1, 0:240>>).
--define(NAMEFRAGS, ["foo", "bar", "baz"]).
+%-define(NAMEFRAGS, ["foo", "bar", "baz"]).
+-define(NAMEFRAGS, ["foo"]).
 
 -record(account, {key, amount, nonce}).
 -record(preclaim,{name, salt, height}).
-%-record(claim,{hash, fee}).
+-record(claim,{name, height}).
 
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
@@ -41,7 +42,9 @@ postcondition_common(_S, _Call, _Res) ->
 
 %% --- Operation: init ---
 init_pre(S) ->
-    not maps:is_key(accounts, S) and not maps:is_key(preclaims, S).
+    not maps:is_key(accounts, S) and 
+	not maps:is_key(preclaims, S) and
+	not maps:is_key(claims, S) .
 
 init_args(_S) ->
     %% CBE: tx_env only accepts one argument
@@ -61,7 +64,8 @@ init(_) ->
 init_next(S, _Value, [TxEnv]) ->
     S#{tx_env => TxEnv, 
        accounts => [#account{key = ?Patron, amount = 1200000, nonce = 1}],
-      preclaims => []}.
+      preclaims => [],
+      claims => []}.
 
 %% --- Operation: mine ---
 mine_pre(S) ->
@@ -218,21 +222,12 @@ name_preclaim_valid(#{accounts := Accounts} = S,
         SenderAccount ->
             SenderAccount#account.nonce == maps:get(nonce, Tx) andalso
                 SenderAccount#account.amount >= maps:get(fee, Tx) andalso
-		different_preclaim(S, {Name,Salt})
+		different_preclaim(S, {Name,Salt}) 
 		
     end.
 
 different_preclaim(#{preclaims := Preclaims},{Name,Salt} ) ->
-    case lists:member(#preclaim{name = Name, salt = Salt}, Preclaims) of
-	true ->
-	    false;
-        _ -> case lists:keyfind(Name, #preclaim.name, Preclaims) of
-		 false ->
-		     true;
-		 Preclaim ->
-		     Preclaim#preclaim.salt =/= Salt
-	     end
-    end.
+    [present || #preclaim{name = N, salt = S} <- Preclaims, N == Name, S == Salt] == [].
 
 %% @doc name_preclaim_args - Argument generator
 -spec name_preclaim_args(S :: eqc_statem:symbolic_state()) -> eqc_gen:gen([term()]).
@@ -245,7 +240,7 @@ name_preclaim_args(#{accounts := Accounts, tx_env := Env} = S) ->
 		 fee => choose(1, 10), 
 		 commitment_id => 
 		     aec_id:create(commitment, 
-				   aens_hash:commitment_hash(iolist_to_binary(Name),Salt)),
+				   aens_hash:commitment_hash(Name,Salt)),
 		 nonce => oneof([0, 1, Sender#account.nonce, 100])}]), 
 	 Args ++ [name_preclaim_valid(S,
 				      [lists:nth(2, Args), 
@@ -313,8 +308,11 @@ name_preclaim_post(_S, [_Env,_Sender,{_Name,_Salt},_Tx,Correct], Res) ->
         _ -> not Correct andalso valid_mismatch(Res)
     end.
 
-name_preclaim_features(_S, [_Env, {_, _Sender}, {_Name,_Salt}, _Tx, Correct], Res) ->
-    [{name_preclaim_accounts, Res},{name_preclaim_correct, Correct}].
+name_preclaim_features(#{claims := Claims} = S, 
+		       [_Env, {_, _Sender}, {Name,_Salt}, _Tx, Correct], Res) ->
+    [{name_preclaim_accounts, Res},{name_preclaim_correct, Correct}] ++
+	[{claimed_names, Claims}] ++
+	[{preclaim_claimed_name, Res} || lists:keymember(Name, #claim.name, Claims)].
     
 
 %% --- Operation: claim ---
@@ -355,8 +353,11 @@ claim_valid(#{accounts := Accounts} = S, [{_, Sender}, Tx]) ->
 		    false ->
 			false;
 		    Preclaim ->
-			different_blocks(Preclaim,S)
+			different_blocks(Preclaim,S) 
 		end
+		andalso valid_name(Tx) andalso 
+                not already_claimed(S,Tx)
+
     end.
 
 
@@ -377,6 +378,18 @@ find_preclaim([Preclaim = #preclaim{name = N, salt = S} | Rest], Name, Salt) ->
 different_blocks(Preclaim, #{tx_env := TxEnv}) ->
     Delta = aec_governance:name_claim_preclaim_delta(),
     Preclaim#preclaim.height + Delta =< aetx_env:height(TxEnv).
+
+% names may not have dots in between, only at the end (.test)
+valid_name(Tx) ->
+    case string:lexemes(maps:get(name,Tx),".") of
+	[T,<<"test">>] ->
+	    true;
+	_ -> false
+    end.
+
+% 
+already_claimed(#{claims := Claims}, Tx) ->
+    [present || #claim{name = N} <- Claims, N == maps:get(name,Tx)] =/= [].
 
 %% @doc claim - The actual operation
 claim(Env, _Sender, Tx,_Correct) ->
@@ -408,13 +421,19 @@ claim(Env, _Sender, Tx,_Correct) ->
          Var  :: eqc_statem:var() | term(),
          Args :: [term()],
          NewS :: eqc_statem:symbolic_state() | eqc_state:dynamic_state().
-claim_next(#{accounts := Accounts} = S, _Value, [_Env, {_, Sender}, Tx, Correct]) ->
+claim_next(#{tx_env := TxEnv,
+	      accounts := Accounts, 
+	     claims := Claims} = S, 
+	   _Value, [Env, {_, Sender}, Tx, Correct]) ->
     if Correct ->
 	    SAccount = lists:keyfind(Sender, #account.key, Accounts),
 	    S#{accounts => 
 	    	   (Accounts -- [SAccount]) ++
 	    	   [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx), 
-	    			     nonce = maps:get(nonce, Tx) + 1}]};
+	    			     nonce = maps:get(nonce, Tx) + 1}],
+	      claims => 
+		   Claims ++ [#claim{name = maps:get(name, Tx), 
+				     height = aetx_env:height(TxEnv)}]};
        not Correct ->
 	    S
     end.
@@ -433,7 +452,8 @@ claim_post(_S, [_Env, _Sender, _Tx, Correct], Res) ->
     end.
 
 claim_features(S, [_Env, {_, Sender}, Tx, Correct], Res) ->
-    [{claim_result, Res},{claim_correct, Correct}].
+    [{claim_result, Res},{claim_correct, Correct}] ++
+	[{claim_name, maps:get(name,Tx)}].
     
 
 %% -- Property ---------------------------------------------------------------
@@ -533,6 +553,8 @@ unique_name(List) ->
          W).
 
 gen_name() ->
-    ?LET(NFs, non_empty(list(elements(?NAMEFRAGS))),
-    return(iolist_to_binary(lists:join(".",NFs ++ ["test"])))).
-
+    %% ?LET(NFs, frequency([{1, non_empty(list(elements(?NAMEFRAGS)))}, 
+    %% 			 {9, [elements(?NAMEFRAGS)]}]),
+    %% return(iolist_to_binary(lists:join(".",NFs ++ ["test"])))).
+    ?LET(Name, oneof(["foo.test","bar.test","f.o.test"]),
+	 return(iolist_to_binary(Name))).
