@@ -98,7 +98,7 @@ mine_next(#{tx_env := TxEnv} = S, _Value, [H]) ->
 spend_pre(S) ->
     maps:is_key(accounts, S).
 
-spend_args(#{accounts := Accounts, tx_env := Env}) ->
+spend_args(#{accounts := Accounts, tx_env := Env} = S) ->
     ?LET(Args, 
     ?LET([{SenderTag, Sender}, {ReceiverTag, Receiver}], 
          vector(2, gen_account_pubkey(Accounts)),
@@ -110,10 +110,10 @@ spend_args(#{accounts := Accounts, tx_env := Env}) ->
                  fee => choose(1, 10), 
                  nonce => Nonce,
                  payload => utf8()}])),
-         Args ++ [spend_valid(Accounts, [lists:nth(2, Args), lists:last(Args)])]).
+         Args ++ [spend_valid(S, [lists:nth(2, Args), lists:last(Args)])]).
 
-spend_pre(#{accounts := Accounts}, [_Env, {SenderTag,Sender}, {ReceiverTag, Receiver}, Tx, Correct]) ->
-    Valid = spend_valid(Accounts, [{SenderTag,Sender}, Tx]),
+spend_pre(#{accounts := Accounts} = S, [Env, {SenderTag,Sender}, {ReceiverTag, Receiver}, Tx, Correct]) ->
+    Valid = spend_valid(S, [{SenderTag,Sender}, Tx]),
     ReceiverOk = 
         case ReceiverTag of 
             new -> lists:keyfind(Receiver, #account.key, Accounts) == false;
@@ -122,9 +122,9 @@ spend_pre(#{accounts := Accounts}, [_Env, {SenderTag,Sender}, {ReceiverTag, Rece
                         % in the old version
                         Receiver =/= Sender
         end,
-    ReceiverOk andalso Correct == Valid.
+    ReceiverOk andalso Correct == Valid andalso correct_height(S, Env).
 
-spend_valid(Accounts, [{_, Sender}, Tx]) ->
+spend_valid(#{accounts := Accounts}, [{_, Sender}, Tx]) ->
     case lists:keyfind(Sender, #account.key, Accounts) of
         false -> false;
         SenderAccount ->
@@ -133,12 +133,11 @@ spend_valid(Accounts, [{_, Sender}, Tx]) ->
                 maps:get(fee, Tx) >= 0   %% it seems fee == 0 does not return error
     end.
 
-
-%% Don't get adapt to work! Needs investigation.
-%% spend_adapt(_S, [Env, Sender, Receiver, Tx, Correct]) ->
-%%     %% We only get here if spend is not Correct
-%%     [Env, Sender, Receiver, Tx, not Correct].
-    
+spend_adapt(#{tx_env := TxEnv} = S, [_, {SenderTag, Sender}, {ReceiverTag, Receiver}, Tx, _Correct]) ->
+    [TxEnv, {SenderTag, Sender}, {ReceiverTag, Receiver}, Tx, 
+     spend_valid(S, [{SenderTag, Sender}, Tx])];
+spend_adapt(_, _) ->
+    false.    
 
 spend(Env, _Sender, _Receiver, Tx, _Correct) ->
     Trees = get(trees),
