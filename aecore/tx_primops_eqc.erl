@@ -77,6 +77,12 @@ mine_args(#{tx_env := TxEnv}) ->
 mine_pre(#{tx_env := TxEnv}, [H]) ->
     aetx_env:height(TxEnv) == H.
 
+mine_adapt(#{tx_env := TxEnv}, [_]) ->
+    [aetx_env:height(TxEnv)];
+mine_adapt(_, _) ->
+    false.
+
+
 mine(Height) ->
     Trees = get(trees),
     NewTrees = rpc(aec_trees, perform_pre_transformations, [Trees, Height + 1], fun hash_equal/2),
