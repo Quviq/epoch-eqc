@@ -462,13 +462,10 @@ claim_features(S, [_Env, {_, Sender}, Tx, Correct], Res) ->
 
 %% -- Property ---------------------------------------------------------------
 prop_tx_primops() ->
+    eqc:dont_print_counterexample(
     ?FORALL(Cmds, commands(?MODULE),
-    ?TIMEOUT(3000,
     begin
-        %% io:format("Pinging ~p~n", [?REMOTE_NODE]),
-
         pong = net_adm:ping(?REMOTE_NODE),
-        %% io:format("Start run test ~p~n", [Cmds]),
 
         {H, S, Res} = run_commands(Cmds),
         Height = 
@@ -476,13 +473,13 @@ prop_tx_primops() ->
                 undefined -> 0;
                 TxEnv -> aetx_env:height(TxEnv)
             end,
-        %% io:format("Did run test"),
         check_command_names(Cmds,
             measure(length, commands_length(Cmds),
             measure(height, Height,
+            features(call_features(H),
             aggregate(call_features(H),
                 pretty_commands(?MODULE, Cmds, {H, S, Res},
-                                Res == ok)))))
+                                Res == ok))))))
     end)).
 
 bugs() -> bugs(10).
@@ -494,6 +491,9 @@ bugs(Time, Bugs) ->
 
 
 %% --- local helpers ------
+
+correct_height(#{tx_env := TxEnv}, Env) ->
+    aetx_env:height(TxEnv) == aetx_env:height(Env).
 
 strict_equal(X, Y) ->
      case X == Y of 
