@@ -17,8 +17,7 @@
 -compile([export_all, nowarn_export_all]).
 -define(REMOTE_NODE, 'oldepoch@localhost').
 -define(Patron, <<1, 1, 0:240>>).
-%-define(NAMEFRAGS, ["foo", "bar", "baz"]).
--define(NAMEFRAGS, ["foo"]).
+-define(NAMEFRAGS, ["foo", "bar", "baz"]).
 
 -record(account, {key, amount, nonce}).
 -record(preclaim,{name, salt, height}).
@@ -553,8 +552,6 @@ unique_name(List) ->
          W).
 
 gen_name() ->
-    %% ?LET(NFs, frequency([{1, non_empty(list(elements(?NAMEFRAGS)))}, 
-    %% 			 {9, [elements(?NAMEFRAGS)]}]),
-    %% return(iolist_to_binary(lists:join(".",NFs ++ ["test"])))).
-    ?LET(Name, oneof(["foo.test","bar.test","f.o.test"]),
-	 return(iolist_to_binary(Name))).
+    ?LET(NFs, frequency([{1, non_empty(list(elements(?NAMEFRAGS)))}, 
+    			 {9, [elements(?NAMEFRAGS)]}]),
+    return(iolist_to_binary(lists:join(".",NFs ++ ["test"])))).
