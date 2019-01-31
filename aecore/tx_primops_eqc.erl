@@ -213,28 +213,6 @@ spend_features(S, [_Env, {_, Sender}, {_, Receiver}, Tx, Correct], Res) ->
 name_preclaim_pre(S) ->
     maps:is_key(accounts, S).
 
-
-%% @doc name_preclaim_pre/1 - Precondition for generation
--spec name_preclaim_pre(S :: eqc_statem:symbolic_state()) -> boolean().
-name_preclaim_pre(S, [_Env, {SenderTag,Sender}, {Name,Salt}, Tx, Correct]) ->
-    name_preclaim_valid(S, [{SenderTag,Sender}, {Name,Salt}, Tx]) == Correct.
-
-name_preclaim_valid(#{accounts := Accounts} = S, 
-		    [{_, Sender}, {Name,Salt},Tx]) ->
-    case lists:keyfind(Sender, #account.key, Accounts) of
-        false -> false;
-        SenderAccount ->
-            SenderAccount#account.nonce == maps:get(nonce, Tx) andalso
-                SenderAccount#account.amount >= maps:get(fee, Tx) andalso
-		different_preclaim(S, {Name,Salt}) 
-		
-    end.
-
-different_preclaim(#{preclaims := Preclaims},{Name,Salt} ) ->
-    [present || #preclaim{name = N, salt = S} <- Preclaims, N == Name, S == Salt] == [].
-
-%% @doc name_preclaim_args - Argument generator
--spec name_preclaim_args(S :: eqc_statem:symbolic_state()) -> eqc_gen:gen([term()]).
 name_preclaim_args(#{accounts := Accounts, tx_env := Env} = S) ->
     ?LET(Args,
 	 ?LET([{SenderTag, Sender}, Name, Salt], 
@@ -246,13 +224,27 @@ name_preclaim_args(#{accounts := Accounts, tx_env := Env} = S) ->
 		     aec_id:create(commitment, 
 				   aens_hash:commitment_hash(Name,Salt)),
 		 nonce => oneof([0, 1, Sender#account.nonce, 100])}]), 
-	 Args ++ [name_preclaim_valid(S,
-				      [lists:nth(2, Args), 
-				       lists:nth(3, Args), 
-				       lists:last(Args)])]).
+	 Args ++ [name_preclaim_valid(S, Args)]).
 
+name_preclaim_pre(S, [Env, {SenderTag, Sender}, {Name, Salt}, Tx, Correct]) ->
+    name_preclaim_valid(S, [Env, {SenderTag, Sender}, {Name, Salt}, Tx]) == Correct 
+        andalso correct_height(S, Env).
 
-%% @doc name_preclaim - The actual operation
+name_preclaim_valid(#{accounts := Accounts} = S, 
+		    [_Env, {_, Sender}, {Name, Salt}, Tx]) ->
+    case lists:keyfind(Sender, #account.key, Accounts) of
+        false -> false;
+        SenderAccount ->
+            SenderAccount#account.nonce == maps:get(nonce, Tx) andalso
+                SenderAccount#account.amount >= maps:get(fee, Tx) andalso
+                [present || #preclaim{name = N, salt = S} <- maps:get(preclaims, S, []), N == Name, S == Salt] == []
+    end.   
+
+name_preclaim_adapt(#{tx_env := TxEnv} = S, [_Env, {SenderTag, Sender}, {Name, Salt}, Tx, _Correct]) ->
+    [TxEnv, {SenderTag, Sender}, {Name, Salt}, Tx, name_preclaim_valid(S, [TxEnv, {SenderTag, Sender}, {Name, Salt}, Tx])];
+name_preclaim_adapt(_, _) ->
+    false.
+
 name_preclaim(Env, _Sender, {_Name,_Salt}, Tx, _Correct) ->
     Trees = get(trees),
     {ok, NTx} = rpc(aens_preclaim_tx, new, [Tx]),
@@ -275,13 +267,6 @@ name_preclaim(Env, _Sender, {_Name,_Salt}, Tx, _Correct) ->
         Other -> Other
     end.
 
-
-%% @doc name_preclaim_next - Next state function
--spec name_preclaim_next(S, Var, Args) -> NewS
-    when S    :: eqc_statem:symbolic_state() | eqc_state:dynamic_state(),
-         Var  :: eqc_statem:var() | term(),
-         Args :: [term()],
-         NewS :: eqc_statem:symbolic_state() | eqc_state:dynamic_state().
 name_preclaim_next(#{tx_env := TxEnv,
 		     accounts := Accounts, 
 		     preclaims := Preclaims} = S,
@@ -300,11 +285,6 @@ name_preclaim_next(#{tx_env := TxEnv,
 	    S
     end.
 
-%% @doc name_preclaim_post - Postcondition for name_preclaim
--spec name_preclaim_post(S, Args, Res) -> true | term()
-    when S    :: eqc_state:dynamic_state(),
-         Args :: [term()],
-         Res  :: term().
 name_preclaim_post(_S, [_Env,_Sender,{_Name,_Salt},_Tx,Correct], Res) ->
     case Res of
         {error, _} -> not Correct;
@@ -312,7 +292,7 @@ name_preclaim_post(_S, [_Env,_Sender,{_Name,_Salt},_Tx,Correct], Res) ->
         _ -> not Correct andalso valid_mismatch(Res)
     end.
 
-name_preclaim_features(#{claims := Claims} = S, 
+name_preclaim_features(#{claims := Claims}, 
 		       [_Env, {_, _Sender}, {Name,_Salt}, _Tx, Correct], Res) ->
     [{name_preclaim_accounts, Res},{name_preclaim_correct, Correct}] ++
 	[{claimed_names, Claims}] ++
