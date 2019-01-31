@@ -300,8 +300,6 @@ name_preclaim_features(#{claims := Claims},
     
 
 %% --- Operation: claim ---
-%% @doc claim_pre/1 - Precondition for generation
--spec claim_pre(S :: eqc_statem:symbolic_state()) -> boolean().
 claim_pre(S) ->
     maps:is_key(accounts, S).
 
@@ -317,15 +315,11 @@ claim_args(#{accounts := Accounts, tx_env := Env} = S) ->
 		 name_salt => choose(270,280),
 		 fee => choose(1, 10), 
 		 nonce => oneof([0, 1, Sender#account.nonce, 100])}]), 
-	 Args ++ [claim_valid(S,  [lists:nth(2, Args), lists:last(Args)])]).
+	 Args ++ [claim_valid(S, [lists:nth(2, Args), lists:last(Args)])]).
 
 
-%% @doc claim_pre/2 - Precondition for claim
--spec claim_pre(S, Args) -> boolean()
-    when S    :: eqc_statem:symbolic_state(),
-         Args :: [term()].
-claim_pre(S, [_Env, {SenderTag, Sender}, Tx, Correct]) ->
-    claim_valid(S, [{SenderTag,Sender}, Tx]) == Correct.
+claim_pre(S, [Env, {SenderTag, Sender}, Tx, Correct]) ->
+    claim_valid(S, [{SenderTag, Sender}, Tx]) == Correct andalso correct_height(S, Env).
 
 claim_valid(#{accounts := Accounts} = S, [{_, Sender}, Tx]) ->
     case lists:keyfind(Sender, #account.key, Accounts) of
@@ -333,14 +327,14 @@ claim_valid(#{accounts := Accounts} = S, [{_, Sender}, Tx]) ->
         SenderAccount ->
             SenderAccount#account.nonce == maps:get(nonce, Tx) andalso
                 SenderAccount#account.amount >= maps:get(fee, Tx) andalso
-		case find_preclaim(S,Tx) of
+		case find_preclaim(S, Tx) of
 		    false ->
 			false;
 		    Preclaim ->
-			different_blocks(Preclaim,S) 
+			different_blocks(Preclaim, S) 
 		end
 		andalso valid_name(Tx) andalso 
-                not already_claimed(S,Tx)
+                not already_claimed(S, Tx)
 
     end.
 
@@ -358,6 +352,7 @@ find_preclaim([Preclaim = #preclaim{name = N, salt = S} | Rest], Name, Salt) ->
        true ->
 	    find_preclaim(Rest, Name, Salt)
     end.
+
 % preclaim and claim are in different blocks
 different_blocks(Preclaim, #{tx_env := TxEnv}) ->
     Delta = aec_governance:name_claim_preclaim_delta(),
@@ -371,11 +366,15 @@ valid_name(Tx) ->
 	_ -> false
     end.
 
-% 
 already_claimed(#{claims := Claims}, Tx) ->
     [present || #claim{name = N} <- Claims, N == maps:get(name,Tx)] =/= [].
 
-%% @doc claim - The actual operation
+claim_adapt(#{tx_env := TxEnv} = S, [_Env, {SenderTag, Sender}, Tx, _Correct]) ->
+    [TxEnv, {SenderTag, Sender}, Tx, claim_valid(S, [{SenderTag, Sender}, Tx])];
+claim_adapt(_, _) ->
+    false.
+
+
 claim(Env, _Sender, Tx,_Correct) ->
     Trees = get(trees),
     {ok, NTx} = rpc(aens_claim_tx, new, [Tx]),
@@ -398,13 +397,6 @@ claim(Env, _Sender, Tx,_Correct) ->
         Other -> Other
     end.
 
-
-%% @doc claim_next - Next state function
--spec claim_next(S, Var, Args) -> NewS
-    when S    :: eqc_statem:symbolic_state() | eqc_state:dynamic_state(),
-         Var  :: eqc_statem:var() | term(),
-         Args :: [term()],
-         NewS :: eqc_statem:symbolic_state() | eqc_state:dynamic_state().
 claim_next(#{tx_env := TxEnv,
 	      accounts := Accounts, 
 	     claims := Claims} = S, 
@@ -422,12 +414,6 @@ claim_next(#{tx_env := TxEnv,
 	    S
     end.
 
-
-%% @doc claim_post - Postcondition for claim
--spec claim_post(S, Args, Res) -> true | term()
-    when S    :: eqc_state:dynamic_state(),
-         Args :: [term()],
-         Res  :: term().
 claim_post(_S, [_Env, _Sender, _Tx, Correct], Res) ->
     case Res of
         {error, _} -> not Correct;
