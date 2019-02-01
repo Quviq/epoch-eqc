@@ -101,41 +101,61 @@ spend_pre(S) ->
 spend_args(#{accounts := Accounts, tx_env := Env} = S) ->
     ?LET(Args, 
     ?LET([{SenderTag, Sender}, {ReceiverTag, Receiver}], 
-         vector(2, gen_account_pubkey(Accounts)),
-         ?LET([Amount, Nonce], [nat(), oneof([0, 1, Sender#account.nonce, 100])],
-              [Env, {SenderTag, Sender#account.key}, {ReceiverTag, Receiver#account.key},
-               #{sender_id => aec_id:create(account, Sender#account.key), 
-                 recipient_id => aec_id:create(account, Receiver#account.key), 
+          vector(2, gen_account_pubkey(Accounts)),   %% Add oracle as well! and contract
+         ?LET([Amount, Nonce, To], [nat(), oneof([0, 1, Sender#account.nonce, 100]), oneof([account, {name, elements(Receiver#account.names ++ [<<"foo.test">>])}])],
+              [Env, {SenderTag, Sender#account.key}, {ReceiverTag, Receiver#account.key, To},
+               #{sender_id => 
+                     aec_id:create(account, Sender#account.key),
+                     %% The sender is asserted to never be a name.
+                     %% case Sender#account.names of
+                     %%     [] -> aec_id:create(account, Sender#account.key);
+                     %%     SNames -> aec_id:create(name, ?LET(N, elements(SNames), aens_hash:name_hash(N)))
+                     %% end,
+                 recipient_id => 
+                     case To of 
+                         account ->
+                             aec_id:create(account, Receiver#account.key);
+                         {name, Name} ->
+                             aec_id:create(name, aens_hash:name_hash(Name))
+                     end,
                  amount => Amount, 
                  fee => choose(1, 10), 
                  nonce => Nonce,
                  payload => utf8()}])),
-         Args ++ [spend_valid(S, [lists:nth(2, Args), lists:last(Args)])]).
+         Args ++ [spend_valid(S, Args)]).
 
-spend_pre(#{accounts := Accounts} = S, [Env, {SenderTag,Sender}, {ReceiverTag, Receiver}, Tx, Correct]) ->
-    Valid = spend_valid(S, [{SenderTag,Sender}, Tx]),
+spend_pre(#{accounts := Accounts} = S, [Env, {SenderTag, Sender}, {ReceiverTag, Receiver, To}, Tx, Correct]) ->
+    Valid = spend_valid(S, [Env, {SenderTag, Sender}, {ReceiverTag, Receiver, To}, Tx]),
     ReceiverOk = 
         case ReceiverTag of 
             new -> lists:keyfind(Receiver, #account.key, Accounts) == false;
-            existing -> lists:keyfind(Receiver, #account.key, Accounts) =/= false andalso
-                        %CBE: the following is needed to avoid an error
-                        % in the old version
-                        Receiver =/= Sender
+            existing -> lists:keyfind(Receiver, #account.key, Accounts) =/= false 
+                        %%     andalso
+                        %% %CBE: the following is needed to avoid an error
+                        %% % in the old version
+                        %% Receiver =/= Sender
+
         end,
     ReceiverOk andalso Correct == Valid andalso correct_height(S, Env).
 
-spend_valid(#{accounts := Accounts}, [{_, Sender}, Tx]) ->
-    case lists:keyfind(Sender, #account.key, Accounts) of
-        false -> false;
-        SenderAccount ->
-            SenderAccount#account.nonce == maps:get(nonce, Tx) andalso
-                SenderAccount#account.amount >= maps:get(amount, Tx) + maps:get(fee, Tx) andalso
-                maps:get(fee, Tx) >= 0   %% it seems fee == 0 does not return error
+spend_valid(#{accounts := Accounts}, [_Env, {_, Sender}, {_, Receiver, To}, Tx]) ->
+    case {lists:keyfind(Sender, #account.key, Accounts),
+          lists:keyfind(Receiver, #account.key, Accounts)} of
+        {false, _} -> false;
+        {SenderAccount, ReceiverAccount} ->
+            SenderAccount#account.nonce == maps:get(nonce, Tx) 
+                andalso SenderAccount#account.amount >= maps:get(amount, Tx) + maps:get(fee, Tx) 
+                andalso maps:get(fee, Tx) >= 0  %% it seems fee == 0 does not return error
+                andalso case To of
+                            account -> true;
+                            {name, Name} ->
+                                ReceiverAccount =/= false andalso lists:member(Name, ReceiverAccount#account.names)
+                        end
     end.
 
-spend_adapt(#{tx_env := TxEnv} = S, [_, {SenderTag, Sender}, {ReceiverTag, Receiver}, Tx, _Correct]) ->
-    [TxEnv, {SenderTag, Sender}, {ReceiverTag, Receiver}, Tx, 
-     spend_valid(S, [{SenderTag, Sender}, Tx])];
+spend_adapt(#{tx_env := TxEnv} = S, [_, {SenderTag, Sender}, {ReceiverTag, Receiver, To}, Tx, _Correct]) ->
+    [TxEnv, {SenderTag, Sender}, {ReceiverTag, Receiver, To}, Tx, 
+     spend_valid(S, [TxEnv, {SenderTag, Sender}, {ReceiverTag, Receiver, To}, Tx])];
 spend_adapt(_, _) ->
     false.    
 
@@ -163,7 +183,7 @@ spend(Env, _Sender, _Receiver, Tx, _Correct) ->
 
 
 spend_next(#{accounts := Accounts} = S, _Value, 
-           [_Env, {_SenderTag, Sender}, {ReceiverTag, Receiver}, Tx, Correct]) ->
+           [_Env, {_SenderTag, Sender}, {ReceiverTag, Receiver, _}, Tx, Correct]) ->
     if Correct ->
             %% Classical mistake if sender and receiver are the same! Update carefully
             SAccount = lists:keyfind(Sender, #account.key, Accounts),
@@ -199,12 +219,13 @@ spend_post(_S, [_Env, _, _, _Tx, Correct], Res) ->
 
 
 
-spend_features(S, [_Env, {_, Sender}, {_, Receiver}, Tx, Correct], Res) ->
+spend_features(S, [_Env, {_, Sender}, {_, Receiver, To}, Tx, Correct], Res) ->
     [{spend_accounts, length(maps:get(accounts, S))}, 
      {spend_correct, Correct}] ++
         [ spend_to_self || Sender == Receiver andalso Correct] ++
-             [ {spend, zero} || maps:get(amount, Tx) == 0 andalso Correct] ++
-             [ {spend, zero_fee} ||  maps:get(fee, Tx) == 0 ] ++
+        [ {spend, zero} || maps:get(amount, Tx) == 0 andalso Correct] ++
+        [ {spend, zero_fee} ||  maps:get(fee, Tx) == 0 ] ++
+        [ {spend_to_name, Name} || {name, Name} <- [To] ] ++
         [{spend_error, Res} || is_tuple(Res) andalso element(1, Res) == error].
 
 
