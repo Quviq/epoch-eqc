@@ -19,7 +19,7 @@
 -define(Patron, <<1, 1, 0:240>>).
 -define(NAMEFRAGS, ["foo", "bar", "baz"]).
 
--record(account, {key, amount, nonce}).
+-record(account, {key, amount, nonce, names = []}).
 -record(preclaim,{name, salt, height}).
 -record(claim,{name, height}).
 
@@ -237,7 +237,7 @@ name_preclaim_valid(#{accounts := Accounts} = S,
         SenderAccount ->
             SenderAccount#account.nonce == maps:get(nonce, Tx) andalso
                 SenderAccount#account.amount >= maps:get(fee, Tx) andalso
-                [present || #preclaim{name = N, salt = S} <- maps:get(preclaims, S, []), N == Name, S == Salt] == []
+                [present || #preclaim{name = N, salt = St} <- maps:get(preclaims, S, []), N == Name, St == Salt] == []
     end.   
 
 name_preclaim_adapt(#{tx_env := TxEnv} = S, [_Env, {SenderTag, Sender}, {Name, Salt}, Tx, _Correct]) ->
@@ -360,9 +360,8 @@ different_blocks(Preclaim, #{tx_env := TxEnv}) ->
 
 % names may not have dots in between, only at the end (.test)
 valid_name(Tx) ->
-    case string:lexemes(maps:get(name,Tx),".") of
-	[T,<<"test">>] ->
-	    true;
+    case string:lexemes(maps:get(name,Tx), ".") of
+	[_, <<"test">>] -> true;
 	_ -> false
     end.
 
@@ -398,15 +397,16 @@ claim(Env, _Sender, Tx,_Correct) ->
     end.
 
 claim_next(#{tx_env := TxEnv,
-	      accounts := Accounts, 
+             accounts := Accounts, 
 	     claims := Claims} = S, 
-	   _Value, [Env, {_, Sender}, Tx, Correct]) ->
+	   _Value, [_Env, {_, Sender}, Tx, Correct]) ->
     if Correct ->
 	    SAccount = lists:keyfind(Sender, #account.key, Accounts),
 	    S#{accounts => 
 	    	   (Accounts -- [SAccount]) ++
 	    	   [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx), 
-	    			     nonce = maps:get(nonce, Tx) + 1}],
+	    			     nonce = maps:get(nonce, Tx) + 1,
+                                     names = SAccount#account.names ++ [maps:get(name, Tx)]}],
 	      claims => 
 		   Claims ++ [#claim{name = maps:get(name, Tx), 
 				     height = aetx_env:height(TxEnv)}]};
@@ -421,8 +421,8 @@ claim_post(_S, [_Env, _Sender, _Tx, Correct], Res) ->
 	_ -> not Correct andalso valid_mismatch(Res)
     end.
 
-claim_features(S, [_Env, {_, Sender}, Tx, Correct], Res) ->
-    [{claim_result, Res},{claim_correct, Correct}] ++
+claim_features(_S, [_Env, {_, _Sender}, Tx, Correct], Res) ->
+    [{claim_result, Res}, {claim_correct, Correct}] ++
 	[{claim_name, maps:get(name,Tx)}].
     
 
