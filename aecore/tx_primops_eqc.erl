@@ -1335,10 +1335,6 @@ ns_transfer_valid(#{accounts := Accounts} = S, [Env, {_SenderTag, Sender}, {Rece
                     Claim -> 
                         Claim#claim.claimer == Sender
                             andalso Claim#claim.revoke_height == undefined
-                            %% andalso Claim#claim.valid_height >= aetx_env:height(Env)
-                            andalso aec_id:create(name, 
-                                                  aens_hash:name_hash(Receiver)) == maps:get(recipient_id, Tx)
-                        %% for shrinking
                 end andalso
                 case ReceiverTag of
                        new -> true;
