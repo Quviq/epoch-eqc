@@ -1051,7 +1051,9 @@ claim_next(#{tx_env := TxEnv,
 	    SAccount = lists:keyfind(Sender, #account.key, Accounts),
 	    S#{accounts => 
 	    	   (Accounts -- [SAccount]) ++
-	    	   [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx), 
+	    	   [SAccount#account{amount = SAccount#account.amount - 
+                                         maps:get(fee, Tx) - 
+                                         aec_governance:name_claim_locked_fee(), 
 	    			     nonce = maps:get(nonce, Tx) + 1}],
 	      claims => 
 		   Claims ++ [#claim{name = maps:get(name, Tx), 
