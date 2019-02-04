@@ -1330,16 +1330,25 @@ ns_transfer_valid(#{accounts := Accounts} = S, [Env, {_SenderTag, Sender}, {Rece
         SenderAccount ->
             SenderAccount#account.nonce == maps:get(nonce, Tx) andalso
                 SenderAccount#account.amount >= maps:get(fee, Tx) andalso
-                lists:member(Name, SenderAccount#account.names_owned) andalso
+                case lists:keyfind(Name, #claim.name, maps:get(claims, S, [])) of
+                    false -> false;
+                    Claim -> 
+                        Claim#claim.claimer == Sender
+                            andalso Claim#claim.revoke_height == undefined
+                            %% andalso Claim#claim.valid_height >= aetx_env:height(Env)
+                            andalso aec_id:create(name, 
+                                                  aens_hash:name_hash(Receiver)) == maps:get(recipient_id, Tx)
+                        %% for shrinking
+                end andalso
                 case ReceiverTag of
                        new -> true;
                        existing -> lists:keyfind(Receiver, #account.key, Accounts) /= false;   
-                       name ->
+                       name -> 
                            case lists:keyfind(Receiver, #claim.name, maps:get(claims, S, [])) of
                                false -> false;
-                               Claim -> 
-                                   Claim#claim.revoke_height == undefined
-                                       andalso Claim#claim.valid_height >= aetx_env:height(Env)
+                               RClaim -> 
+                                   RClaim#claim.revoke_height == undefined
+                                       %% andalso RClaim#claim.valid_height >= aetx_env:height(Env)
                                        andalso aec_id:create(name, 
                                                              aens_hash:name_hash(Receiver)) == maps:get(recipient_id, Tx)
                                    %% for shrinking
@@ -1379,21 +1388,28 @@ ns_transfer(Env, _Sender, _Receiver, _Name, Tx, _Correct) ->
 %% it with a name
 ns_transfer_next(#{accounts := Accounts} = S, _Value, 
                  [_Env, {_SenderTag, Sender}, {ReceiverTag, Receiver}, Name, Tx, Correct]) ->
+    ReceiverKey = 
+         case ReceiverTag of
+             name -> 
+                 maps:get(Receiver, maps:get(named_accounts, S, #{}), Sender);
+                 %% a hack, but if the Receievr name does not point to an account, then 
+                 %% we only need to increment the nonce and reduce amount of the sender
+             _ -> Receiver
+         end,
     if Correct ->
 	    SAccount = lists:keyfind(Sender, #account.key, Accounts),
             RAccount = 
                 case ReceiverTag of
                     name -> 
-                        RealReceiver = maps:get(Receiver, maps:get(named_accounts, S, #{})),
-                        {case lists:keyfind(RealReceiver, #account.key, Accounts) of
-                             false -> #account{key = RealReceiver, amount = 0, nonce = 1};
-                             Acc -> Acc
-                         end, Receiver};
+                       case lists:keyfind(ReceiverKey, #account.key, Accounts) of
+                           false -> #account{key = ReceiverKey, amount = 0, nonce = 1};
+                           Acc -> Acc
+                       end;
                     new -> #account{key = Receiver, amount = 0, nonce = 1};
                     existing ->
                         lists:keyfind(Receiver, #account.key, Accounts)
                 end,
-            case Sender == RAccount#account.key of
+            case Sender == ReceiverKey of
                 true -> 
                     S#{accounts =>
                            (Accounts -- [SAccount]) ++
