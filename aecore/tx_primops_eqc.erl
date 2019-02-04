@@ -7,8 +7,14 @@
 %%%            The test profile has a name and a cookie set in {dist_node, ...}
 %%% 
 %%%       TODO: 
-%%%          - add oracle names to the state
-%%%          - name transfer
+%%%          - fix channel_withdraw
+%%%          - add channel mutual close
+%%%          - add oracle names to the state such that we can use names with oracles
+%%%          - add names to oracle txs
+%%%          - add extend oracle
+%%%          - add contract txs (quite a lot of work, I fear)
+%%%          - add name transfer
+%%%          - tune distribution (all EXIT differences should show up in features)
 %%%          - mock aec_governance values to test for name revoke re-use etc.
 %%% @end
 %%% Created : 23 Jan 2019 by Thomas Arts
