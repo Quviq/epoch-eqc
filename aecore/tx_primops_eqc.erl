@@ -13,7 +13,6 @@
 %%%          - add names to oracle txs
 %%%          - add extend oracle
 %%%          - add contract txs (quite a lot of work, I fear)
-%%%          - add name transfer
 %%%          - tune distribution (all EXIT differences should show up in features)
 %%%          - mock aec_governance values to test for name revoke re-use etc.
 %%% @end
@@ -1287,6 +1286,150 @@ ns_revoke_post(_S, [_Env, _Sender, _Name, _Tx, Correct], Res) ->
 ns_revoke_features(_S, [_Env, _Sender, _Name, _Tx, Correct], Res) ->
     [{correct, if Correct -> ns_revoke; true -> false end} ] ++
         [{ns_revoke, Res} || is_tuple(Res) andalso element(1, Res) == error].
+
+
+%% --- Operation: ns_transfer ---
+ns_transfer_pre(S) ->
+    maps:is_key(accounts, S).
+
+ns_transfer_args(#{accounts := Accounts, tx_env := Env} = S) ->
+    ?LET(Args,
+    ?LET([{SenderTag, Sender}, {ReceiverTag, Receiver}], 
+         vector(2, gen_account_pubkey(Accounts)),
+         ?LET([Name, To], [gen_name(S), 
+                           oneof([account, {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++ 
+                                                               [<<"ta.test">>])}])],
+              [Env, {SenderTag, Sender#account.key},
+               case To of
+                   account -> {ReceiverTag, Receiver#account.key};
+                   {name, ToName} -> {name, ToName}
+               end, Name,
+               #{account_id => aec_id:create(account, Sender#account.key),  %% The sender is asserted to never be a name.
+                 recipient_id =>  
+                     case To of 
+                         account ->
+                             aec_id:create(account, Receiver#account.key);
+                         {name, ToName} ->
+                             aec_id:create(name, aens_hash:name_hash(ToName))
+                     end,
+                 name_id => aec_id:create(name, aens_hash:name_hash(Name)),
+		 fee => choose(1, 10),
+		 nonce => gen_nonce(Sender)
+                }])), 
+	 Args ++ [ns_transfer_valid(S, Args)]).
+
+
+ns_transfer_pre(S, [Env, Sender, Receiver,  Name, Tx, Correct]) ->
+    aec_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx) 
+        andalso ns_transfer_valid(S, [Env, Sender, Receiver, Name, Tx]) == Correct 
+        andalso correct_height(S, Env).
+
+ns_transfer_valid(#{accounts := Accounts} = S, [Env, {_SenderTag, Sender}, {ReceiverTag, Receiver}, Name, Tx]) ->
+    case lists:keyfind(Sender, #account.key, Accounts) of
+        false -> false;
+        SenderAccount ->
+            SenderAccount#account.nonce == maps:get(nonce, Tx) andalso
+                SenderAccount#account.amount >= maps:get(fee, Tx) andalso
+                lists:member(Name, SenderAccount#account.names_owned) andalso
+                case ReceiverTag of
+                       new -> true;
+                       existing -> lists:keyfind(Receiver, #account.key, Accounts) /= false;   
+                       name ->
+                           case lists:keyfind(Receiver, #claim.name, maps:get(claims, S, [])) of
+                               false -> false;
+                               Claim -> 
+                                   Claim#claim.revoke_height == undefined
+                                       andalso Claim#claim.valid_height >= aetx_env:height(Env)
+                                       andalso aec_id:create(name, 
+                                                             aens_hash:name_hash(Receiver)) == maps:get(recipient_id, Tx)
+                                   %% for shrinking
+                           end
+                end
+    end.
+
+ns_transfer_adapt(#{tx_env := TxEnv} = S, [_Env, Sender, Receiver, Name, Tx, _Correct]) ->
+    [TxEnv, Sender, Receiver, Name, Tx, 
+     ns_transfer_valid(S, [TxEnv, Sender, Receiver, Name, Tx])];
+ns_transfer_adapt(_, _) ->
+    false.    
+
+ns_transfer(Env, _Sender, _Receiver, _Name, Tx, _Correct) ->
+    Trees = get(trees),
+    {ok, NTx} = rpc(aens_transfer_tx, new, [Tx]),
+    {_, NameTx} = aetx:specialize_type(NTx),
+
+    %% old version
+    Remote = 
+        case rpc:call(?REMOTE_NODE, aens_transfer_tx, check, [NameTx, Trees, Env], 1000) of
+            {ok, Ts} ->
+                rpc:call(?REMOTE_NODE, aens_transfer_tx, process, [NameTx, Ts, Env], 1000);
+            OldError ->
+                OldError
+        end,
+
+    Local = rpc:call(node(), aens_transfer_tx, process, [NameTx, Trees, Env], 1000),
+    case catch eq_rpc(Local, Remote, fun hash_equal/2) of
+        {ok, NewTrees} ->
+            put(trees, NewTrees),
+            ok;
+        Other -> Other
+    end.
+
+%% Assumption the recipient does not need to exist, it is created when we provided
+%% it with a name
+ns_transfer_next(#{accounts := Accounts} = S, _Value, 
+                 [_Env, {_SenderTag, Sender}, {ReceiverTag, Receiver}, Name, Tx, Correct]) ->
+    if Correct ->
+	    SAccount = lists:keyfind(Sender, #account.key, Accounts),
+            RAccount = 
+                case ReceiverTag of
+                    name -> 
+                        RealReceiver = maps:get(Receiver, maps:get(named_accounts, S, #{})),
+                        {case lists:keyfind(RealReceiver, #account.key, Accounts) of
+                             false -> #account{key = RealReceiver, amount = 0, nonce = 1};
+                             Acc -> Acc
+                         end, Receiver};
+                    new -> #account{key = Receiver, amount = 0, nonce = 1};
+                    existing ->
+                        lists:keyfind(Receiver, #account.key, Accounts)
+                end,
+            case Sender == RAccount#account.key of
+                true -> 
+                    S#{accounts =>
+                           (Accounts -- [SAccount]) ++
+                           [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx),
+                                             nonce = maps:get(nonce, Tx) + 1
+                                            }]};
+                false ->
+                    S#{accounts =>
+                           (Accounts -- [SAccount, RAccount]) ++
+                               [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx),
+                                                 nonce = maps:get(nonce, Tx) + 1, 
+                                                 names_owned = SAccount#account.names_owned -- [Name]
+                                                },
+                                RAccount#account{names_owned = 
+                                                     (RAccount#account.names_owned -- [Name]) ++ [Name]}],
+                       named_accounts => 
+                           %% Should this point to the name (and if that name changes go to new account)
+                           %% or the resolved key???
+                           maps:put(Name, Receiver, maps:get(named_accounts, S, #{}))
+                      }
+            end;
+       not Correct ->
+	    S
+    end.
+
+ns_transfer_post(_S, [_Env, _Sender, _Receiver, _Name, _Tx, Correct], Res) ->
+    case Res of
+        {error, _} -> not Correct;
+        ok -> Correct;
+	_ -> not Correct andalso valid_mismatch(Res)
+    end.
+
+ns_transfer_features(_S, [_Env, _Sender, _Receiver, _Name, _Tx, Correct], Res) ->
+    [{correct, if Correct -> ns_transfer; true -> false end} ] ++
+        [{ns_transfer, Res} || is_tuple(Res) andalso element(1, Res) == error].
+
 
 
 
