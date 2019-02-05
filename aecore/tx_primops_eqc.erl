@@ -5,8 +5,8 @@
 %%%            ./rebar3 as test shell --sname oldepoch@localhost --apps ""
 %%%            we need the test profile to assure that the cookie is set to aeternity_cookie
 %%%            The test profile has a name and a cookie set in {dist_node, ...}
-%%% 
-%%%       TODO: 
+%%%
+%%%       TODO:
 %%%          - fix channel_withdraw
 %%%          - add channel mutual close
 %%%          - add oracle names to the state such that we can use names with oracles
@@ -55,36 +55,34 @@ init_pre(S) ->
     not maps:is_key(accounts, S).
 
 init_args(_S) ->
-    TxEnv = aetx_env:tx_env(0),   %% a hack, we need to create a nice env here, time field has side-effect 
-    [TxEnv].
+    [0].
 
-init(_) ->
+init(_Height) ->
     Trees = rpc(aec_trees, new_without_backend, [], fun hash_equal/2),
     EmptyAccountTree = rpc(aec_trees, accounts, [Trees]),
-    Account = rpc(aec_accounts, new, [?Patron, 1200000]), 
+    Account = rpc(aec_accounts, new, [?Patron, 1200000]),
     AccountTree = rpc(aec_accounts_trees, enter, [Account, EmptyAccountTree]),
     InitialTrees = rpc(aec_trees, set_accounts, [Trees, AccountTree], fun hash_equal/2),
     put(trees, InitialTrees),
-    InitialTrees, 
+    InitialTrees,
     ok.
 
-init_next(S, _Value, [TxEnv]) ->
-    S#{tx_env => TxEnv,
+init_next(S, _Value, [Height]) ->
+    S#{height => Height,
        accounts => [#account{key = ?Patron, amount = 1200000, nonce = 1}]}.
 
 %% --- Operation: mine ---
 mine_pre(S) ->
     maps:is_key(accounts, S).
 
-mine_args(#{tx_env := TxEnv}) ->
-    Height = aetx_env:height(TxEnv),
+mine_args(#{height := Height}) ->
     [Height].
 
-mine_pre(#{tx_env := TxEnv}, [H]) ->
-    aetx_env:height(TxEnv) == H.
+mine_pre(#{height := Height}, [H]) ->
+    Height == H.
 
-mine_adapt(#{tx_env := TxEnv}, [_]) ->
-    [aetx_env:height(TxEnv)];
+mine_adapt(#{height := Height}, [_]) ->
+    [Height];
 mine_adapt(_, _) ->
     false.
 
@@ -95,13 +93,13 @@ mine(Height) ->
     NewTrees,
     ok.
 
-mine_next(#{tx_env := TxEnv} = S, _Value, [H]) ->
-    Payback = [ Query || Query <- maps:get(queries, S, []), Query#query.response_ttl =< H],
+mine_next(#{height := Height} = S, _Value, [_H]) ->
+    Payback = [ Query || Query <- maps:get(queries, S, []), Query#query.response_ttl =< Height],
     Accounts = [ case lists:keyfind(Account#account.key, #query.sender, Payback) of
                      false -> Account;
                      Query -> Account#account{amount = Account#account.amount + Query#query.fee}
                  end || Account <- maps:get(accounts, S, [])],
-    S#{tx_env => aetx_env:set_height(TxEnv, H + 1),
+    S#{height => Height + 1,
        accounts => Accounts,
        queries =>  maps:get(queries, S, []) -- Payback
       }.
@@ -115,81 +113,82 @@ mine_features(S, [H], _Res) ->
 spend_pre(S) ->
     maps:is_key(accounts, S).
 
-spend_args(#{accounts := Accounts, tx_env := Env} = S) ->
-    ?LET(Args, 
-    ?LET([{SenderTag, Sender}, {ReceiverTag, Receiver}], 
+spend_args(#{accounts := Accounts, height := Height} = S) ->
+    ?LET(Args,
+    ?LET([{SenderTag, Sender}, {ReceiverTag, Receiver}],
          vector(2, gen_account_pubkey(Accounts)),  %% Add oracle as well! and contract
-         ?LET([Amount, Nonce, To], [nat(), gen_nonce(Sender), 
+         ?LET([Amount, Nonce, To], [nat(), gen_nonce(Sender),
                                     oneof([account, {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++ [<<"ta.test">>])}])],
               %% important: we should never generate ta.test, it is a definitely wrong name
-              [Env, {SenderTag, Sender#account.key}, 
+              [Height, {SenderTag, Sender#account.key},
                case To of
                    account -> {ReceiverTag, Receiver#account.key};
                    {name, Name} -> {name, Name}
                end,
                #{sender_id => aec_id:create(account, Sender#account.key),  %% The sender is asserted to never be a name.
-                 recipient_id =>  
-                     case To of 
+                 recipient_id =>
+                     case To of
                          account ->
                              aec_id:create(account, Receiver#account.key);
                          {name, Name} ->
                              aec_id:create(name, aens_hash:name_hash(Name))
                      end,
                  amount => Amount,
-                 fee => choose(1, 10), 
+                 fee => choose(1, 10),
                  nonce => Nonce,
                  payload => utf8()}])),
          Args ++ [spend_valid(S, Args)]).
 
-spend_pre(#{accounts := Accounts} = S, [Env, {SenderTag, Sender}, {ReceiverTag, Receiver}, Tx, Correct]) ->
-    Valid = spend_valid(S, [Env, {SenderTag, Sender}, {ReceiverTag, Receiver}, Tx]),
-    ReceiverOk = 
-        case ReceiverTag of 
+spend_pre(#{accounts := Accounts} = S, [Height, {SenderTag, Sender}, {ReceiverTag, Receiver}, Tx, Correct]) ->
+    Valid = spend_valid(S, [Height, {SenderTag, Sender}, {ReceiverTag, Receiver}, Tx]),
+    ReceiverOk =
+        case ReceiverTag of
             new -> lists:keyfind(Receiver, #account.key, Accounts) == false;
             existing -> lists:keyfind(Receiver, #account.key, Accounts) =/= false;
             name -> maps:is_key(Receiver, maps:get(named_accounts, S, #{}))
         end,
     ReceiverOk andalso Correct == Valid
-        andalso correct_height(S, Env).
+        andalso correct_height(S, Height).
 
-spend_valid(#{accounts := Accounts, tx_env := TxEnv} = S, [_Env, {_, Sender}, {ReceiverTag, Receiver}, Tx]) ->
+spend_valid(#{accounts := Accounts, height := Height} = S, [_Height, {_, Sender}, {ReceiverTag, Receiver}, Tx]) ->
     case lists:keyfind(Sender, #account.key, Accounts) of
         false -> false;
         SenderAccount ->
-            SenderAccount#account.nonce == maps:get(nonce, Tx) 
-                andalso SenderAccount#account.amount >= maps:get(amount, Tx) + maps:get(fee, Tx) 
+            SenderAccount#account.nonce == maps:get(nonce, Tx)
+                andalso SenderAccount#account.amount >= maps:get(amount, Tx) + maps:get(fee, Tx)
                 andalso maps:get(fee, Tx) >= 0  %% it seems fee == 0 does not return error
                 andalso
                    case ReceiverTag of
                        new -> true;
-                       existing -> lists:keyfind(Receiver, #account.key, Accounts) /= false;   
+                       existing -> lists:keyfind(Receiver, #account.key, Accounts) /= false;
                        name ->
                            case lists:keyfind(Receiver, #claim.name, maps:get(claims, S, [])) of
                                false -> false;
-                               Claim -> 
+                               Claim ->
                                    Claim#claim.revoke_height == undefined
-                                       andalso Claim#claim.valid_height >= aetx_env:height(TxEnv)
-                                       andalso aec_id:create(name, 
+                                       andalso Claim#claim.valid_height >= Height
+                                       andalso aec_id:create(name,
                                                              aens_hash:name_hash(Receiver)) == maps:get(recipient_id, Tx)
                                    %% for shrinking
                            end
                    end
     end.
 
-spend_adapt(#{tx_env := TxEnv} = S, [_, {SenderTag, Sender}, {ReceiverTag, Receiver}, Tx, _Correct]) ->
-    [TxEnv, {SenderTag, Sender}, {ReceiverTag, Receiver}, Tx, 
-     spend_valid(S, [TxEnv, {SenderTag, Sender}, {ReceiverTag, Receiver}, Tx])];
+spend_adapt(#{height := Height} = S, [_, {SenderTag, Sender}, {ReceiverTag, Receiver}, Tx, _Correct]) ->
+    [Height, {SenderTag, Sender}, {ReceiverTag, Receiver}, Tx,
+     spend_valid(S, [Height, {SenderTag, Sender}, {ReceiverTag, Receiver}, Tx])];
 spend_adapt(_, _) ->
     false.
 
-    
-spend(Env, _Sender, _Receiver, Tx, _Correct) ->
+
+spend(Height, _Sender, _Receiver, Tx, _Correct) ->
     Trees = get(trees),
     {ok, AeTx} = rpc(aec_spend_tx, new, [Tx]),
     {_, SpendTx} = aetx:specialize_type(AeTx),
 
+    Env = aetx_env:tx_env(Height),
     %% old version
-    Remote = 
+    Remote =
         case rpc:call(?REMOTE_NODE, aec_spend_tx, check, [SpendTx, Trees, Env], 1000) of
             {ok, Ts} ->
                 rpc:call(?REMOTE_NODE, aec_spend_tx, process, [SpendTx, Ts, Env], 1000);
@@ -206,14 +205,14 @@ spend(Env, _Sender, _Receiver, Tx, _Correct) ->
     end.
 
 
-spend_next(#{accounts := Accounts} = S, _Value, 
-           [_Env, {_SenderTag, Sender}, {ReceiverTag, Receiver}, Tx, Correct]) ->
+spend_next(#{accounts := Accounts} = S, _Value,
+           [_Height, {_SenderTag, Sender}, {ReceiverTag, Receiver}, Tx, Correct]) ->
     if Correct ->
             %% Classical mistake if sender and receiver are the same! Update carefully
             SAccount = lists:keyfind(Sender, #account.key, Accounts),
-            RAccount = 
+            RAccount =
                 case ReceiverTag of
-                    name -> 
+                    name ->
                         RealReceiver = maps:get(Receiver, maps:get(named_accounts, S, #{})),
                         case lists:keyfind(RealReceiver, #account.key, Accounts) of
                             false -> #account{key = RealReceiver, amount = 0, nonce = 1};
@@ -225,22 +224,22 @@ spend_next(#{accounts := Accounts} = S, _Value,
                 end,
             case Sender == RAccount#account.key of
                 false ->
-                    S#{accounts => 
+                    S#{accounts =>
                            (Accounts -- [RAccount, SAccount]) ++
-                           [SAccount#account{amount = SAccount#account.amount - maps:get(amount,Tx) - maps:get(fee, Tx), 
+                           [SAccount#account{amount = SAccount#account.amount - maps:get(amount,Tx) - maps:get(fee, Tx),
                                              nonce = maps:get(nonce, Tx) + 1},
                             RAccount#account{amount = maps:get(amount,Tx) + RAccount#account.amount}]};  %% add to end of list
                 true ->
-                    S#{accounts => 
+                    S#{accounts =>
                            (Accounts -- [SAccount]) ++
-                           [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx), 
+                           [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx),
                                              nonce = maps:get(nonce, Tx) + 1}]}
             end;
-       not Correct -> 
+       not Correct ->
             S
     end.
 
-spend_post(_S, [_Env, _, _, _Tx, Correct], Res) ->
+spend_post(_S, [_Height, _, _, _Tx, Correct], Res) ->
     case Res of
         {error, _} -> not Correct;
         ok -> Correct;
@@ -248,8 +247,8 @@ spend_post(_S, [_Env, _, _, _Tx, Correct], Res) ->
     end.
 
 
-spend_features(S, [_Env, {_, Sender}, {Tag, Receiver}, Tx, Correct], Res) ->
-    [{spend_accounts, length(maps:get(accounts, S))}, 
+spend_features(S, [_Height, {_, Sender}, {Tag, Receiver}, Tx, Correct], Res) ->
+    [{spend_accounts, length(maps:get(accounts, S))},
      {correct,  if Correct -> spend; true -> false end}] ++
         [ spend_to_self || Sender == Receiver andalso Correct] ++
              [ {spend, zero} || maps:get(amount, Tx) == 0 andalso Correct] ++
@@ -262,21 +261,21 @@ spend_features(S, [_Env, {_, Sender}, {Tag, Receiver}, Tx, Correct], Res) ->
 register_oracle_pre(S) ->
     length(maps:get(accounts, S, [])) > 1.
 
-register_oracle_args(#{accounts := Accounts, tx_env := Env} = S) ->
-    ?LET(Args, 
+register_oracle_args(#{accounts := Accounts, height := Height} = S) ->
+    ?LET(Args,
          ?LET({SenderTag, Sender}, gen_account_pubkey(lists:keydelete(?Patron, #account.key, Accounts)),
-              [Env, {SenderTag, Sender#account.key},
-                    #{account_id => aec_id:create(account, Sender#account.key), 
+              [Height, {SenderTag, Sender#account.key},
+                    #{account_id => aec_id:create(account, Sender#account.key),
                       query_format    => <<"send me any string"/utf8>>,
                       response_format => <<"boolean()"/utf8>>,
                       query_fee       => nat(),
-                      fee => choose(1, 10), 
+                      fee => choose(1, 10),
                       nonce => gen_nonce(Sender),
                       oracle_ttl => {delta, 100}}]),
          Args ++ [register_oracle_valid(S, [lists:nth(2, Args), lists:last(Args)])]).
 
-register_oracle_pre(S, [Env, Sender, Tx, Correct]) ->
-    Correct == register_oracle_valid(S, [Sender, Tx]) andalso correct_height(S, Env).
+register_oracle_pre(S, [Height, Sender, Tx, Correct]) ->
+    Correct == register_oracle_valid(S, [Sender, Tx]) andalso correct_height(S, Height).
 
 register_oracle_valid(S, [{_, Sender}, Tx]) ->
     case lists:keyfind(Sender, #account.key, maps:get(accounts, S, [])) of
@@ -287,19 +286,20 @@ register_oracle_valid(S, [{_, Sender}, Tx]) ->
                 not lists:keymember(Sender, 1, maps:get(oracles, S, []))
     end.
 
-register_oracle_adapt(#{tx_env := TxEnv} = S, [_, Sender, Tx, _Correct]) ->
-    [TxEnv, Sender, Tx, register_oracle_valid(S, [Sender, Tx])];
+register_oracle_adapt(#{height := Height} = S, [_, Sender, Tx, _Correct]) ->
+    [Height, Sender, Tx, register_oracle_valid(S, [Sender, Tx])];
 register_oracle_adapt(_, _) ->
-    %% in case we don't even have a TxEnv
+    %% in case we don't even have a Height
     false.
 
-register_oracle(Env, _Sender, Tx, _Correct) ->
+register_oracle(Height, _Sender, Tx, _Correct) ->
     Trees = get(trees),
     {ok, AeTx} = rpc(aeo_register_tx, new, [Tx]),
     {oracle_register_tx, OracleTx} = aetx:specialize_type(AeTx),
-    
+
+    Env = aetx_env:tx_env(Height),
     %% old version
-    Remote = 
+    Remote =
         case rpc:call(?REMOTE_NODE,aeo_register_tx, check, [OracleTx, Trees, Env], 1000) of
             {ok, Ts} ->
                 rpc:call(?REMOTE_NODE, aeo_register_tx, process, [OracleTx, Ts, Env], 1000);
@@ -314,29 +314,29 @@ register_oracle(Env, _Sender, Tx, _Correct) ->
             ok;
         Other -> Other
     end.
-    
 
-register_oracle_next(#{accounts := Accounts} = S, _Value, [_Env, {_, Sender}, Tx, Correct]) ->
+
+register_oracle_next(#{accounts := Accounts} = S, _Value, [_Height, {_, Sender}, Tx, Correct]) ->
     if Correct ->
             SAccount = lists:keyfind(Sender, #account.key, Accounts),
-            S#{accounts => 
+            S#{accounts =>
                    (Accounts -- [SAccount]) ++
-                   [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx), 
+                   [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx),
                                      nonce = maps:get(nonce, Tx) + 1}],
                oracles =>
                    maps:get(oracles, S, []) ++ [{Sender, maps:get(query_fee, Tx)}]};
-       not Correct -> 
+       not Correct ->
             S
     end.
 
-register_oracle_post(_S, [_Env, _Sender,_Tx, Correct], Res) ->
+register_oracle_post(_S, [_Height, _Sender,_Tx, Correct], Res) ->
     case Res of
         {error, _} -> not Correct;
         ok -> Correct;
         _ -> not Correct andalso valid_mismatch(Res)
     end.
 
-register_oracle_features(_S, [_Env, {_, _Sender}, Tx, Correct], Res) ->
+register_oracle_features(_S, [_Height, {_, _Sender}, Tx, Correct], Res) ->
     [{correct, if Correct -> register_oracle; true -> false end} ] ++
         [ {oracle_query_fee, zero} || maps:get(query_fee, Tx) == 0 andalso Correct] ++
         [{register_oracle, Res} || is_tuple(Res) andalso element(1, Res) == error].
@@ -346,26 +346,26 @@ register_oracle_features(_S, [_Env, {_, _Sender}, Tx, Correct], Res) ->
 query_oracle_pre(S) ->
      maps:is_key(accounts, S).
 
-query_oracle_args(#{accounts := Accounts, tx_env := Env} = S) ->
-    ?LET(Args, 
-         ?LET([{SenderTag, Sender}, {_, Oracle}], 
+query_oracle_args(#{accounts := Accounts, height := Height} = S) ->
+    ?LET(Args,
+         ?LET([{SenderTag, Sender}, {_, Oracle}],
               vector(2, gen_account_pubkey(Accounts)),
-                   [Env, {SenderTag, Sender#account.key}, Oracle#account.key,
-                    #{sender_id => aec_id:create(account, Sender#account.key), 
-                      oracle_id => aec_id:create(oracle, Oracle#account.key), 
+                   [Height, {SenderTag, Sender#account.key}, Oracle#account.key,
+                    #{sender_id => aec_id:create(account, Sender#account.key),
+                      oracle_id => aec_id:create(oracle, Oracle#account.key),
                       query => oneof([<<"{foo: bar}"/utf8>>, <<"any string"/utf8>>, <<>>]),
                       query_fee => nat(),
                       query_ttl => {delta, 3},
                       response_ttl => {delta, 3},
-                      fee => choose(1, 10), 
+                      fee => choose(1, 10),
                       nonce => gen_nonce(Sender)
                      }]),
          Args ++ [query_oracle_valid(S, Args)]).
 
-query_oracle_pre(S, [Env, {SenderTag, Sender}, Oracle, Tx, Correct]) ->
-    Correct == query_oracle_valid(S, [Env, {SenderTag, Sender}, Oracle, Tx]) andalso correct_height(S, Env).
+query_oracle_pre(S, [Height, {SenderTag, Sender}, Oracle, Tx, Correct]) ->
+    Correct == query_oracle_valid(S, [Height, {SenderTag, Sender}, Oracle, Tx]) andalso correct_height(S, Height).
 
-query_oracle_valid(S, [_Env, {_SenderTag, Sender}, Oracle, Tx]) ->
+query_oracle_valid(S, [_Height, {_SenderTag, Sender}, Oracle, Tx]) ->
     case {lists:keyfind(Sender, #account.key, maps:get(accounts, S, [])),
           lists:keyfind(Oracle, 1, maps:get(oracles, S, []))}
           of
@@ -377,19 +377,20 @@ query_oracle_valid(S, [_Env, {_SenderTag, Sender}, Oracle, Tx]) ->
                 maps:get(query_fee, Tx) >= QueryFee
     end.
 
-query_oracle_adapt(#{tx_env := TxEnv} = S, [_Env, Sender, Oracle, Tx, _Correct]) ->
-    [TxEnv, Sender, Oracle, Tx, query_oracle_valid(S, [TxEnv, Sender, Oracle, Tx])];
+query_oracle_adapt(#{height := Height} = S, [_Height, Sender, Oracle, Tx, _Correct]) ->
+    [Height, Sender, Oracle, Tx, query_oracle_valid(S, [Height, Sender, Oracle, Tx])];
 query_oracle_adapt(_, _) ->
     false.
 
 
-query_oracle(Env, _Sender, _Oracle, Tx, _Correct) ->
+query_oracle(Height, _Sender, _Oracle, Tx, _Correct) ->
     Trees = get(trees),
     {ok, AeTx} = rpc(aeo_query_tx, new, [Tx]),
     {oracle_query_tx, OracleTx} = aetx:specialize_type(AeTx),
-    
+
+    Env = aetx_env:tx_env(Height),
     %% old version
-    Remote = 
+    Remote =
         case rpc:call(?REMOTE_NODE,aeo_query_tx, check, [OracleTx, Trees, Env], 1000) of
             {ok, Ts} ->
                 rpc:call(?REMOTE_NODE, aeo_query_tx, process, [OracleTx, Ts, Env], 1000);
@@ -405,32 +406,32 @@ query_oracle(Env, _Sender, _Oracle, Tx, _Correct) ->
         Other -> Other
     end.
 
-query_oracle_next(#{accounts := Accounts} = S, _Value, [Env, {_, Sender}, Oracle, Tx, Correct]) ->
+query_oracle_next(#{accounts := Accounts} = S, _Value, [Height, {_, Sender}, Oracle, Tx, Correct]) ->
     if Correct ->
             {delta, Delta} = maps:get(response_ttl, Tx),
             SAccount = lists:keyfind(Sender, #account.key, Accounts),
-            S#{accounts => 
+            S#{accounts =>
                    (Accounts -- [SAccount]) ++
                    [SAccount#account{
-                      amount = SAccount#account.amount - maps:get(fee, Tx) - maps:get(query_fee, Tx), 
+                      amount = SAccount#account.amount - maps:get(fee, Tx) - maps:get(query_fee, Tx),
                       nonce = maps:get(nonce, Tx) + 1}],
               queries => maps:get(queries, S, []) ++
-                   [#query{sender = Sender, 
-                           id = {Sender, maps:get(nonce, Tx), Oracle}, 
-                           response_ttl = Delta + aetx_env:height(Env), 
+                   [#query{sender = Sender,
+                           id = {Sender, maps:get(nonce, Tx), Oracle},
+                           response_ttl = Delta + Height,
                            fee = maps:get(query_fee, Tx)}]};
-       not Correct -> 
+       not Correct ->
             S
     end.
 
-query_oracle_post(_S, [_Env, _Sender, _Oracle, _Tx, Correct], Res) ->
+query_oracle_post(_S, [_Height, _Sender, _Oracle, _Tx, Correct], Res) ->
      case Res of
         {error, _} -> not Correct;
         ok -> Correct;
          _ -> not Correct andalso valid_mismatch(Res)
     end.
 
-query_oracle_features(_S, [_Env, _, _, Tx, Correct], Res) ->
+query_oracle_features(_S, [_Height, _, _, Tx, Correct], Res) ->
     [{correct, if Correct -> query_oracle; true -> false end} ] ++
              [ {query_query_fee, zero} || maps:get(query_fee, Tx) == 0 andalso Correct] ++
              [ {query_oracle, zero_fee} ||  maps:get(fee, Tx) == 0 ] ++
@@ -441,17 +442,17 @@ response_oracle_pre(S) ->
      maps:get(queries, S, []) =/= [].
 
 %% Only responses to existing query tested for the moment, no fault injection
-response_oracle_args(#{accounts := Accounts, tx_env := Env} = S) ->
-    ?LET(Args, 
-         ?LET({Sender, Nonce, Oracle}, 
+response_oracle_args(#{accounts := Accounts, height := Height} = S) ->
+    ?LET(Args,
+         ?LET({Sender, Nonce, Oracle},
                frequency([{99, ?LET(Query, elements(maps:get(queries, S)), Query#query.id)},
                           {1, {?Patron, 2, ?Patron}}]),
-              [Env, {Sender, Nonce, Oracle},
-               #{oracle_id => aec_id:create(oracle, Oracle), 
+              [Height, {Sender, Nonce, Oracle},
+               #{oracle_id => aec_id:create(oracle, Oracle),
                  query_id => aeo_query:id(Sender, Nonce, Oracle),
                  response => <<"yes, you can">>,
                  response_ttl => {delta, 3},
-                 fee => choose(1, 10), 
+                 fee => choose(1, 10),
                  nonce => case lists:keyfind(Oracle, #account.key, Accounts) of
                               false -> 1;
                               Account -> Account#account.nonce
@@ -459,34 +460,35 @@ response_oracle_args(#{accounts := Accounts, tx_env := Env} = S) ->
                 }]),
          Args ++ [response_oracle_valid(S, Args)]).
 
-response_oracle_pre(S, [Env, QueryId, Tx, Correct]) ->
-    Correct == response_oracle_valid(S, [Env, QueryId, Tx]) 
-        andalso correct_height(S, Env).
+response_oracle_pre(S, [Height, QueryId, Tx, Correct]) ->
+    Correct == response_oracle_valid(S, [Height, QueryId, Tx])
+        andalso correct_height(S, Height).
 
-response_oracle_valid(S, [_Env, {_, _, Oracle} = QueryId, Tx]) ->
+response_oracle_valid(S, [_Height, {_, _, Oracle} = QueryId, Tx]) ->
     case lists:keyfind(Oracle, #account.key, maps:get(accounts, S)) of
         false -> false;
         OracleAccount ->
             Query = lists:keyfind(QueryId, #query.id, maps:get(queries, S, [])),
             OracleAccount#account.nonce == maps:get(nonce, Tx) andalso
-                OracleAccount#account.amount >= maps:get(fee, Tx) andalso 
+                OracleAccount#account.amount >= maps:get(fee, Tx) andalso
                 Query =/= false
     end.
 
-response_oracle_adapt(#{tx_env := TxEnv} = S, [_, QueryId, Tx, _Correct]) ->
-    [TxEnv, QueryId, Tx, register_oracle_valid(S, [TxEnv, QueryId, Tx])];
+response_oracle_adapt(#{height := Height} = S, [_, QueryId, Tx, _Correct]) ->
+    [Height, QueryId, Tx, register_oracle_valid(S, [Height, QueryId, Tx])];
 response_oracle_adapt(_, _) ->
-    %% in case we don't even have a TxEnv
+    %% in case we don't even have a Height
     false.
 
 
-response_oracle(Env, _QueryId, Tx, _Correct) ->
+response_oracle(Height, _QueryId, Tx, _Correct) ->
     Trees = get(trees),
     {ok, AeTx} = rpc(aeo_response_tx, new, [Tx]),
     {oracle_response_tx, OracleTx} = aetx:specialize_type(AeTx),
-    
+
+    Env = aetx_env:tx_env(Height),
     %% old version
-    Remote = 
+    Remote =
         case rpc:call(?REMOTE_NODE,aeo_response_tx, check, [OracleTx, Trees, Env], 1000) of
             {ok, Ts} ->
                 rpc:call(?REMOTE_NODE, aeo_response_tx, process, [OracleTx, Ts, Env], 1000);
@@ -502,31 +504,31 @@ response_oracle(Env, _QueryId, Tx, _Correct) ->
         Other -> Other
     end.
 
-response_oracle_next(#{accounts := Accounts} = S, _Value, [_Env, QueryId, Tx, Correct]) ->
+response_oracle_next(#{accounts := Accounts} = S, _Value, [_Height, QueryId, Tx, Correct]) ->
     if Correct ->
             {_, _, Oracle} = QueryId,
             OracleAccount = lists:keyfind(Oracle, #account.key, Accounts),
             Query = lists:keyfind(QueryId, #query.id, maps:get(queries, S, [])),
             QueryFee = Query#query.fee,
 
-            S#{accounts => 
+            S#{accounts =>
                    (Accounts -- [OracleAccount]) ++
                    [OracleAccount#account{
-                      amount = OracleAccount#account.amount - maps:get(fee, Tx) + QueryFee, 
+                      amount = OracleAccount#account.amount - maps:get(fee, Tx) + QueryFee,
                       nonce = maps:get(nonce, Tx) + 1}],
               queries => maps:get(queries, S, []) -- [Query]};
-       not Correct -> 
+       not Correct ->
             S
     end.
 
-response_oracle_post(_S, [_Env, _Oracle, _Tx, Correct], Res) ->
+response_oracle_post(_S, [_Height, _Oracle, _Tx, Correct], Res) ->
     case Res of
         {error, _} -> not Correct;
         ok -> Correct;
         _ -> not Correct andalso valid_mismatch(Res)
     end.
 
-response_oracle_features(_S, [_Env, _, _Tx, Correct], Res) ->
+response_oracle_features(_S, [_Height, _, _Tx, Correct], Res) ->
     [{correct, if Correct -> response_oracle; true -> false end} ] ++
         [{response_oracle, Res} || is_tuple(Res) andalso element(1, Res) == error].
 
@@ -534,11 +536,11 @@ response_oracle_features(_S, [_Env, _, _Tx, Correct], Res) ->
 channel_create_pre(S) ->
     length(maps:get(accounts, S, [])) > 1.
 
-channel_create_args(#{accounts := Accounts, tx_env := Env} = S) ->
-    ?LET(Args, 
+channel_create_args(#{accounts := Accounts, height := Height} = S) ->
+    ?LET(Args,
          ?LET([{_, Initiator}, {_, Responder}],
               vector(2, gen_account_pubkey(Accounts)),
-              [Env, Initiator#account.key, Responder#account.key,
+              [Height, Initiator#account.key, Responder#account.key,
                     #{initiator_id => aec_id:create(account, Initiator#account.key),
                       responder_id => aec_id:create(account, Responder#account.key),
                       state_hash => <<1:256>>,
@@ -547,16 +549,16 @@ channel_create_args(#{accounts := Accounts, tx_env := Env} = S) ->
                       push_amount => nat(),
                       lock_period => choose(0,2),
                       channel_reserve => choose(0,10),
-                      fee => choose(1, 10), 
+                      fee => choose(1, 10),
                       nonce => gen_nonce(Initiator)}]),
          Args ++ [channel_create_valid(S, Args)]).
 
-channel_create_pre(S, [Env, Initiator, Responder, Tx, Correct]) ->
+channel_create_pre(S, [Height, Initiator, Responder, Tx, Correct]) ->
     Initiator =/= Responder andalso
-    Correct == channel_create_valid(S, [Env, Initiator, Responder, Tx]) 
-        andalso correct_height(S, Env).
+    Correct == channel_create_valid(S, [Height, Initiator, Responder, Tx])
+        andalso correct_height(S, Height).
 
-channel_create_valid(S, [_Env, Initiator, Responder, Tx]) ->
+channel_create_valid(S, [_Height, Initiator, Responder, Tx]) ->
    case {lists:keyfind(Initiator, #account.key, maps:get(accounts, S, [])),
          lists:keyfind(Responder, #account.key, maps:get(accounts, S, []))} of
         {false, _} -> false;
@@ -566,23 +568,24 @@ channel_create_valid(S, [_Env, Initiator, Responder, Tx]) ->
                IAccount#account.amount >= maps:get(fee, Tx) + maps:get(initiator_amount, Tx) andalso
                RAccount#account.amount >= maps:get(responder_amount, Tx) andalso
                maps:get(initiator_amount, Tx) >= maps:get(channel_reserve, Tx) andalso
-               maps:get(responder_amount, Tx) >= maps:get(channel_reserve, Tx) 
+               maps:get(responder_amount, Tx) >= maps:get(channel_reserve, Tx)
     end.
 
-channel_create_adapt(#{tx_env := TxEnv} = S, [_, Initiator, Responder, Tx, _Correct]) ->
-    [TxEnv, Initiator, Responder, Tx, channel_create_valid(S, [TxEnv, Initiator, Responder, Tx])];
+channel_create_adapt(#{height := Height} = S, [_, Initiator, Responder, Tx, _Correct]) ->
+    [Height, Initiator, Responder, Tx, channel_create_valid(S, [Height, Initiator, Responder, Tx])];
 channel_create_adapt(_, _) ->
-    %% in case we don't even have a TxEnv
+    %% in case we don't even have a Height
     false.
 
 
-channel_create(Env, _Initiator, _Responder, Tx, _Correct) ->
+channel_create(Height, _Initiator, _Responder, Tx, _Correct) ->
     Trees = get(trees),
     {ok, AeTx} = rpc(aesc_create_tx, new, [Tx]),
     {channel_create_tx, ChannelTx} = aetx:specialize_type(AeTx),
-    
+
+    Env = aetx_env:tx_env(Height),
     %% old version
-    Remote = 
+    Remote =
         case rpc:call(?REMOTE_NODE,aesc_create_tx, check, [ChannelTx, Trees, Env], 1000) of
             {ok, Ts} ->
                 rpc:call(?REMOTE_NODE, aesc_create_tx, process, [ChannelTx, Ts, Env], 1000);
@@ -598,19 +601,19 @@ channel_create(Env, _Initiator, _Responder, Tx, _Correct) ->
         Other -> Other
     end.
 
-channel_create_next(#{accounts := Accounts} = S, _Value, [_Env, Initiator, Responder, Tx, Correct]) ->
+channel_create_next(#{accounts := Accounts} = S, _Value, [_Height, Initiator, Responder, Tx, Correct]) ->
     if Correct ->
             IAccount = lists:keyfind(Initiator, #account.key, Accounts),
             RAccount = lists:keyfind(Responder, #account.key, Accounts),
-            S#{accounts => 
+            S#{accounts =>
                    (Accounts -- [IAccount, RAccount]) ++
-                   [IAccount#account{amount = 
-                                         IAccount#account.amount - 
-                                         maps:get(fee, Tx) - 
-                                         maps:get(initiator_amount, Tx), 
+                   [IAccount#account{amount =
+                                         IAccount#account.amount -
+                                         maps:get(fee, Tx) -
+                                         maps:get(initiator_amount, Tx),
                                      nonce = maps:get(nonce, Tx) + 1},
-                   RAccount#account{amount = 
-                                        RAccount#account.amount - 
+                   RAccount#account{amount =
+                                        RAccount#account.amount -
                                         maps:get(responder_amount, Tx)}],
                channels =>
                    maps:get(channels, S, []) ++ [#channel{id = {Initiator, maps:get(nonce, Tx), Responder},
@@ -621,7 +624,7 @@ channel_create_next(#{accounts := Accounts} = S, _Value, [_Env, Initiator, Respo
             S
     end.
 
-channel_create_post(_S, [_Env, _Initiator, _Responder, _Tx, Correct], Res) ->
+channel_create_post(_S, [_Height, _Initiator, _Responder, _Tx, Correct], Res) ->
     case Res of
         {error, _} -> not Correct;
         ok -> Correct;
@@ -633,12 +636,12 @@ channel_create_post(_S, [_Env, _Initiator, _Responder, _Tx, Correct], Res) ->
 channel_deposit_pre(S) ->
     maps:is_key(channels, S).
 
-channel_deposit_args(#{tx_env := Env} = S) ->
-    ?LET(Args, 
-         ?LET([{Initiator, N, Responder}, Party], 
+channel_deposit_args(#{height := Height} = S) ->
+    ?LET(Args,
+         ?LET([{Initiator, N, Responder}, Party],
               [frequency([{99, ?LET(Channel, elements(maps:get(channels, S)), Channel#channel.id)},
                           {1, {?Patron, 2, ?Patron}}]), elements([initiator, responder])],
-              [Env, {Initiator, N, Responder}, Party,
+              [Height, {Initiator, N, Responder}, Party,
                     #{channel_id => aec_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder)),
                       from_id => case Party of
                                      initiator -> aec_id:create(account, Initiator);
@@ -648,7 +651,7 @@ channel_deposit_args(#{tx_env := Env} = S) ->
                       round => nat(),
                       fee => choose(1, 10),
                       state_hash => <<0:256>>,
-                      nonce => 
+                      nonce =>
                           case Party of
                               initiator -> gen_nonce(lists:keyfind(Initiator, #account.key, maps:get(accounts, S, [])));
                               responder ->  gen_nonce(lists:keyfind(Responder, #account.key, maps:get(accounts, S, [])))
@@ -656,17 +659,17 @@ channel_deposit_args(#{tx_env := Env} = S) ->
          Args ++ [channel_deposit_valid(S, Args)]).
 
 
-channel_deposit_pre(S, [Env, ChannelId, Party, Tx, Correct]) ->
-    Correct == channel_deposit_valid(S, [Env, ChannelId, Party, Tx]) 
-        andalso correct_height(S, Env).
+channel_deposit_pre(S, [Height, ChannelId, Party, Tx, Correct]) ->
+    Correct == channel_deposit_valid(S, [Height, ChannelId, Party, Tx])
+        andalso correct_height(S, Height).
 
-channel_deposit_valid(S, [_Env, {Initiator, _, Responder} = ChannelId, Party, Tx]) ->
+channel_deposit_valid(S, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx]) ->
     case {lists:keyfind(Initiator, #account.key, maps:get(accounts, S, [])),
           lists:keyfind(Responder, #account.key, maps:get(accounts, S, []))} of
         {false, _} -> false;
         {_, false} -> false;
         {IAccount, RAccount} ->
-            FromAccount = case Party of 
+            FromAccount = case Party of
                               initiator -> IAccount;
                               responder -> RAccount
                           end,
@@ -677,20 +680,21 @@ channel_deposit_valid(S, [_Env, {Initiator, _, Responder} = ChannelId, Party, Tx
                 maps:get(round, Tx) > Channel#channel.round
     end.
 
-channel_deposit_adapt(#{tx_env := TxEnv} = S, [_, ChannelId, Party, Tx, _Correct]) ->
-    [TxEnv, ChannelId, Party, Tx, channel_deposit_valid(S, [TxEnv, ChannelId, Party, Tx])];
+channel_deposit_adapt(#{height := Height} = S, [_, ChannelId, Party, Tx, _Correct]) ->
+    [Height, ChannelId, Party, Tx, channel_deposit_valid(S, [Height, ChannelId, Party, Tx])];
 channel_deposit_adapt(_, _) ->
-    %% in case we don't even have a TxEnv
+    %% in case we don't even have a Height
     false.
 
 
-channel_deposit(Env, _Channeld, _Party, Tx, _Correct) ->
+channel_deposit(Height, _Channeld, _Party, Tx, _Correct) ->
     Trees = get(trees),
     {ok, AeTx} = rpc(aesc_deposit_tx, new, [Tx]),
     {channel_deposit_tx, ChannelTx} = aetx:specialize_type(AeTx),
-    
+
+    Env = aetx_env:tx_env(Height),
     %% old version
-    Remote = 
+    Remote =
         case rpc:call(?REMOTE_NODE,aesc_deposit_tx, check, [ChannelTx, Trees, Env], 1000) of
             {ok, Ts} ->
                 rpc:call(?REMOTE_NODE, aesc_deposit_tx, process, [ChannelTx, Ts, Env], 1000);
@@ -706,25 +710,25 @@ channel_deposit(Env, _Channeld, _Party, Tx, _Correct) ->
         Other -> Other
     end.
 
-channel_deposit_next(#{accounts := Accounts} = S, _Value, [_Env, {Initiator, _, Responder} = ChannelId, Party, Tx, Correct]) ->
+channel_deposit_next(#{accounts := Accounts} = S, _Value, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx, Correct]) ->
     if Correct ->
             case {lists:keyfind(Initiator, #account.key, maps:get(accounts, S, [])),
                   lists:keyfind(Responder, #account.key, maps:get(accounts, S, []))} of
                 {false, _} -> false;
                 {_, false} -> false;
                 {IAccount, RAccount} ->
-                    FromAccount = case Party of 
+                    FromAccount = case Party of
                                       initiator -> IAccount;
                                       responder -> RAccount
                                   end,
                     Channels = maps:get(channels, S),
                     Channel = lists:keyfind(ChannelId, #channel.id, Channels),
-                    S#{accounts => 
+                    S#{accounts =>
                            (Accounts -- [FromAccount]) ++
-                           [FromAccount#account{amount = 
-                                                    FromAccount#account.amount - 
-                                                    maps:get(fee, Tx) - 
-                                                    maps:get(amount, Tx), 
+                           [FromAccount#account{amount =
+                                                    FromAccount#account.amount -
+                                                    maps:get(fee, Tx) -
+                                                    maps:get(amount, Tx),
                                                 nonce = maps:get(nonce, Tx) + 1}],
                        channels =>
                            (Channels -- [Channel]) ++ [Channel#channel{round = maps:get(round, Tx),
@@ -734,14 +738,14 @@ channel_deposit_next(#{accounts := Accounts} = S, _Value, [_Env, {Initiator, _, 
             S
     end.
 
-channel_deposit_post(_S, [_Env, _ChannelId, _Party, _Tx, Correct], Res) ->
+channel_deposit_post(_S, [_Height, _ChannelId, _Party, _Tx, Correct], Res) ->
     case Res of
         {error, _} -> not Correct;
         ok -> Correct;
         _ -> not Correct andalso valid_mismatch(Res)
     end.
 
-channel_deposit_features(_S, [_Env, _Channeld, _Party, _Tx, Correct], Res) ->
+channel_deposit_features(_S, [_Height, _Channeld, _Party, _Tx, Correct], Res) ->
     [{correct, if Correct -> channel_deposit; true -> false end} ] ++
         [{channel_deposit, Res} || is_tuple(Res) andalso element(1, Res) == error].
 
@@ -751,12 +755,12 @@ channel_withdraw_pre(S) ->
 
 
 %% We do not yet test wirthdraw by third party!
-channel_withdraw_args(#{tx_env := Env} = S) ->
-    ?LET(Args, 
-         ?LET([{Initiator, N, Responder}, Party], 
+channel_withdraw_args(#{height := Height} = S) ->
+    ?LET(Args,
+         ?LET([{Initiator, N, Responder}, Party],
               [frequency([{99, ?LET(Channel, elements(maps:get(channels, S)), Channel#channel.id)},
                           {1, {?Patron, 2, ?Patron}}]), elements([initiator, responder])],
-              [Env, {Initiator, N, Responder}, Party,
+              [Height, {Initiator, N, Responder}, Party,
                     #{channel_id => aec_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder)),
                       to_id => case Party of
                                      initiator -> aec_id:create(account, Initiator);
@@ -766,7 +770,7 @@ channel_withdraw_args(#{tx_env := Env} = S) ->
                       round => nat(),
                       fee => choose(1, 10),
                       state_hash => <<0:256>>,
-                      nonce => 
+                      nonce =>
                           case Party of
                               initiator -> gen_nonce(lists:keyfind(Initiator, #account.key, maps:get(accounts, S, [])));
                               responder ->  gen_nonce(lists:keyfind(Responder, #account.key, maps:get(accounts, S, [])))
@@ -774,17 +778,17 @@ channel_withdraw_args(#{tx_env := Env} = S) ->
          Args ++ [channel_withdraw_valid(S, Args)]).
 
 
-channel_withdraw_pre(S, [Env, ChannelId, Party, Tx, Correct]) ->
-    Correct == channel_withdraw_valid(S, [Env, ChannelId, Party, Tx]) 
-        andalso correct_height(S, Env).
+channel_withdraw_pre(S, [Height, ChannelId, Party, Tx, Correct]) ->
+    Correct == channel_withdraw_valid(S, [Height, ChannelId, Party, Tx])
+        andalso correct_height(S, Height).
 
-channel_withdraw_valid(S, [_Env, {Initiator, _, Responder} = ChannelId, Party, Tx]) ->
+channel_withdraw_valid(S, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx]) ->
     case {lists:keyfind(Initiator, #account.key, maps:get(accounts, S, [])),
           lists:keyfind(Responder, #account.key, maps:get(accounts, S, []))} of
         {false, _} -> false;
         {_, false} -> false;
         {IAccount, RAccount} ->
-            FromAccount = case Party of 
+            FromAccount = case Party of
                               initiator -> IAccount;
                               responder -> RAccount
                           end,
@@ -796,20 +800,21 @@ channel_withdraw_valid(S, [_Env, {Initiator, _, Responder} = ChannelId, Party, T
                 maps:get(amount, Tx) =< Channel#channel.amount
     end.
 
-channel_withdraw_adapt(#{tx_env := TxEnv} = S, [_, ChannelId, Party, Tx, _Correct]) ->
-    [TxEnv, ChannelId, Party, Tx, channel_withdraw_valid(S, [TxEnv, ChannelId, Party, Tx])];
+channel_withdraw_adapt(#{height := Height} = S, [_, ChannelId, Party, Tx, _Correct]) ->
+    [Height, ChannelId, Party, Tx, channel_withdraw_valid(S, [Height, ChannelId, Party, Tx])];
 channel_withdraw_adapt(_, _) ->
-    %% in case we don't even have a TxEnv
+    %% in case we don't even have a Height
     false.
 
 
-channel_withdraw(Env, _Channeld, _Party, Tx, _Correct) ->
+channel_withdraw(Height, _Channeld, _Party, Tx, _Correct) ->
     Trees = get(trees),
     {ok, AeTx} = rpc(aesc_withdraw_tx, new, [Tx]),
     {channel_withdraw_tx, ChannelTx} = aetx:specialize_type(AeTx),
-    
+
+    Env = aetx_env:tx_env(Height),
     %% old version
-    Remote = 
+    Remote =
         case rpc:call(?REMOTE_NODE,aesc_withdraw_tx, check, [ChannelTx, Trees, Env], 1000) of
             {ok, Ts} ->
                 rpc:call(?REMOTE_NODE, aesc_withdraw_tx, process, [ChannelTx, Ts, Env], 1000);
@@ -825,25 +830,25 @@ channel_withdraw(Env, _Channeld, _Party, Tx, _Correct) ->
         Other -> Other
     end.
 
-channel_withdraw_next(#{accounts := Accounts} = S, _Value, [_Env, {Initiator, _, Responder} = ChannelId, Party, Tx, Correct]) ->
+channel_withdraw_next(#{accounts := Accounts} = S, _Value, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx, Correct]) ->
     if Correct ->
             case {lists:keyfind(Initiator, #account.key, maps:get(accounts, S, [])),
                   lists:keyfind(Responder, #account.key, maps:get(accounts, S, []))} of
                 {false, _} -> false;
                 {_, false} -> false;
                 {IAccount, RAccount} ->
-                    FromAccount = case Party of 
+                    FromAccount = case Party of
                                       initiator -> IAccount;
                                       responder -> RAccount
                                   end,
                     Channels = maps:get(channels, S),
                     Channel = lists:keyfind(ChannelId, #channel.id, Channels),
-                    S#{accounts => 
+                    S#{accounts =>
                            (Accounts -- [FromAccount]) ++
-                           [FromAccount#account{amount = 
-                                                    FromAccount#account.amount - 
-                                                    maps:get(fee, Tx) + 
-                                                    maps:get(amount, Tx), 
+                           [FromAccount#account{amount =
+                                                    FromAccount#account.amount -
+                                                    maps:get(fee, Tx) +
+                                                    maps:get(amount, Tx),
                                                 nonce = maps:get(nonce, Tx) + 1}],
                        channels =>
                            (Channels -- [Channel]) ++ [Channel#channel{round = maps:get(round, Tx),
@@ -853,14 +858,14 @@ channel_withdraw_next(#{accounts := Accounts} = S, _Value, [_Env, {Initiator, _,
             S
     end.
 
-channel_withdraw_post(_S, [_Env, _ChannelId, _Party, _Tx, Correct], Res) ->
+channel_withdraw_post(_S, [_Height, _ChannelId, _Party, _Tx, Correct], Res) ->
     case Res of
         {error, _} -> not Correct;
         ok -> Correct;
         _ -> not Correct andalso valid_mismatch(Res)
     end.
 
-channel_withdraw_features(_S, [_Env, _Channeld, _Party, _Tx, Correct], Res) ->
+channel_withdraw_features(_S, [_Height, _Channeld, _Party, _Tx, Correct], Res) ->
    [{correct, if Correct -> channel_withdraw; true -> false end} ] ++
     [{channel_withdraw, Res} || is_tuple(Res) andalso element(1, Res) == error].
 
@@ -870,47 +875,48 @@ channel_withdraw_features(_S, [_Env, _Channeld, _Party, _Tx, Correct], Res) ->
 name_preclaim_pre(S) ->
     maps:is_key(accounts, S).
 
-name_preclaim_args(#{accounts := Accounts, tx_env := Env} = S) ->
+name_preclaim_args(#{accounts := Accounts, height := Height} = S) ->
     ?LET(Args,
-	 ?LET([{SenderTag, Sender}, Name, Salt], 
-	      [gen_account_pubkey(Accounts), gen_name(), choose(270,280)],
-	      [Env, {SenderTag, Sender#account.key}, {Name, Salt},
-	       #{account_id => aec_id:create(account, Sender#account.key),
-		 fee => choose(1, 10), 
-		 commitment_id => 
-		     aec_id:create(commitment, 
-				   aens_hash:commitment_hash(Name, Salt)),
-		 nonce =>gen_nonce(Sender)}]), 
-	 Args ++ [name_preclaim_valid(S, Args)]).
+         ?LET([{SenderTag, Sender}, Name, Salt],
+              [gen_account_pubkey(Accounts), gen_name(), choose(270,280)],
+              [Height, {SenderTag, Sender#account.key}, {Name, Salt},
+               #{account_id => aec_id:create(account, Sender#account.key),
+                 fee => choose(1, 10),
+                 commitment_id =>
+                     aec_id:create(commitment,
+                                   aens_hash:commitment_hash(Name, Salt)),
+                 nonce =>gen_nonce(Sender)}]),
+         Args ++ [name_preclaim_valid(S, Args)]).
 
-name_preclaim_pre(S, [Env, {SenderTag, Sender}, {Name, Salt}, Tx, Correct]) ->
+name_preclaim_pre(S, [Height, {SenderTag, Sender}, {Name, Salt}, Tx, Correct]) ->
     %% Let us not test the unlikely case that someone provides the same name with the same salt
-    [present || #preclaim{name = N, salt = St} <- maps:get(preclaims, S, []), N == Name, St == Salt] == [] 
-        andalso name_preclaim_valid(S, [Env, {SenderTag, Sender}, {Name, Salt}, Tx]) == Correct 
+    [present || #preclaim{name = N, salt = St} <- maps:get(preclaims, S, []), N == Name, St == Salt] == []
+        andalso name_preclaim_valid(S, [Height, {SenderTag, Sender}, {Name, Salt}, Tx]) == Correct
         andalso aec_id:create(commitment, aens_hash:commitment_hash(Name, Salt)) == maps:get(commitment_id, Tx)
-        andalso correct_height(S, Env).
+        andalso correct_height(S, Height).
 
-name_preclaim_valid(#{accounts := Accounts}, 
-		    [_Env, {_, Sender}, {_Name, _Salt}, Tx]) ->
+name_preclaim_valid(#{accounts := Accounts},
+                    [_Height, {_, Sender}, {_Name, _Salt}, Tx]) ->
     case lists:keyfind(Sender, #account.key, Accounts) of
         false -> false;
         SenderAccount ->
             SenderAccount#account.nonce == maps:get(nonce, Tx) andalso
                 SenderAccount#account.amount >= maps:get(fee, Tx)
-    end.   
+    end.
 
-name_preclaim_adapt(#{tx_env := TxEnv} = S, [_Env, {SenderTag, Sender}, {Name, Salt}, Tx, _Correct]) ->
-    [TxEnv, {SenderTag, Sender}, {Name, Salt}, Tx, name_preclaim_valid(S, [TxEnv, {SenderTag, Sender}, {Name, Salt}, Tx])];
+name_preclaim_adapt(#{height := Height} = S, [_Height, {SenderTag, Sender}, {Name, Salt}, Tx, _Correct]) ->
+    [Height, {SenderTag, Sender}, {Name, Salt}, Tx, name_preclaim_valid(S, [Height, {SenderTag, Sender}, {Name, Salt}, Tx])];
 name_preclaim_adapt(_, _) ->
     false.
 
-name_preclaim(Env, _Sender, {_Name,_Salt}, Tx, _Correct) ->
+name_preclaim(Height, _Sender, {_Name,_Salt}, Tx, _Correct) ->
     Trees = get(trees),
     {ok, NTx} = rpc(aens_preclaim_tx, new, [Tx]),
     {_, NameTx} = aetx:specialize_type(NTx),
 
+    Env = aetx_env:tx_env(Height),
     %% old version
-    Remote = 
+    Remote =
         case rpc:call(?REMOTE_NODE, aens_preclaim_tx, check, [NameTx, Trees, Env], 1000) of
             {ok, Ts} ->
                 rpc:call(?REMOTE_NODE, aens_preclaim_tx, process, [NameTx, Ts, Env], 1000);
@@ -926,38 +932,38 @@ name_preclaim(Env, _Sender, {_Name,_Salt}, Tx, _Correct) ->
         Other -> Other
     end.
 
-name_preclaim_next(#{tx_env := TxEnv,
-		     accounts := Accounts, 
-		     preclaims := Preclaims} = S,
-		   _Value, [_Env, {_, Sender}, {Name, Salt}, Tx, Correct]) ->
+name_preclaim_next(#{height := Height,
+                     accounts := Accounts,
+                     preclaims := Preclaims} = S,
+                   _Value, [_Height, {_, Sender}, {Name, Salt}, Tx, Correct]) ->
     if Correct ->
-	    SAccount = lists:keyfind(Sender, #account.key, Accounts),
-	    S#{accounts => 
-		   (Accounts -- [SAccount]) ++
-		   [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx), 
-				     nonce = maps:get(nonce, Tx) + 1}],
-	       preclaims => 
-		   Preclaims ++ [#preclaim{name = Name, 
-					   salt = Salt,
-					   height = aetx_env:height(TxEnv),
+            SAccount = lists:keyfind(Sender, #account.key, Accounts),
+            S#{accounts =>
+                   (Accounts -- [SAccount]) ++
+                   [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx),
+                                     nonce = maps:get(nonce, Tx) + 1}],
+               preclaims =>
+                   Preclaims ++ [#preclaim{name = Name,
+                                           salt = Salt,
+                                           height = Height,
                                            claimer = Sender}]};
        not Correct ->
-	    S
+            S
     end.
 
-name_preclaim_post(_S, [_Env, _Sender, {_Name, _Salt}, _Tx, Correct], Res) ->
+name_preclaim_post(_S, [_Height, _Sender, {_Name, _Salt}, _Tx, Correct], Res) ->
     case Res of
         {error, _} -> not Correct;
         ok -> Correct;
         _ -> not Correct andalso valid_mismatch(Res)
     end.
 
-name_preclaim_features(#{claims := Claims}, 
-		       [_Env, {_, _Sender}, {Name,_Salt}, _Tx, Correct], Res) ->
+name_preclaim_features(#{claims := Claims},
+                       [_Height, {_, _Sender}, {Name,_Salt}, _Tx, Correct], Res) ->
     [ {correct, if Correct -> name_preclaim; true -> false end} ] ++
     [ {name_preclaim, Res} || is_tuple(Res) andalso element(1, Res) == error] ++
-	[{reclaim_name, Res} || lists:keymember(Name, #claim.name, Claims)].
-    
+        [{reclaim_name, Res} || lists:keymember(Name, #claim.name, Claims)].
+
 
 %% --- Operation: claim ---
 claim_pre(S) ->
@@ -965,41 +971,41 @@ claim_pre(S) ->
 
 %% @doc claim_args - Argument generator
 -spec claim_args(S :: eqc_statem:symbolic_state()) -> eqc_gen:gen([term()]).
-claim_args(#{accounts := Accounts, tx_env := Env} = S) ->
+claim_args(#{accounts := Accounts, height := Height} = S) ->
     ?LET(Args,
-	 ?LET([Name, {SenderTag, Sender}], 
-	      [gen_name(), gen_account_pubkey(Accounts)],
-	      [Env, {SenderTag, Sender#account.key},
-	       #{account_id => aec_id:create(account, Sender#account.key),
-		 name => Name,
-		 name_salt => choose(270,280),
-		 fee => choose(1, 10), 
-		 nonce => gen_nonce(Sender)}]), 
-	 Args ++ [claim_valid(S, Args)]).
+         ?LET([Name, {SenderTag, Sender}],
+              [gen_name(), gen_account_pubkey(Accounts)],
+              [Height, {SenderTag, Sender#account.key},
+               #{account_id => aec_id:create(account, Sender#account.key),
+                 name => Name,
+                 name_salt => choose(270,280),
+                 fee => choose(1, 10),
+                 nonce => gen_nonce(Sender)}]),
+         Args ++ [claim_valid(S, Args)]).
 
 
-claim_pre(S, [Env, {SenderTag, Sender}, Tx, Correct]) ->
-    claim_valid(S, [Env, {SenderTag, Sender}, Tx]) == Correct andalso correct_height(S, Env).
+claim_pre(S, [Height, {SenderTag, Sender}, Tx, Correct]) ->
+    claim_valid(S, [Height, {SenderTag, Sender}, Tx]) == Correct andalso correct_height(S, Height).
 
-claim_valid(#{accounts := Accounts, tx_env := Env} = S, [_Env, {_, Sender}, Tx]) ->
+claim_valid(#{accounts := Accounts, height := Height} = S, [_Height, {_, Sender}, Tx]) ->
     case lists:keyfind(Sender, #account.key, Accounts) of
         false -> false;
         SenderAccount ->
             SenderAccount#account.nonce == maps:get(nonce, Tx) andalso
                 SenderAccount#account.amount >= maps:get(fee, Tx) + aec_governance:name_claim_locked_fee() andalso
-		case [ PC || #preclaim{name = Name, salt = Salt, claimer = Claimer} = PC <- maps:get(preclaims, S, []), 
-                             Name ==  maps:get(name, Tx), 
+                case [ PC || #preclaim{name = Name, salt = Salt, claimer = Claimer} = PC <- maps:get(preclaims, S, []),
+                             Name ==  maps:get(name, Tx),
                              Salt == maps:get(name_salt, Tx),
                              Claimer == Sender ] of
-		    [] ->
-			false;
-		    [Preclaim] ->
+                    [] ->
+                        false;
+                    [Preclaim] ->
                         %% preclaim and claim are in different blocks
-                        Preclaim#preclaim.height + aec_governance:name_claim_preclaim_delta() =< aetx_env:height(Env) 
+                        Preclaim#preclaim.height + aec_governance:name_claim_preclaim_delta() =< Height
                             andalso
-                            aetx_env:height(Env) < Preclaim#preclaim.height + aec_governance:name_preclaim_expiration()
-		end
-		andalso valid_name(Tx) andalso 
+                            Height < Preclaim#preclaim.height + aec_governance:name_preclaim_expiration()
+                end
+                andalso valid_name(Tx) andalso
                 not already_claimed(S, Tx)
 
     end.
@@ -1007,26 +1013,27 @@ claim_valid(#{accounts := Accounts, tx_env := Env} = S, [_Env, {_, Sender}, Tx])
 % names may not have dots in between, only at the end (.test)
 valid_name(Tx) ->
     case string:lexemes(maps:get(name,Tx), ".") of
-	[_, <<"test">>] -> true;
-	_ -> false
+        [_, <<"test">>] -> true;
+        _ -> false
     end.
 
 already_claimed(#{claims := Claims}, Tx) ->
     [ present || #claim{name = N} <- Claims, N == maps:get(name,Tx)] =/= [].
 
-claim_adapt(#{tx_env := TxEnv} = S, [_Env, {SenderTag, Sender}, Tx, _Correct]) ->
-    [TxEnv, {SenderTag, Sender}, Tx, claim_valid(S, [TxEnv, {SenderTag, Sender}, Tx])];
+claim_adapt(#{height := Height} = S, [_Height, {SenderTag, Sender}, Tx, _Correct]) ->
+    [Height, {SenderTag, Sender}, Tx, claim_valid(S, [Height, {SenderTag, Sender}, Tx])];
 claim_adapt(_, _) ->
     false.
 
 
-claim(Env, _Sender, Tx,_Correct) ->
+claim(Height, _Sender, Tx,_Correct) ->
     Trees = get(trees),
     {ok, NTx} = rpc(aens_claim_tx, new, [Tx]),
     {_, NameTx} = aetx:specialize_type(NTx),
 
+    Env = aetx_env:tx_env(Height),
     %% old version
-    Remote = 
+    Remote =
         case rpc:call(?REMOTE_NODE, aens_claim_tx, check, [NameTx, Trees, Env], 1000) of
             {ok, Ts} ->
                 rpc:call(?REMOTE_NODE, aens_claim_tx, process, [NameTx, Ts, Env], 1000);
@@ -1042,35 +1049,35 @@ claim(Env, _Sender, Tx,_Correct) ->
         Other -> Other
     end.
 
-claim_next(#{tx_env := TxEnv,
-             accounts := Accounts, 
-	     claims := Claims} = S, 
-	   _Value, [_Env, {_, Sender}, Tx, Correct]) ->
+claim_next(#{height := Height,
+             accounts := Accounts,
+             claims := Claims} = S,
+           _Value, [_Height, {_, Sender}, Tx, Correct]) ->
     if Correct ->
-	    SAccount = lists:keyfind(Sender, #account.key, Accounts),
-	    S#{accounts => 
-	    	   (Accounts -- [SAccount]) ++
-	    	   [SAccount#account{amount = SAccount#account.amount - 
-                                         maps:get(fee, Tx) - 
-                                         aec_governance:name_claim_locked_fee(), 
-	    			     nonce = maps:get(nonce, Tx) + 1}],
-	      claims => 
-		   Claims ++ [#claim{name = maps:get(name, Tx), 
-				     height = aetx_env:height(TxEnv),
+            SAccount = lists:keyfind(Sender, #account.key, Accounts),
+            S#{accounts =>
+                   (Accounts -- [SAccount]) ++
+                   [SAccount#account{amount = SAccount#account.amount -
+                                         maps:get(fee, Tx) -
+                                         aec_governance:name_claim_locked_fee(),
+                                     nonce = maps:get(nonce, Tx) + 1}],
+              claims =>
+                   Claims ++ [#claim{name = maps:get(name, Tx),
+                                     height = Height,
                                      valid_height = -1,
                                      claimer = Sender}]};
        not Correct ->
-	    S
+            S
     end.
 
-claim_post(_S, [_Env, _Sender, _Tx, Correct], Res) ->
+claim_post(_S, [_Height, _Sender, _Tx, Correct], Res) ->
     case Res of
         {error, _} -> not Correct;
         ok -> Correct;
-	_ -> not Correct andalso valid_mismatch(Res)
+        _ -> not Correct andalso valid_mismatch(Res)
     end.
 
-claim_features(_S, [_Env, {_, _Sender}, _Tx, Correct], Res) ->
+claim_features(_S, [_Height, {_, _Sender}, _Tx, Correct], Res) ->
    [{correct, if Correct -> ns_claim; true -> false end} ] ++
         [{ns_claim, Res} || is_tuple(Res) andalso element(1, Res) == error].
 
@@ -1079,59 +1086,60 @@ claim_features(_S, [_Env, {_, _Sender}, _Tx, Correct], Res) ->
 ns_update_pre(S) ->
     maps:is_key(accounts, S).
 
-ns_update_args(#{accounts := Accounts, tx_env := Env} = S) ->
+ns_update_args(#{accounts := Accounts, height := Height} = S) ->
     ?LET(Args,
-	 ?LET([Name, {SenderTag, Sender}, {Tag, NameAccount}], 
-	      [gen_name(S), gen_account_pubkey(Accounts), gen_account_pubkey(Accounts)],
-	      [Env, Name, {SenderTag, Sender#account.key}, {Tag, NameAccount#account.key},
-	       #{account_id => aec_id:create(account, Sender#account.key),
-		 name_id => aec_id:create(name, aens_hash:name_hash(Name)),
-		 name_ttl => nat(),
+         ?LET([Name, {SenderTag, Sender}, {Tag, NameAccount}],
+              [gen_name(S), gen_account_pubkey(Accounts), gen_account_pubkey(Accounts)],
+              [Height, Name, {SenderTag, Sender#account.key}, {Tag, NameAccount#account.key},
+               #{account_id => aec_id:create(account, Sender#account.key),
+                 name_id => aec_id:create(name, aens_hash:name_hash(Name)),
+                 name_ttl => nat(),
                  client_ttl => nat(),
-		 fee => choose(1, 10),
-		 nonce => gen_nonce(Sender),
+                 fee => choose(1, 10),
+                 nonce => gen_nonce(Sender),
                  pointers =>
-                     oneof([[], 
+                     oneof([[],
                             [aens_pointer:new(<<"account_pubkey">>, aec_id:create(account, NameAccount#account.key))]
-                            ])}]), 
-	 Args ++ [ns_update_valid(S, Args)]).
+                            ])}]),
+         Args ++ [ns_update_valid(S, Args)]).
 
-ns_update_pre(S, [Env, Name, Sender, NameAccount, Tx, Correct]) ->
-    aec_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx) 
-        andalso ns_update_valid(S, [Env, Name, Sender, NameAccount, Tx]) == Correct 
-        andalso correct_height(S, Env).
+ns_update_pre(S, [Height, Name, Sender, NameAccount, Tx, Correct]) ->
+    aec_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx)
+        andalso ns_update_valid(S, [Height, Name, Sender, NameAccount, Tx]) == Correct
+        andalso correct_height(S, Height).
 
-ns_update_valid(#{accounts := Accounts} = S, [Env, Name, {_, Sender}, _, Tx]) ->
+ns_update_valid(#{accounts := Accounts} = S, [Height, Name, {_, Sender}, _, Tx]) ->
     case lists:keyfind(Sender, #account.key, Accounts) of
         false -> false;
         SenderAccount ->
             SenderAccount#account.nonce == maps:get(nonce, Tx) andalso
                 SenderAccount#account.amount >= maps:get(fee, Tx) + aec_governance:name_claim_locked_fee() andalso
-		case [ PC || #claim{name = N, claimer = Claimer} = PC <- maps:get(claims, S, []), 
-                             Name == N, 
+                case [ PC || #claim{name = N, claimer = Claimer} = PC <- maps:get(claims, S, []),
+                             Name == N,
                              Claimer == Sender ] of
-		    [] ->
-			false;
-		    [Claim] ->
+                    [] ->
+                        false;
+                    [Claim] ->
                         Claim#claim.revoke_height == undefined andalso
-                            (Claim#claim.update_height == undefined orelse 
-                             aetx_env:height(Env) =< Claim#claim.valid_height)
-		end
+                            (Claim#claim.update_height == undefined orelse
+                             Height =< Claim#claim.valid_height)
+                end
     end.
 
-ns_update_adapt(#{tx_env := TxEnv} = S, [_Env, Name, {SenderTag, Sender}, NameAccount, Tx, _Correct]) ->
-    [TxEnv, Name, {SenderTag, Sender}, NameAccount, Tx, 
-     ns_update_valid(S, [TxEnv, Name, {SenderTag, Sender}, NameAccount, Tx])];
+ns_update_adapt(#{height := Height} = S, [_Height, Name, {SenderTag, Sender}, NameAccount, Tx, _Correct]) ->
+    [Height, Name, {SenderTag, Sender}, NameAccount, Tx,
+     ns_update_valid(S, [Height, Name, {SenderTag, Sender}, NameAccount, Tx])];
 ns_update_adapt(_, _) ->
-    false.    
+    false.
 
-ns_update(Env, _Name, _Sender, _NameAccount, Tx, _Correct) ->
+ns_update(Height, _Name, _Sender, _NameAccount, Tx, _Correct) ->
     Trees = get(trees),
     {ok, NTx} = rpc(aens_update_tx, new, [Tx]),
     {_, NameTx} = aetx:specialize_type(NTx),
 
+    Env = aetx_env:tx_env(Height),
     %% old version
-    Remote = 
+    Remote =
         case rpc:call(?REMOTE_NODE, aens_update_tx, check, [NameTx, Trees, Env], 1000) of
             {ok, Ts} ->
                 rpc:call(?REMOTE_NODE, aens_update_tx, process, [NameTx, Ts, Env], 1000);
@@ -1147,41 +1155,41 @@ ns_update(Env, _Name, _Sender, _NameAccount, Tx, _Correct) ->
         Other -> Other
     end.
 
-ns_update_next(#{accounts := Accounts} = S, _Value, [Env, Name, {_, Sender}, {_, NameAccount}, Tx, Correct]) ->
+ns_update_next(#{accounts := Accounts} = S, _Value, [Height, Name, {_, Sender}, {_, NameAccount}, Tx, Correct]) ->
     if Correct ->
-	    SAccount = lists:keyfind(Sender, #account.key, Accounts),
+            SAccount = lists:keyfind(Sender, #account.key, Accounts),
             Claims = maps:get(claims, S, []),
             Claim = lists:keyfind(Name, #claim.name, Claims),
-	    S#{accounts => 
-	    	   (Accounts -- [SAccount]) ++
-	    	   [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx),
-	    			     nonce = maps:get(nonce, Tx) + 1, 
+            S#{accounts =>
+                   (Accounts -- [SAccount]) ++
+                   [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx),
+                                     nonce = maps:get(nonce, Tx) + 1,
                                      names_owned = (SAccount#account.names_owned -- [Name]) ++ [Name]
                                     }],
-               named_accounts => 
+               named_accounts =>
                    %% bit of a drity hack, but only zero or 1 pointer
                    case maps:get(pointers, Tx) of
                        [] -> maps:remove(Name, maps:get(named_accounts, S, #{}));
                        _ -> maps:merge(maps:get(named_accounts, S, #{}), #{Name => NameAccount})
                    end,
-               claims => 
-                   (Claims -- [Claim]) ++ 
-                   [Claim#claim{update_height = aetx_env:height(Env),
+               claims =>
+                   (Claims -- [Claim]) ++
+                   [Claim#claim{update_height = Height,
                                 valid_height = max(Claim#claim.valid_height,
-                                                   aetx_env:height(Env) + maps:get(name_ttl, Tx))}]
+                                                   Height + maps:get(name_ttl, Tx))}]
               };
        not Correct ->
-	    S
+            S
     end.
 
-ns_update_post(_S, [_Env, _Name, _Sender, _NameAccount, _Tx, Correct], Res) ->
+ns_update_post(_S, [_Height, _Name, _Sender, _NameAccount, _Tx, Correct], Res) ->
     case Res of
         {error, _} -> not Correct;
         ok -> Correct;
-	_ -> not Correct andalso valid_mismatch(Res)
+        _ -> not Correct andalso valid_mismatch(Res)
     end.
 
-ns_update_features(_S, [_Env, _Name, _Sender, {Tag, _NameAccount}, _Tx, Correct], Res) ->
+ns_update_features(_S, [_Height, _Name, _Sender, {Tag, _NameAccount}, _Tx, Correct], Res) ->
     [{correct, if Correct -> ns_update; true -> false end} ] ++
         [{ns_update, Tag} ] ++
         [{ns_update, Res} || is_tuple(Res) andalso element(1, Res) == error].
@@ -1191,53 +1199,54 @@ ns_update_features(_S, [_Env, _Name, _Sender, {Tag, _NameAccount}, _Tx, Correct]
 ns_revoke_pre(S) ->
     maps:is_key(accounts, S).
 
-ns_revoke_args(#{accounts := Accounts, tx_env := Env} = S) ->
+ns_revoke_args(#{accounts := Accounts, height := Height} = S) ->
     ?LET(Args,
-	 ?LET([Name, {SenderTag, Sender}], 
-	      [gen_name(S), gen_account_pubkey(Accounts)],
-	      [Env, {SenderTag, Sender#account.key}, Name,
-	       #{account_id => aec_id:create(account, Sender#account.key),
-		 name_id => aec_id:create(name, aens_hash:name_hash(Name)),
-		 fee => choose(1, 10),
-		 nonce => gen_nonce(Sender)
-                }]), 
-	 Args ++ [ns_revoke_valid(S, Args)]).
+         ?LET([Name, {SenderTag, Sender}],
+              [gen_name(S), gen_account_pubkey(Accounts)],
+              [Height, {SenderTag, Sender#account.key}, Name,
+               #{account_id => aec_id:create(account, Sender#account.key),
+                 name_id => aec_id:create(name, aens_hash:name_hash(Name)),
+                 fee => choose(1, 10),
+                 nonce => gen_nonce(Sender)
+                }]),
+         Args ++ [ns_revoke_valid(S, Args)]).
 
 
-ns_revoke_pre(S, [Env, Sender, Name, Tx, Correct]) ->
-    aec_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx) 
-        andalso ns_revoke_valid(S, [Env, Sender, Name, Tx]) == Correct 
-        andalso correct_height(S, Env).
+ns_revoke_pre(S, [Height, Sender, Name, Tx, Correct]) ->
+    aec_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx)
+        andalso ns_revoke_valid(S, [Height, Sender, Name, Tx]) == Correct
+        andalso correct_height(S, Height).
 
-ns_revoke_valid(#{accounts := Accounts} = S, [_Env, {_SenderTag, Sender}, Name, Tx]) ->
+ns_revoke_valid(#{accounts := Accounts} = S, [_Height, {_SenderTag, Sender}, Name, Tx]) ->
     case lists:keyfind(Sender, #account.key, Accounts) of
         false -> false;
         SenderAccount ->
             SenderAccount#account.nonce == maps:get(nonce, Tx) andalso
                 SenderAccount#account.amount >= maps:get(fee, Tx) andalso
-		case [ PC || #claim{name = N, claimer = Claimer} = PC <- maps:get(claims, S, []), 
-                             Name == N, 
+                case [ PC || #claim{name = N, claimer = Claimer} = PC <- maps:get(claims, S, []),
+                             Name == N,
                              Claimer == Sender ] of
-		    [] ->
-			false;
-		    [_Claim] ->
-                        true 
-		end
+                    [] ->
+                        false;
+                    [_Claim] ->
+                        true
+                end
     end.
 
-ns_revoke_adapt(#{tx_env := TxEnv} = S, [_Env, {SenderTag, Sender}, Name, Tx, _Correct]) ->
-    [TxEnv, {SenderTag, Sender}, Name, Tx, 
-     ns_revoke_valid(S, [TxEnv, {SenderTag, Sender}, Name, Tx])];
+ns_revoke_adapt(#{height := Height} = S, [_Height, {SenderTag, Sender}, Name, Tx, _Correct]) ->
+    [Height, {SenderTag, Sender}, Name, Tx,
+     ns_revoke_valid(S, [Height, {SenderTag, Sender}, Name, Tx])];
 ns_revoke_adapt(_, _) ->
-    false.    
+    false.
 
-ns_revoke(Env, _Sender, _Name, Tx, _Correct) ->
+ns_revoke(Height, _Sender, _Name, Tx, _Correct) ->
     Trees = get(trees),
     {ok, NTx} = rpc(aens_revoke_tx, new, [Tx]),
     {_, NameTx} = aetx:specialize_type(NTx),
 
+    Env = aetx_env:tx_env(Height),
     %% old version
-    Remote = 
+    Remote =
         case rpc:call(?REMOTE_NODE, aens_revoke_tx, check, [NameTx, Trees, Env], 1000) of
             {ok, Ts} ->
                 rpc:call(?REMOTE_NODE, aens_revoke_tx, process, [NameTx, Ts, Env], 1000);
@@ -1253,37 +1262,37 @@ ns_revoke(Env, _Sender, _Name, Tx, _Correct) ->
         Other -> Other
     end.
 
-ns_revoke_next(#{accounts := Accounts} = S, _Value, [Env, {_SenderTag, Sender}, Name, Tx, Correct]) ->
+ns_revoke_next(#{accounts := Accounts} = S, _Value, [Height, {_SenderTag, Sender}, Name, Tx, Correct]) ->
     if Correct ->
-	    SAccount = lists:keyfind(Sender, #account.key, Accounts),
+            SAccount = lists:keyfind(Sender, #account.key, Accounts),
             Claims = maps:get(claims, S, []),
             Claim = lists:keyfind(Name, #claim.name, Claims),
-	    S#{accounts => 
-	    	   (Accounts -- [SAccount]) ++
-	    	   [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx),
-	    			     nonce = maps:get(nonce, Tx) + 1, 
+            S#{accounts =>
+                   (Accounts -- [SAccount]) ++
+                   [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx),
+                                     nonce = maps:get(nonce, Tx) + 1,
                                      names_owned = (SAccount#account.names_owned -- [Name])
                                     }],
-               named_accounts => 
+               named_accounts =>
                    maps:remove(Name, maps:get(named_accounts, S, #{})),
-               claims => 
-                   (Claims -- [ Claim || Claim#claim.revoke_height == undefined ]) ++ 
+               claims =>
+                   (Claims -- [ Claim || Claim#claim.revoke_height == undefined ]) ++
                    [ Claim#claim{valid_height = -1,
-                                revoke_height = aec_governance:name_protection_period() + aetx_env:height(Env)}
+                                revoke_height = aec_governance:name_protection_period() + Height}
                      || Claim#claim.revoke_height == undefined ]
               };
        not Correct ->
-	    S
+            S
     end.
 
-ns_revoke_post(_S, [_Env, _Sender, _Name, _Tx, Correct], Res) ->
+ns_revoke_post(_S, [_Height, _Sender, _Name, _Tx, Correct], Res) ->
     case Res of
         {error, _} -> not Correct;
         ok -> Correct;
-	_ -> not Correct andalso valid_mismatch(Res)
+        _ -> not Correct andalso valid_mismatch(Res)
     end.
 
-ns_revoke_features(_S, [_Env, _Sender, _Name, _Tx, Correct], Res) ->
+ns_revoke_features(_S, [_Height, _Sender, _Name, _Tx, Correct], Res) ->
     [{correct, if Correct -> ns_revoke; true -> false end} ] ++
         [{ns_revoke, Res} || is_tuple(Res) andalso element(1, Res) == error].
 
@@ -1292,39 +1301,39 @@ ns_revoke_features(_S, [_Env, _Sender, _Name, _Tx, Correct], Res) ->
 ns_transfer_pre(S) ->
     maps:is_key(accounts, S).
 
-ns_transfer_args(#{accounts := Accounts, tx_env := Env} = S) ->
+ns_transfer_args(#{accounts := Accounts, height := Height} = S) ->
     ?LET(Args,
-    ?LET([{SenderTag, Sender}, {ReceiverTag, Receiver}], 
+    ?LET([{SenderTag, Sender}, {ReceiverTag, Receiver}],
          vector(2, gen_account_pubkey(Accounts)),
-         ?LET([Name, To], [gen_name(S), 
-                           oneof([account, {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++ 
+         ?LET([Name, To], [gen_name(S),
+                           oneof([account, {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++
                                                                [<<"ta.test">>])}])],
-              [Env, {SenderTag, Sender#account.key},
+              [Height, {SenderTag, Sender#account.key},
                case To of
                    account -> {ReceiverTag, Receiver#account.key};
                    {name, ToName} -> {name, ToName}
                end, Name,
                #{account_id => aec_id:create(account, Sender#account.key),  %% The sender is asserted to never be a name.
-                 recipient_id =>  
-                     case To of 
+                 recipient_id =>
+                     case To of
                          account ->
                              aec_id:create(account, Receiver#account.key);
                          {name, ToName} ->
                              aec_id:create(name, aens_hash:name_hash(ToName))
                      end,
                  name_id => aec_id:create(name, aens_hash:name_hash(Name)),
-		 fee => choose(1, 10),
-		 nonce => gen_nonce(Sender)
-                }])), 
-	 Args ++ [ns_transfer_valid(S, Args)]).
+                 fee => choose(1, 10),
+                 nonce => gen_nonce(Sender)
+                }])),
+         Args ++ [ns_transfer_valid(S, Args)]).
 
 
-ns_transfer_pre(S, [Env, Sender, Receiver,  Name, Tx, Correct]) ->
-    aec_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx) 
-        andalso ns_transfer_valid(S, [Env, Sender, Receiver, Name, Tx]) == Correct 
-        andalso correct_height(S, Env).
+ns_transfer_pre(S, [Height, Sender, Receiver,  Name, Tx, Correct]) ->
+    aec_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx)
+        andalso ns_transfer_valid(S, [Height, Sender, Receiver, Name, Tx]) == Correct
+        andalso correct_height(S, Height).
 
-ns_transfer_valid(#{accounts := Accounts} = S, [Env, {_SenderTag, Sender}, {ReceiverTag, Receiver}, Name, Tx]) ->
+ns_transfer_valid(#{accounts := Accounts} = S, [_Height, {_SenderTag, Sender}, {ReceiverTag, Receiver}, Name, Tx]) ->
     case lists:keyfind(Sender, #account.key, Accounts) of
         false -> false;
         SenderAccount ->
@@ -1332,39 +1341,40 @@ ns_transfer_valid(#{accounts := Accounts} = S, [Env, {_SenderTag, Sender}, {Rece
                 SenderAccount#account.amount >= maps:get(fee, Tx) andalso
                 case lists:keyfind(Name, #claim.name, maps:get(claims, S, [])) of
                     false -> false;
-                    Claim -> 
+                    Claim ->
                         Claim#claim.claimer == Sender
                             andalso Claim#claim.revoke_height == undefined
                 end andalso
                 case ReceiverTag of
                        new -> true;
-                       existing -> lists:keyfind(Receiver, #account.key, Accounts) /= false;   
-                       name -> 
+                       existing -> lists:keyfind(Receiver, #account.key, Accounts) /= false;
+                       name ->
                            case lists:keyfind(Receiver, #claim.name, maps:get(claims, S, [])) of
                                false -> false;
-                               RClaim -> 
+                               RClaim ->
                                    RClaim#claim.revoke_height == undefined
-                                       %% andalso RClaim#claim.valid_height >= aetx_env:height(Env)
-                                       andalso aec_id:create(name, 
+                                       %% andalso RClaim#claim.valid_height >= Height
+                                       andalso aec_id:create(name,
                                                              aens_hash:name_hash(Receiver)) == maps:get(recipient_id, Tx)
                                    %% for shrinking
                            end
                 end
     end.
 
-ns_transfer_adapt(#{tx_env := TxEnv} = S, [_Env, Sender, Receiver, Name, Tx, _Correct]) ->
-    [TxEnv, Sender, Receiver, Name, Tx, 
-     ns_transfer_valid(S, [TxEnv, Sender, Receiver, Name, Tx])];
+ns_transfer_adapt(#{height := Height} = S, [_Height, Sender, Receiver, Name, Tx, _Correct]) ->
+    [Height, Sender, Receiver, Name, Tx,
+     ns_transfer_valid(S, [Height, Sender, Receiver, Name, Tx])];
 ns_transfer_adapt(_, _) ->
-    false.    
+    false.
 
-ns_transfer(Env, _Sender, _Receiver, _Name, Tx, _Correct) ->
+ns_transfer(Height, _Sender, _Receiver, _Name, Tx, _Correct) ->
     Trees = get(trees),
     {ok, NTx} = rpc(aens_transfer_tx, new, [Tx]),
     {_, NameTx} = aetx:specialize_type(NTx),
 
+    Env = aetx_env:tx_env(Height),
     %% old version
-    Remote = 
+    Remote =
         case rpc:call(?REMOTE_NODE, aens_transfer_tx, check, [NameTx, Trees, Env], 1000) of
             {ok, Ts} ->
                 rpc:call(?REMOTE_NODE, aens_transfer_tx, process, [NameTx, Ts, Env], 1000);
@@ -1382,21 +1392,21 @@ ns_transfer(Env, _Sender, _Receiver, _Name, Tx, _Correct) ->
 
 %% Assumption the recipient does not need to exist, it is created when we provided
 %% it with a name
-ns_transfer_next(#{accounts := Accounts} = S, _Value, 
-                 [_Env, {_SenderTag, Sender}, {ReceiverTag, Receiver}, Name, Tx, Correct]) ->
-    ReceiverKey = 
+ns_transfer_next(#{accounts := Accounts} = S, _Value,
+                 [_Height, {_SenderTag, Sender}, {ReceiverTag, Receiver}, Name, Tx, Correct]) ->
+    ReceiverKey =
          case ReceiverTag of
-             name -> 
+             name ->
                  maps:get(Receiver, maps:get(named_accounts, S, #{}), Sender);
-                 %% a hack, but if the Receievr name does not point to an account, then 
+                 %% a hack, but if the Receievr name does not point to an account, then
                  %% we only need to increment the nonce and reduce amount of the sender
              _ -> Receiver
          end,
     if Correct ->
-	    SAccount = lists:keyfind(Sender, #account.key, Accounts),
-            RAccount = 
+            SAccount = lists:keyfind(Sender, #account.key, Accounts),
+            RAccount =
                 case ReceiverTag of
-                    name -> 
+                    name ->
                        case lists:keyfind(ReceiverKey, #account.key, Accounts) of
                            false -> #account{key = ReceiverKey, amount = 0, nonce = 1};
                            Acc -> Acc
@@ -1406,7 +1416,7 @@ ns_transfer_next(#{accounts := Accounts} = S, _Value,
                         lists:keyfind(Receiver, #account.key, Accounts)
                 end,
             case Sender == ReceiverKey of
-                true -> 
+                true ->
                     S#{accounts =>
                            (Accounts -- [SAccount]) ++
                            [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx),
@@ -1416,29 +1426,29 @@ ns_transfer_next(#{accounts := Accounts} = S, _Value,
                     S#{accounts =>
                            (Accounts -- [SAccount, RAccount]) ++
                                [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx),
-                                                 nonce = maps:get(nonce, Tx) + 1, 
+                                                 nonce = maps:get(nonce, Tx) + 1,
                                                  names_owned = SAccount#account.names_owned -- [Name]
                                                 },
-                                RAccount#account{names_owned = 
+                                RAccount#account{names_owned =
                                                      (RAccount#account.names_owned -- [Name]) ++ [Name]}],
-                       named_accounts => 
+                       named_accounts =>
                            %% Should this point to the name (and if that name changes go to new account)
                            %% or the resolved key???
                            maps:put(Name, Receiver, maps:get(named_accounts, S, #{}))
                       }
             end;
        not Correct ->
-	    S
+            S
     end.
 
-ns_transfer_post(_S, [_Env, _Sender, _Receiver, _Name, _Tx, Correct], Res) ->
+ns_transfer_post(_S, [_Height, _Sender, _Receiver, _Name, _Tx, Correct], Res) ->
     case Res of
         {error, _} -> not Correct;
         ok -> Correct;
-	_ -> not Correct andalso valid_mismatch(Res)
+        _ -> not Correct andalso valid_mismatch(Res)
     end.
 
-ns_transfer_features(_S, [_Env, _Sender, _Receiver, _Name, _Tx, Correct], Res) ->
+ns_transfer_features(_S, [_Height, _Sender, _Receiver, _Name, _Tx, Correct], Res) ->
     [{correct, if Correct -> ns_transfer; true -> false end} ] ++
         [{ns_transfer, Res} || is_tuple(Res) andalso element(1, Res) == error].
 
@@ -1458,11 +1468,7 @@ prop_tx_primops() ->
         pong = net_adm:ping(?REMOTE_NODE),
 
         {H, S, Res} = run_commands(Cmds),
-        Height = 
-            case maps:get(tx_env, S, undefined) of
-                undefined -> 0;
-                TxEnv -> aetx_env:height(TxEnv)
-            end,
+        Height = maps:get(height, S, 0),
         check_command_names(Cmds,
             measure(length, commands_length(Cmds),
             measure(height, Height,
@@ -1483,26 +1489,26 @@ bugs(Time, Bugs) ->
 
 %% --- local helpers ------
 
-correct_height(#{tx_env := TxEnv}, Env) ->
-    aetx_env:height(TxEnv) == aetx_env:height(Env).
+correct_height(#{height := Height0}, Height1) ->
+    Height0 == Height1.
 
 strict_equal(X, Y) ->
-     case X == Y of 
-         true -> X; 
-         false -> exit({different, X, Y}) 
+     case X == Y of
+         true -> X;
+         false -> exit({different, X, Y})
      end.
 
 hash_equal(X, Y) ->
-     case {X, Y} of 
-         {{ok, L}, {ok, R}} -> 
+     case {X, Y} of
+         {{ok, L}, {ok, R}} ->
              case aec_trees:hash(L) == aec_trees:hash(R) of
                  true -> X;
                  false -> exit({hash_differs, X, Y})
              end;
          {E, E} -> E;
-         _ -> exit({different, X, Y}) 
+         _ -> exit({different, X, Y})
      end.
- 
+
 rpc(Module, Fun, Args) ->
     rpc(Module, Fun, Args, fun(X,Y) -> strict_equal(X, Y) end).
 
@@ -1529,16 +1535,16 @@ valid_mismatch({'EXIT', {different, {error, account_nonce_too_high},
 valid_mismatch({'EXIT', {different, {error, account_nonce_too_low},
                          {error, multiple_namespaces}}}) -> true;
 valid_mismatch({'EXIT', {different, {error, account_not_found},
-			 {error, multiple_namespaces}}}) -> true;
+                         {error, multiple_namespaces}}}) -> true;
 valid_mismatch({'EXIT', {different, {error, insufficient_funds},
-			 {error, multiple_namespaces}}}) -> true;
+                         {error, multiple_namespaces}}}) -> true;
 valid_mismatch({'EXIT', {different, {error, name_does_not_exist},
                          {error, name_not_found}}}) ->  true;
 valid_mismatch({'EXIT', {different, {error, name_does_not_exist},
                          {error, insufficient_funds}}}) -> true;
 valid_mismatch({'EXIT', {different, {error, pointer_id_not_found},
                          {error, insufficient_funds}}}) -> true;
-valid_mismatch({'EXIT', {different, {error, name_revoked}, 
+valid_mismatch({'EXIT', {different, {error, name_revoked},
                          {error, insufficient_funds}}}) -> true;
 valid_mismatch(_) -> false.
 
@@ -1546,13 +1552,13 @@ valid_mismatch(_) -> false.
 
 
 gen_account_pubkey(Accounts) ->
-    oneof([?LAZY({existing, elements(Accounts)}), 
+    oneof([?LAZY({existing, elements(Accounts)}),
            ?LAZY({new, #account{key = noshrink(binary(32)), amount = 0, nonce = 0 }})]).
 
 unique_name(List) ->
-    ?LET([W], 
-         noshrink(?SUCHTHAT([Word], 
-                            eqc_erlang_program:words(1), not lists:member(Word, List))), 
+    ?LET([W],
+         noshrink(?SUCHTHAT([Word],
+                            eqc_erlang_program:words(1), not lists:member(Word, List))),
          W).
 
 gen_nonce(false) ->
@@ -1562,8 +1568,8 @@ gen_nonce(Account) when is_record(Account, account) ->
     frequency([{1, 0}, {1, 1}, {97, Account#account.nonce}, {1, 100}]).
 
 gen_name() ->
-    ?LET(NFs, frequency([{1, non_empty(list(elements(?NAMEFRAGS)))}, 
-    			 {90, [elements(?NAMEFRAGS)]}]),
+    ?LET(NFs, frequency([{1, non_empty(list(elements(?NAMEFRAGS)))},
+                         {90, [elements(?NAMEFRAGS)]}]),
     return(iolist_to_binary(lists:join(".", NFs ++ ["test"])))).
 
 gen_name(S) ->
