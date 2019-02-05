@@ -82,7 +82,7 @@ init_args(_S) ->
 init(_Height) ->
     Trees = rpc(aec_trees, new_without_backend, [], fun hash_equal/2),
     EmptyAccountTree = rpc(aec_trees, accounts, [Trees]),
-    Account = rpc(aec_accounts, new, [?Patron, 1200000]),
+    Account = rpc(aec_accounts, new, [?Patron, 120000000]),
     AccountTree = rpc(aec_accounts_trees, enter, [Account, EmptyAccountTree]),
     InitialTrees = rpc(aec_trees, set_accounts, [Trees, AccountTree], fun hash_equal/2),
     put(trees, InitialTrees),
@@ -91,7 +91,7 @@ init(_Height) ->
 
 init_next(S, _Value, [Height]) ->
     S#{height => Height,
-       accounts => [#account{key = ?Patron, amount = 1200000, nonce = 1}]}.
+       accounts => [#account{key = ?Patron, amount = 120000000, nonce = 1}]}.
 
 %% --- Operation: mine ---
 mine_pre(S) ->
@@ -136,9 +136,9 @@ spend_pre(S) ->
     maps:is_key(accounts, S).
 
 spend_args(#{accounts := Accounts, height := Height} = S) ->
-    ?LET([{SenderTag, Sender}, {ReceiverTag, Receiver}],
-         vector(2, gen_account_pubkey(Accounts)),  %% Add oracle as well! and contract
-         ?LET([Amount, Nonce, To], [nat(), gen_nonce(Sender),
+    ?LET({{SenderTag, Sender}, {ReceiverTag, Receiver}},
+         {gen_account(1, 49, Accounts), gen_account(2, 1, Accounts)},
+         ?LET([Amount, Nonce, To], [gen_spend_amount(Sender), gen_nonce(Sender),
                                     oneof([account, {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++ [<<"ta.test">>])}])],
               %% important: we should never generate ta.test, it is a definitely wrong name
               [Height, {SenderTag, Sender#account.key},
@@ -226,13 +226,14 @@ spend_next(#{accounts := Accounts} = S, _Value,
 
 spend_features(S, [_Height, {_, Sender}, {Tag, Receiver}, Tx] = Args, Res) ->
     Correct = spend_valid(S, Args),
-    [{spend, {accounts, length(maps:get(accounts, S))}},
+    [%{spend, {accounts, length(maps:get(accounts, S))}},
      {correct,  if Correct -> spend; true -> false end}] ++
-        [ {spend, to_self} || Sender == Receiver andalso Correct] ++
-             [ {spend, zero} || maps:get(amount, Tx) == 0 andalso Correct] ++
-             [ {spend, zero_fee} ||  maps:get(fee, Tx) == 0 ] ++
-        [ {spend, to_name} || Tag == name ] ++
-        [ {spend, Res} || is_tuple(Res) andalso element(1, Res) == error].
+        %% [ {spend, to_self} || Sender == Receiver andalso Correct] ++
+        %% [ {spend, zero} || maps:get(amount, Tx) == 0 andalso Correct] ++
+        %% [ {spend, zero_fee} ||  maps:get(fee, Tx) == 0 ] ++
+        %% [ {spend, to_name} || Tag == name ] ++
+        %% [ {spend, Res} || is_tuple(Res) andalso element(1, Res) == error].
+        [{spend, Res}].
 
 
 %% --- Operation: register_oracle ---
@@ -1226,9 +1227,16 @@ valid_mismatch(_) -> false.
 %% -- Generators -------------------------------------------------------------
 
 
+gen_account(_, _, []) -> {new, gen_account()};
+gen_account(New, Exist, Accounts) ->
+    weighted_default({Exist, {existing, elements(Accounts)}},
+                     {New,   {new, gen_account()}}).
+
+gen_account() ->  #account{key = noshrink(binary(32)), amount = 0, nonce = 0 }.
+
 gen_account_pubkey(Accounts) ->
     oneof([?LAZY({existing, elements(Accounts)}),
-           ?LAZY({new, #account{key = noshrink(binary(32)), amount = 0, nonce = 0 }})]).
+           ?LAZY({new, gen_account()})]).
 
 unique_name(List) ->
     ?LET([W],
@@ -1237,10 +1245,14 @@ unique_name(List) ->
          W).
 
 gen_nonce(false) ->
-    choose(0,2);  %% account is not present
-gen_nonce(Account) when is_record(Account, account) ->
-    %% 0 is always wrong, 1 is often too low and 100 is often too high
-    frequency([{1, 0}, {1, 1}, {97, Account#account.nonce}, {1, 100}]).
+    1;  %% account is not present
+gen_nonce(#account{nonce = N}) ->
+    weighted_default({49, N}, {1, ?LET(X, elements([N-5, N-1, N+1, N+5]), abs(X))}).
+
+gen_spend_amount(#account{ amount = X }) when X == 0 ->
+    choose(0, 10000000);
+gen_spend_amount(#account{ amount = X }) ->
+    weighted_default({49, round(X / 5)}, {1, choose(0, 10000000)}).
 
 gen_name() ->
     ?LET(NFs, frequency([{1, non_empty(list(elements(?NAMEFRAGS)))},
@@ -1252,6 +1264,6 @@ gen_name(S) ->
                {1, gen_name()}]).
 
 gen_fee() ->
-    weighted_default({9, choose(20000, 50000)},
-                     {1, choose(0, 15000)}).    %% too low
+    weighted_default({29, choose(20000, 50000)},
+                     {1,  choose(0, 15000)}).    %% too low
 
