@@ -36,7 +36,7 @@
 
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
-    #{claims => [], preclaims => []}.
+    #{claims => [], preclaims => [], oracles => []}.
 
 %% -- Common pre-/post-conditions --------------------------------------------
 command_precondition_common(_S, _Cmd) ->
@@ -168,35 +168,22 @@ spend_pre(#{accounts := Accounts} = S, [Height, _Sender, {ReceiverTag, Receiver}
         end,
     ReceiverOk andalso correct_height(S, Height).
 
-spend_valid(#{accounts := Accounts, height := Height} = S, [_Height, {_, Sender}, {ReceiverTag, Receiver}, Tx]) ->
-    case lists:keyfind(Sender, #account.key, Accounts) of
-        false -> false;
-        SenderAccount ->
-            SenderAccount#account.nonce == maps:get(nonce, Tx)
-                andalso SenderAccount#account.amount >= maps:get(amount, Tx) + maps:get(fee, Tx)
-                andalso maps:get(fee, Tx) >= 0  %% it seems fee == 0 does not return error
-                andalso
-                   case ReceiverTag of
-                       new -> true;
-                       existing -> lists:keyfind(Receiver, #account.key, Accounts) /= false;
-                       name ->
-                           case lists:keyfind(Receiver, #claim.name, maps:get(claims, S, [])) of
-                               false -> false;
-                               Claim ->
-                                   Claim#claim.revoke_height == undefined
-                                       andalso Claim#claim.valid_height >= Height
-                                       andalso aec_id:create(name,
-                                                             aens_hash:name_hash(Receiver)) == maps:get(recipient_id, Tx)
-                                   %% for shrinking
-                           end
-                   end
-    end.
+spend_valid(S, [Height, {_, Sender}, {ReceiverTag, Receiver}, Tx]) ->
+    is_account(S, Sender)
+    andalso correct_nonce(S, Sender, Tx)
+    andalso check_balance(S, Sender, maps:get(amount, Tx) + maps:get(fee, Tx))
+    andalso maps:get(fee, Tx) >= 0  %% it seems fee == 0 does not return error
+    andalso case ReceiverTag of
+               new      -> true;
+               existing -> is_account(S, Receiver);
+               name     -> is_valid_name(S, Receiver, Height)
+                           andalso correct_name_id(Receiver, maps:get(recipient_id, Tx))
+            end.
 
 spend_adapt(#{height := Height}, [_, {SenderTag, Sender}, {ReceiverTag, Receiver}, Tx]) ->
     [Height, {SenderTag, Sender}, {ReceiverTag, Receiver}, Tx];
 spend_adapt(_, _) ->
     false.
-
 
 spend(Height, _Sender, _Receiver, Tx) ->
     apply_transaction(Height, aec_spend_tx, Tx).
@@ -266,14 +253,11 @@ register_oracle_args(#{accounts := Accounts, height := Height}) ->
 register_oracle_pre(S, [Height, _Sender, _Tx]) ->
     correct_height(S, Height).
 
-register_oracle_valid(S, [_, {_, Sender}, Tx]) ->
-    case lists:keyfind(Sender, #account.key, maps:get(accounts, S, [])) of
-        false -> false;
-        SenderAccount ->
-            SenderAccount#account.nonce == maps:get(nonce, Tx) andalso
-                SenderAccount#account.amount >= maps:get(fee, Tx) andalso
-                not lists:keymember(Sender, 1, maps:get(oracles, S, []))
-    end.
+register_oracle_valid(S, [{_, Sender}, Tx]) ->
+    is_account(S, Sender)
+    andalso correct_nonce(S, Sender, Tx)
+    andalso check_balance(S, Sender, maps:get(fee, Tx))
+    andalso not is_oracle(S, Sender).
 
 register_oracle_adapt(#{height := Height}, [_, Sender, Tx]) ->
     [Height, Sender, Tx];
@@ -328,16 +312,11 @@ query_oracle_pre(S, [Height, _Sender, _Oracle, _Tx]) ->
     correct_height(S, Height).
 
 query_oracle_valid(S, [_Height, {_SenderTag, Sender}, Oracle, Tx]) ->
-    case {lists:keyfind(Sender, #account.key, maps:get(accounts, S, [])),
-          lists:keyfind(Oracle, 1, maps:get(oracles, S, []))}
-          of
-        {false, _} -> false;
-        {_, false} -> false;
-        {SenderAccount, {_, QueryFee}} ->
-            SenderAccount#account.nonce == maps:get(nonce, Tx) andalso
-                SenderAccount#account.amount >= maps:get(fee, Tx) + maps:get(query_fee, Tx) andalso
-                maps:get(query_fee, Tx) >= QueryFee
-    end.
+    is_account(S, Sender)
+    andalso is_oracle(S, Oracle)
+    andalso correct_nonce(S, Sender, Tx)
+    andalso check_balance(S, Sender, maps:get(fee, Tx) + maps:get(query_fee, Tx))
+    andalso oracle_query_fee(S, Oracle) =< maps:get(query_fee, Tx).
 
 query_oracle_adapt(#{height := Height}, [_Height, Sender, Oracle, Tx]) ->
     [Height, Sender, Oracle, Tx];
@@ -399,14 +378,11 @@ response_oracle_pre(S, [Height, _QueryId, _Tx]) ->
     correct_height(S, Height).
 
 response_oracle_valid(S, [_Height, {_, _, Oracle} = QueryId, Tx]) ->
-    case lists:keyfind(Oracle, #account.key, maps:get(accounts, S)) of
-        false -> false;
-        OracleAccount ->
-            Query = lists:keyfind(QueryId, #query.id, maps:get(queries, S, [])),
-            OracleAccount#account.nonce == maps:get(nonce, Tx) andalso
-                OracleAccount#account.amount >= maps:get(fee, Tx) andalso
-                Query =/= false
-    end.
+    is_account(S, Oracle)
+    andalso is_oracle(S, Oracle)
+    andalso correct_nonce(S, Oracle, Tx)
+    andalso check_balance(S, Oracle,  maps:get(fee, Tx))
+    andalso is_query(S, QueryId).
 
 response_oracle_adapt(#{height := Height}, [_, QueryId, Tx]) ->
     [Height, QueryId, Tx];
@@ -465,17 +441,13 @@ channel_create_pre(S, [Height, Initiator, Responder, _Tx]) ->
     correct_height(S, Height).
 
 channel_create_valid(S, [_Height, Initiator, Responder, Tx]) ->
-   case {lists:keyfind(Initiator, #account.key, maps:get(accounts, S, [])),
-         lists:keyfind(Responder, #account.key, maps:get(accounts, S, []))} of
-        {false, _} -> false;
-        {_, false} -> false;
-        {IAccount, RAccount} ->
-            IAccount#account.nonce == maps:get(nonce, Tx) andalso
-               IAccount#account.amount >= maps:get(fee, Tx) + maps:get(initiator_amount, Tx) andalso
-               RAccount#account.amount >= maps:get(responder_amount, Tx) andalso
-               maps:get(initiator_amount, Tx) >= maps:get(channel_reserve, Tx) andalso
-               maps:get(responder_amount, Tx) >= maps:get(channel_reserve, Tx)
-    end.
+    is_account(S, Initiator)
+    andalso is_account(S, Responder)
+    andalso correct_nonce(S, Initiator, Tx)
+    andalso check_balance(S, Initiator, maps:get(fee, Tx) + maps:get(initiator_amount, Tx))
+    andalso check_balance(S, Responder, maps:get(responder_amount, Tx))
+    andalso maps:get(initiator_amount, Tx) >= maps:get(channel_reserve, Tx)
+    andalso maps:get(responder_amount, Tx) >= maps:get(channel_reserve, Tx).
 
 channel_create_adapt(#{height := Height}, [_, Initiator, Responder, Tx]) ->
     [Height, Initiator, Responder, Tx];
@@ -539,21 +511,13 @@ channel_deposit_pre(S, [Height, _ChannelId, _Party, _Tx]) ->
     correct_height(S, Height).
 
 channel_deposit_valid(S, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx]) ->
-    case {lists:keyfind(Initiator, #account.key, maps:get(accounts, S, [])),
-          lists:keyfind(Responder, #account.key, maps:get(accounts, S, []))} of
-        {false, _} -> false;
-        {_, false} -> false;
-        {IAccount, RAccount} ->
-            FromAccount = case Party of
-                              initiator -> IAccount;
-                              responder -> RAccount
-                          end,
-            Channel = lists:keyfind(ChannelId, #channel.id, maps:get(channels, S, [])),
-            Channel /= false andalso
-                FromAccount#account.nonce == maps:get(nonce, Tx) andalso
-                FromAccount#account.amount >= maps:get(fee, Tx) + maps:get(amount, Tx) andalso
-                maps:get(round, Tx) > Channel#channel.round
-    end.
+    From = case Party of initiator -> Initiator; responder -> Responder end,
+    is_account(S, Initiator)
+    andalso is_account(S, Responder)
+    andalso is_channel(S, ChannelId)
+    andalso correct_nonce(S, From, Tx)
+    andalso check_balance(S, From, maps:get(fee, Tx) + maps:get(amount, Tx))
+    andalso correct_round(S, ChannelId, Tx).
 
 channel_deposit_adapt(#{height := Height}, [_, ChannelId, Party, Tx]) ->
     [Height, ChannelId, Party, Tx];
@@ -629,22 +593,14 @@ channel_withdraw_pre(S, [Height, _ChannelId, _Party, _Tx]) ->
     correct_height(S, Height).
 
 channel_withdraw_valid(S, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx]) ->
-    case {lists:keyfind(Initiator, #account.key, maps:get(accounts, S, [])),
-          lists:keyfind(Responder, #account.key, maps:get(accounts, S, []))} of
-        {false, _} -> false;
-        {_, false} -> false;
-        {IAccount, RAccount} ->
-            FromAccount = case Party of
-                              initiator -> IAccount;
-                              responder -> RAccount
-                          end,
-            Channel = lists:keyfind(ChannelId, #channel.id, maps:get(channels, S, [])),
-            Channel /= false andalso
-                FromAccount#account.nonce == maps:get(nonce, Tx) andalso
-                FromAccount#account.amount >= maps:get(fee, Tx) andalso
-                maps:get(round, Tx) > Channel#channel.round andalso
-                maps:get(amount, Tx) =< Channel#channel.amount
-    end.
+    From = case Party of initiator -> Initiator; responder -> Responder end,
+    is_account(S, Initiator)
+    andalso is_account(S, Responder)
+    andalso is_channel(S, ChannelId)
+    andalso correct_nonce(S, From, Tx)
+    andalso check_balance(S, From, maps:get(fee, Tx))
+    andalso correct_round(S, ChannelId, Tx)
+    andalso (channel(S, ChannelId))#channel.amount >= maps:get(amount, Tx).
 
 channel_withdraw_adapt(#{height := Height} = S, [_, ChannelId, Party, Tx]) ->
     [Height, ChannelId, Party, Tx, channel_withdraw_valid(S, [Height, ChannelId, Party, Tx])];
@@ -713,14 +669,10 @@ name_preclaim_pre(S, [Height, _Sender, {Name, Salt}, Tx]) ->
         andalso aec_id:create(commitment, aens_hash:commitment_hash(Name, Salt)) == maps:get(commitment_id, Tx)
         andalso correct_height(S, Height).
 
-name_preclaim_valid(#{accounts := Accounts},
-                    [_Height, {_, Sender}, {_Name, _Salt}, Tx]) ->
-    case lists:keyfind(Sender, #account.key, Accounts) of
-        false -> false;
-        SenderAccount ->
-            SenderAccount#account.nonce == maps:get(nonce, Tx) andalso
-                SenderAccount#account.amount >= maps:get(fee, Tx)
-    end.
+name_preclaim_valid(S, [_Height, {_, Sender}, {_Name, _Salt}, Tx]) ->
+    is_account(S, Sender)
+    andalso correct_nonce(S, Sender, Tx)
+    andalso check_balance(S, Sender, maps:get(fee, Tx)).
 
 name_preclaim_adapt(#{height := Height}, [_Height, {SenderTag, Sender}, {Name, Salt}, Tx]) ->
     [Height, {SenderTag, Sender}, {Name, Salt}, Tx];
@@ -778,27 +730,21 @@ claim_args(#{accounts := Accounts, height := Height}) ->
 claim_pre(S, [Height, _Sender, _Tx]) ->
     correct_height(S, Height).
 
-claim_valid(#{accounts := Accounts, height := Height} = S, [_Height, {_, Sender}, Tx]) ->
-    case lists:keyfind(Sender, #account.key, Accounts) of
-        false -> false;
-        SenderAccount ->
-            SenderAccount#account.nonce == maps:get(nonce, Tx) andalso
-                SenderAccount#account.amount >= maps:get(fee, Tx) + aec_governance:name_claim_locked_fee() andalso
-                case [ PC || #preclaim{name = Name, salt = Salt, claimer = Claimer} = PC <- maps:get(preclaims, S, []),
-                             Name ==  maps:get(name, Tx),
-                             Salt == maps:get(name_salt, Tx),
-                             Claimer == Sender ] of
-                    [] ->
-                        false;
-                    [Preclaim] ->
-                        %% preclaim and claim are in different blocks
-                        Preclaim#preclaim.height + aec_governance:name_claim_preclaim_delta() =< Height
-                            andalso
-                            Height < Preclaim#preclaim.height + aec_governance:name_preclaim_expiration()
-                end
-                andalso valid_name(Tx) andalso
-                not already_claimed(S, Tx)
+claim_valid(S, [Height, {_, Sender}, Tx]) ->
+    is_account(S, Sender)
+    andalso correct_nonce(S, Sender, Tx)
+    andalso check_balance(S, Sender, maps:get(fee, Tx) + aec_governance:name_claim_locked_fee())
+    andalso is_valid_preclaim(S, Tx, Sender, Height).
 
+is_valid_preclaim(S = #{preclaims := Ps}, Tx = #{name := Name, name_salt := Salt}, Claimer, Height) ->
+    case [ PC || PC = #preclaim{name = N, salt = Sa, claimer = C} <- Ps,
+                 Name == N, Salt == Sa, Claimer == C ] of
+        [] -> false;
+        [#preclaim{ height = H }] ->
+            H + aec_governance:name_claim_preclaim_delta() =< Height
+            andalso Height < H +  aec_governance:name_preclaim_expiration()
+            andalso valid_name(Tx)
+            andalso not is_claimed(S, Name)
     end.
 
 % names may not have dots in between, only at the end (.test)
@@ -807,9 +753,6 @@ valid_name(Tx) ->
         [_, <<"test">>] -> true;
         _ -> false
     end.
-
-already_claimed(#{claims := Claims}, Tx) ->
-    [ present || #claim{name = N} <- Claims, N == maps:get(name,Tx)] =/= [].
 
 claim_adapt(#{height := Height}, [_Height, {SenderTag, Sender}, Tx]) ->
     [Height, {SenderTag, Sender}, Tx];
@@ -871,23 +814,12 @@ ns_update_pre(S, [Height, Name, _Sender, _NameAccount, Tx]) ->
     aec_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx)
         andalso correct_height(S, Height).
 
-ns_update_valid(#{accounts := Accounts} = S, [Height, Name, {_, Sender}, _, Tx]) ->
-    case lists:keyfind(Sender, #account.key, Accounts) of
-        false -> false;
-        SenderAccount ->
-            SenderAccount#account.nonce == maps:get(nonce, Tx) andalso
-                SenderAccount#account.amount >= maps:get(fee, Tx) + aec_governance:name_claim_locked_fee() andalso
-                case [ PC || #claim{name = N, claimer = Claimer} = PC <- maps:get(claims, S, []),
-                             Name == N,
-                             Claimer == Sender ] of
-                    [] ->
-                        false;
-                    [Claim] ->
-                        Claim#claim.revoke_height == undefined andalso
-                            (Claim#claim.update_height == undefined orelse
-                             Height =< Claim#claim.valid_height)
-                end
-    end.
+ns_update_valid(S, [Height, Name, {_, Sender}, _, Tx]) ->
+    is_account(S, Sender)
+    andalso correct_nonce(S, Sender, Tx)
+    andalso check_balance(S, Sender, maps:get(fee, Tx) + aec_governance:name_claim_locked_fee())
+    andalso owns_name(S, Sender, Name)
+    andalso is_valid_name(S, Name, Height).
 
 ns_update_adapt(#{height := Height}, [_Height, Name, {SenderTag, Sender}, NameAccount, Tx]) ->
     [Height, Name, {SenderTag, Sender}, NameAccount, Tx];
@@ -950,21 +882,11 @@ ns_revoke_pre(S, [Height, _Sender, Name, Tx]) ->
     aec_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx)
         andalso correct_height(S, Height).
 
-ns_revoke_valid(#{accounts := Accounts} = S, [_Height, {_SenderTag, Sender}, Name, Tx]) ->
-    case lists:keyfind(Sender, #account.key, Accounts) of
-        false -> false;
-        SenderAccount ->
-            SenderAccount#account.nonce == maps:get(nonce, Tx) andalso
-                SenderAccount#account.amount >= maps:get(fee, Tx) andalso
-                case [ PC || #claim{name = N, claimer = Claimer} = PC <- maps:get(claims, S, []),
-                             Name == N,
-                             Claimer == Sender ] of
-                    [] ->
-                        false;
-                    [_Claim] ->
-                        true
-                end
-    end.
+ns_revoke_valid(S, [_Height, {_SenderTag, Sender}, Name, Tx]) ->
+    is_account(S, Sender)
+    andalso correct_nonce(S, Sender, Tx)
+    andalso check_balance(S, Sender, maps:get(fee, Tx))
+    andalso owns_name(S, Sender, Name).
 
 ns_revoke_adapt(#{height := Height}, [_Height, {SenderTag, Sender}, Name, Tx]) ->
     [Height, {SenderTag, Sender}, Name, Tx];
@@ -1036,33 +958,16 @@ ns_transfer_pre(S, [Height, _Sender, _Receiver, Name, Tx]) ->
     aec_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx)
         andalso correct_height(S, Height).
 
-ns_transfer_valid(#{accounts := Accounts} = S, [_Height, {_SenderTag, Sender}, {ReceiverTag, Receiver}, Name, Tx]) ->
-    case lists:keyfind(Sender, #account.key, Accounts) of
-        false -> false;
-        SenderAccount ->
-            SenderAccount#account.nonce == maps:get(nonce, Tx) andalso
-                SenderAccount#account.amount >= maps:get(fee, Tx) andalso
-                case lists:keyfind(Name, #claim.name, maps:get(claims, S, [])) of
-                    false -> false;
-                    Claim ->
-                        Claim#claim.claimer == Sender
-                            andalso Claim#claim.revoke_height == undefined
-                end andalso
-                case ReceiverTag of
-                       new -> true;
-                       existing -> lists:keyfind(Receiver, #account.key, Accounts) /= false;
-                       name ->
-                           case lists:keyfind(Receiver, #claim.name, maps:get(claims, S, [])) of
-                               false -> false;
-                               RClaim ->
-                                   RClaim#claim.revoke_height == undefined
-                                       %% andalso RClaim#claim.valid_height >= Height
-                                       andalso aec_id:create(name,
-                                                             aens_hash:name_hash(Receiver)) == maps:get(recipient_id, Tx)
-                                   %% for shrinking
-                           end
-                end
-    end.
+ns_transfer_valid(S, [Height, {_SenderTag, Sender}, {ReceiverTag, Receiver}, Name, Tx]) ->
+    is_account(S, Sender)
+    andalso correct_nonce(S, Sender, Tx)
+    andalso check_balance(S, Sender, maps:get(fee, Tx))
+    andalso owns_name(S, Sender, Name)
+    andalso case ReceiverTag of
+               new      -> true;
+               existing -> is_account(S, Receiver);
+               name     -> is_valid_name(S, Receiver, Height)
+            end.
 
 ns_transfer_adapt(#{height := Height}, [_Height, Sender, Receiver, Name, Tx]) ->
     [Height, Sender, Receiver, Name, Tx];
@@ -1165,6 +1070,57 @@ bugs(Time, Bugs) ->
 
 
 %% --- local helpers ------
+is_valid_name(#{claims := Names}, Name, Height) ->
+    case lists:keyfind(Name, #claim.name, Names) of
+        false -> false;
+        Claim -> Claim#claim.revoke_height == undefined
+                 andalso Claim#claim.valid_height >= Height
+    end.
+
+owns_name(#{claims := Names}, Who, Name) ->
+    case lists:keyfind(Name, #claim.name, Names) of
+        false -> false;
+        Claim -> Claim#claim.claimer == Who
+                 andalso Claim#claim.revoke_height == undefined
+    end.
+
+correct_name_id(Name, NameId) ->
+    aec_id:create(name, aens_hash:name_hash(Name)) == NameId.
+
+is_account(#{accounts := Accounts}, Key) ->
+    lists:keymember(Key, #account.key, Accounts).
+
+is_oracle(#{oracles := Oracles}, Oracle) ->
+    lists:keymember(Oracle, 1, Oracles).
+
+oracle_query_fee(#{oracles := Oracles}, Oracle) ->
+    {_, QFee} = lists:keyfind(Oracle, 1, Oracles),
+    QFee.
+
+is_query(#{queries := Qs}, Q) ->
+    lists:keymember(Q, #query.id, Qs).
+
+correct_nonce(S, Key, #{nonce := Nonce}) ->
+    (account(S, Key))#account.nonce == Nonce.
+
+check_balance(S, Key, Amount) ->
+     (account(S, Key))#account.amount >= Amount.
+
+account(#{accounts := Accounts}, Key) ->
+    lists:keyfind(Key, #account.key, Accounts).
+
+is_channel(S, CId) ->
+    channel(S, CId) /= false.
+
+channel(#{channels := Cs}, CId) ->
+    lists:keyfind(CId, #channel.id, Cs).
+
+correct_round(S, CId, #{round := Round}) ->
+    (channel(S, CId))#channel.round == Round.
+
+is_claimed(#{claims := Cs}, Name) ->
+    lists:keymember(Name, #claim.name, Cs).
+
 
 correct_height(#{height := Height0}, Height1) ->
     Height0 == Height1.
