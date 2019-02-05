@@ -159,14 +159,14 @@ spend_args(#{accounts := Accounts, height := Height} = S) ->
                  nonce => Nonce,
                  payload => utf8()}])).
 
-spend_pre(#{accounts := Accounts} = S, [Height, _Sender, {ReceiverTag, Receiver}, _Tx]) ->
+spend_pre(#{accounts := Accounts} = S, [Height, {_, Sender}, {RTag, Receiver}, Tx]) ->
     ReceiverOk =
-        case ReceiverTag of
+        case RTag of
             new -> lists:keyfind(Receiver, #account.key, Accounts) == false;
             existing -> lists:keyfind(Receiver, #account.key, Accounts) =/= false;
             name -> maps:is_key(Receiver, maps:get(named_accounts, S, #{}))
         end,
-    ReceiverOk andalso correct_height(S, Height).
+    ReceiverOk andalso correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
 
 spend_valid(S, [Height, {_, Sender}, {ReceiverTag, Receiver}, Tx]) ->
     is_account(S, Sender)
@@ -180,8 +180,8 @@ spend_valid(S, [Height, {_, Sender}, {ReceiverTag, Receiver}, Tx]) ->
                            andalso correct_name_id(Receiver, maps:get(recipient_id, Tx))
             end.
 
-spend_adapt(#{height := Height}, [_, {SenderTag, Sender}, {ReceiverTag, Receiver}, Tx]) ->
-    [Height, {SenderTag, Sender}, {ReceiverTag, Receiver}, Tx];
+spend_adapt(#{height := Height} = S, [_, {SenderTag, Sender}, {ReceiverTag, Receiver}, Tx]) ->
+    [Height, {SenderTag, Sender}, {ReceiverTag, Receiver}, adapt_nonce(S, Sender, Tx)];
 spend_adapt(_, _) ->
     false.
 
@@ -226,8 +226,8 @@ register_oracle_args(S = #{height := Height}) ->
                   nonce => gen_nonce(Sender),
                   oracle_ttl => {delta, 100}}]).
 
-register_oracle_pre(S, [Height, _Sender, _Tx]) ->
-    correct_height(S, Height).
+register_oracle_pre(S, [Height, {_, Sender}, Tx]) ->
+    correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
 
 register_oracle_valid(S, [_, {_, Sender}, Tx]) ->
     is_account(S, Sender)
@@ -236,8 +236,8 @@ register_oracle_valid(S, [_, {_, Sender}, Tx]) ->
     andalso valid_fee(Tx)
     andalso not is_oracle(S, Sender).
 
-register_oracle_adapt(#{height := Height}, [_, Sender, Tx]) ->
-    [Height, Sender, Tx];
+register_oracle_adapt(#{height := Height} = S, [_, {STag, Sender}, Tx]) ->
+    [Height, {STag, Sender}, adapt_nonce(S, Sender, Tx)];
 register_oracle_adapt(_, _) ->
     %% in case we don't even have a Height
     false.
@@ -286,8 +286,8 @@ query_oracle_args(S = #{accounts := Accounts, height := Height}) ->
                 }]
           end).
 
-query_oracle_pre(S, [Height, _Sender, _Oracle, _Tx]) ->
-    correct_height(S, Height).
+query_oracle_pre(S, [Height, {_, Sender}, _Oracle, Tx]) ->
+    correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
 
 query_oracle_valid(S, [_Height, {_SenderTag, Sender}, Oracle, Tx]) ->
     is_account(S, Sender)
@@ -297,8 +297,8 @@ query_oracle_valid(S, [_Height, {_SenderTag, Sender}, Oracle, Tx]) ->
     andalso valid_fee(Tx)
     andalso oracle_query_fee(S, Oracle) =< maps:get(query_fee, Tx).
 
-query_oracle_adapt(#{height := Height}, [_Height, Sender, Oracle, Tx]) ->
-    [Height, Sender, Oracle, Tx];
+query_oracle_adapt(#{height := Height} = S, [_Height, {STag, Sender}, Oracle, Tx]) ->
+    [Height, {STag, Sender}, Oracle, adapt_nonce(S, Sender, Tx)];
 query_oracle_adapt(_, _) ->
     false.
 
@@ -312,7 +312,7 @@ query_oracle_next(S, _Value, [Height, {_, Sender}, Oracle, Tx] = Args) ->
         true  ->
             #{ response_ttl := {delta, Delta}, fee := Fee, query_fee := QFee } = Tx,
             Query = #query{sender       = Sender,
-                           id           = {Sender, maps:get(nonce, Tx), Oracle},
+                           id           = {Sender, maps:get(nonce, untag_nonce(Tx)), Oracle},
                            response_ttl = Delta + Height,
                            fee          = maps:get(query_fee, Tx)},
             bump_and_charge(Sender, Fee + QFee,
@@ -340,13 +340,13 @@ response_oracle_args(#{accounts := Accounts, height := Height} = S) ->
              response_ttl => {delta, 3},
              fee => gen_fee(),
              nonce => case lists:keyfind(Oracle, #account.key, Accounts) of
-                          false -> 1;
-                          Account -> Account#account.nonce
+                          false -> {bad, 1};
+                          Account -> {good, Account#account.nonce}
                       end
             }]).
 
-response_oracle_pre(S, [Height, _QueryId, _Tx]) ->
-    correct_height(S, Height).
+response_oracle_pre(S, [Height, {_, _, Q}, Tx]) ->
+    correct_height(S, Height) andalso valid_nonce(S, Q, Tx).
 
 response_oracle_valid(S, [_Height, {_, _, Oracle} = QueryId, Tx]) ->
     is_account(S, Oracle)
@@ -356,8 +356,8 @@ response_oracle_valid(S, [_Height, {_, _, Oracle} = QueryId, Tx]) ->
     andalso valid_fee(Tx)
     andalso is_query(S, QueryId).
 
-response_oracle_adapt(#{height := Height}, [_, QueryId, Tx]) ->
-    [Height, QueryId, Tx];
+response_oracle_adapt(#{height := Height} = S, [_, QueryId = {_, _, Q}, Tx]) ->
+    [Height, QueryId, adapt_nonce(S, Q, Tx)];
 response_oracle_adapt(_, _) ->
     %% in case we don't even have a Height
     false.
@@ -401,9 +401,9 @@ channel_create_args(#{accounts := Accounts, height := Height}) ->
                   fee => gen_fee(),
                   nonce => gen_nonce(Initiator)}]).
 
-channel_create_pre(S, [Height, Initiator, Responder, _Tx]) ->
-    Initiator =/= Responder andalso
-    correct_height(S, Height).
+channel_create_pre(S, [Height, Initiator, Responder, Tx]) ->
+    Initiator =/= Responder
+    andalso correct_height(S, Height) andalso valid_nonce(S, Initiator, Tx).
 
 channel_create_valid(S, [_Height, Initiator, Responder, Tx]) ->
     is_account(S, Initiator)
@@ -415,8 +415,8 @@ channel_create_valid(S, [_Height, Initiator, Responder, Tx]) ->
     andalso maps:get(initiator_amount, Tx) >= maps:get(channel_reserve, Tx)
     andalso maps:get(responder_amount, Tx) >= maps:get(channel_reserve, Tx).
 
-channel_create_adapt(#{height := Height}, [_, Initiator, Responder, Tx]) ->
-    [Height, Initiator, Responder, Tx];
+channel_create_adapt(#{height := Height} = S, [_, Initiator, Responder, Tx]) ->
+    [Height, Initiator, Responder, adapt_nonce(S, Initiator, Tx)];
 channel_create_adapt(_, _) ->
     %% in case we don't even have a Height
     false.
@@ -466,8 +466,9 @@ channel_deposit_args(#{height := Height} = S) ->
                           responder ->  gen_nonce(lists:keyfind(Responder, #account.key, maps:get(accounts, S, [])))
                       end}]).
 
-channel_deposit_pre(S, [Height, _ChannelId, _Party, _Tx]) ->
-    correct_height(S, Height).
+channel_deposit_pre(S, [Height, {I, _, R}, Party, Tx]) ->
+    From = case Party of initiator -> I; responder -> R end,
+    correct_height(S, Height) andalso valid_nonce(S, From, Tx).
 
 channel_deposit_valid(S, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx]) ->
     From = case Party of initiator -> Initiator; responder -> Responder end,
@@ -479,8 +480,9 @@ channel_deposit_valid(S, [_Height, {Initiator, _, Responder} = ChannelId, Party,
     andalso valid_fee(Tx)
     andalso correct_round(S, ChannelId, Tx).
 
-channel_deposit_adapt(#{height := Height}, [_, ChannelId, Party, Tx]) ->
-    [Height, ChannelId, Party, Tx];
+channel_deposit_adapt(#{height := Height} = S, [_, ChannelId = {I, _, R}, Party, Tx]) ->
+    From = case Party of initiator -> I; responder -> R end,
+    [Height, ChannelId, Party, adapt_nonce(S, From, Tx)];
 channel_deposit_adapt(_, _) ->
     %% in case we don't even have a Height
     false.
@@ -535,8 +537,9 @@ channel_withdraw_args(#{height := Height} = S) ->
                           responder ->  gen_nonce(lists:keyfind(Responder, #account.key, maps:get(accounts, S, [])))
                       end}]).
 
-channel_withdraw_pre(S, [Height, _ChannelId, _Party, _Tx]) ->
-    correct_height(S, Height).
+channel_withdraw_pre(S, [Height, {I, _, R}, Party, Tx]) ->
+    From = case Party of initiator -> I; responder -> R end,
+    correct_height(S, Height) andalso valid_nonce(S, From, Tx).
 
 channel_withdraw_valid(S, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx]) ->
     From = case Party of initiator -> Initiator; responder -> Responder end,
@@ -549,8 +552,9 @@ channel_withdraw_valid(S, [_Height, {Initiator, _, Responder} = ChannelId, Party
     andalso correct_round(S, ChannelId, Tx)
     andalso (channel(S, ChannelId))#channel.amount >= maps:get(amount, Tx).
 
-channel_withdraw_adapt(#{height := Height} = S, [_, ChannelId, Party, Tx]) ->
-    [Height, ChannelId, Party, Tx, channel_withdraw_valid(S, [Height, ChannelId, Party, Tx])];
+channel_withdraw_adapt(#{height := Height} = S, [_, ChannelId = {I, _ ,R}, Party, Tx]) ->
+    From = case Party of initiator -> I; responder -> R end,
+    [Height, ChannelId, Party, adapt_nonce(S, From, Tx)];
 channel_withdraw_adapt(_, _) ->
     %% in case we don't even have a Height
     false.
@@ -596,11 +600,11 @@ ns_preclaim_args(#{accounts := Accounts, height := Height}) ->
                                aens_hash:commitment_hash(Name, Salt)),
              nonce =>gen_nonce(Sender)}]).
 
-ns_preclaim_pre(S, [Height, _Sender, {Name, Salt}, Tx]) ->
+ns_preclaim_pre(S, [Height, {_, Sender}, {Name, Salt}, Tx]) ->
     %% Let us not test the unlikely case that someone provides the same name with the same salt
     [present || #preclaim{name = N, salt = St} <- maps:get(preclaims, S, []), N == Name, St == Salt] == []
         andalso aec_id:create(commitment, aens_hash:commitment_hash(Name, Salt)) == maps:get(commitment_id, Tx)
-        andalso correct_height(S, Height).
+        andalso correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
 
 ns_preclaim_valid(S, [_Height, {_, Sender}, {_Name, _Salt}, Tx]) ->
     is_account(S, Sender)
@@ -608,8 +612,8 @@ ns_preclaim_valid(S, [_Height, {_, Sender}, {_Name, _Salt}, Tx]) ->
     andalso valid_fee(Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx)).
 
-ns_preclaim_adapt(#{height := Height}, [_Height, {SenderTag, Sender}, {Name, Salt}, Tx]) ->
-    [Height, {SenderTag, Sender}, {Name, Salt}, Tx];
+ns_preclaim_adapt(#{height := Height} = S, [_Height, {SenderTag, Sender}, {Name, Salt}, Tx]) ->
+    [Height, {SenderTag, Sender}, {Name, Salt}, adapt_nonce(S, Sender, Tx)];
 ns_preclaim_adapt(_, _) ->
     false.
 
@@ -654,8 +658,8 @@ ns_claim_args(#{accounts := Accounts, height := Height}) ->
              nonce => gen_nonce(Sender)}]).
 
 
-ns_claim_pre(S, [Height, _Sender, _Tx]) ->
-    correct_height(S, Height).
+ns_claim_pre(S, [Height, {_STag, Sender}, Tx]) ->
+    correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
 
 ns_claim_valid(S, [Height, {_, Sender}, Tx]) ->
     is_account(S, Sender)
@@ -682,11 +686,10 @@ valid_name(Tx) ->
         _ -> false
     end.
 
-ns_claim_adapt(#{height := Height}, [_Height, {SenderTag, Sender}, Tx]) ->
-    [Height, {SenderTag, Sender}, Tx];
+ns_claim_adapt(#{height := Height} = S, [_Height, {SenderTag, Sender}, Tx]) ->
+    [Height, {SenderTag, Sender}, adapt_nonce(S, Sender, Tx)];
 ns_claim_adapt(_, _) ->
     false.
-
 
 ns_claim(Height, _Sender, Tx) ->
     apply_transaction(Height, aens_claim_tx, Tx).
@@ -729,9 +732,9 @@ ns_update_args(#{accounts := Accounts, height := Height} = S) ->
                         [aens_pointer:new(<<"account_pubkey">>, aec_id:create(account, NameAccount#account.key))]
                         ])}]).
 
-ns_update_pre(S, [Height, Name, _Sender, _NameAccount, Tx]) ->
+ns_update_pre(S, [Height, Name, {_, Sender}, _NameAccount, Tx]) ->
     aec_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx)
-        andalso correct_height(S, Height).
+        andalso correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
 
 ns_update_valid(S, [Height, Name, {_, Sender}, _, Tx]) ->
     is_account(S, Sender)
@@ -741,8 +744,8 @@ ns_update_valid(S, [Height, Name, {_, Sender}, _, Tx]) ->
     andalso owns_name(S, Sender, Name)
     andalso is_valid_name(S, Name, Height).
 
-ns_update_adapt(#{height := Height}, [_Height, Name, {SenderTag, Sender}, NameAccount, Tx]) ->
-    [Height, Name, {SenderTag, Sender}, NameAccount, Tx];
+ns_update_adapt(#{height := Height} = S, [_Height, Name, {SenderTag, Sender}, NameAccount, Tx]) ->
+    [Height, Name, {SenderTag, Sender}, NameAccount, adapt_nonce(S, Sender, Tx)];
 ns_update_adapt(_, _) ->
     false.
 
@@ -784,9 +787,9 @@ ns_revoke_args(#{accounts := Accounts, height := Height} = S) ->
              nonce => gen_nonce(Sender)
             }]).
 
-ns_revoke_pre(S, [Height, _Sender, Name, Tx]) ->
+ns_revoke_pre(S, [Height, {_, Sender}, Name, Tx]) ->
     aec_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx)
-        andalso correct_height(S, Height).
+        andalso correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
 
 ns_revoke_valid(S, [_Height, {_SenderTag, Sender}, Name, Tx]) ->
     is_account(S, Sender)
@@ -795,8 +798,8 @@ ns_revoke_valid(S, [_Height, {_SenderTag, Sender}, Name, Tx]) ->
     andalso valid_fee(Tx)
     andalso owns_name(S, Sender, Name).
 
-ns_revoke_adapt(#{height := Height}, [_Height, {SenderTag, Sender}, Name, Tx]) ->
-    [Height, {SenderTag, Sender}, Name, Tx];
+ns_revoke_adapt(#{height := Height} = S, [_Height, {SenderTag, Sender}, Name, Tx]) ->
+    [Height, {SenderTag, Sender}, Name, adapt_nonce(S, Sender, Tx)];
 ns_revoke_adapt(_, _) ->
     false.
 
@@ -848,9 +851,9 @@ ns_transfer_args(#{accounts := Accounts, height := Height} = S) ->
                  nonce => gen_nonce(Sender)
                 }])).
 
-ns_transfer_pre(S, [Height, _Sender, _Receiver, Name, Tx]) ->
+ns_transfer_pre(S, [Height, {_, Sender}, _Receiver, Name, Tx]) ->
     aec_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx)
-        andalso correct_height(S, Height).
+        andalso correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
 
 ns_transfer_valid(S, [Height, {_SenderTag, Sender}, {ReceiverTag, Receiver}, Name, Tx]) ->
     is_account(S, Sender)
@@ -864,8 +867,8 @@ ns_transfer_valid(S, [Height, {_SenderTag, Sender}, {ReceiverTag, Receiver}, Nam
                name     -> is_valid_name(S, Receiver, Height)
             end.
 
-ns_transfer_adapt(#{height := Height}, [_Height, Sender, Receiver, Name, Tx]) ->
-    [Height, Sender, Receiver, Name, Tx];
+ns_transfer_adapt(#{height := Height} = S, [_Height, Sender, Receiver, Name, Tx]) ->
+    [Height, Sender, Receiver, Name, adapt_nonce(S, Sender, Tx)];
 ns_transfer_adapt(_, _) ->
     false.
 
@@ -1062,8 +1065,26 @@ is_query(#{queries := Qs}, Q) ->
 valid_fee(#{ fee := Fee }) ->
     Fee >= 20000.   %% not precise, but we don't generate fees in the shady range
 
-correct_nonce(S, Key, #{nonce := Nonce}) ->
+correct_nonce(S, Key, #{nonce := {_Tag, Nonce}}) ->
     (account(S, Key))#account.nonce == Nonce.
+
+valid_nonce(S, Key, #{nonce := {good, N}}) ->
+    case account(S, Key) of
+        #account{nonce = N} -> true;
+        _                   -> false
+    end;
+valid_nonce(_S, _Key, #{nonce := {bad, _N}}) ->
+    true. %% Bad nonces are always valid to test
+
+adapt_nonce(S, A, Tx = #{nonce := {good, _}}) ->
+    %% io:format("Adaptnonce ~p ~p\n", [maps:get(nonce, Tx),account(S, A)]),
+    case account(S, A) of
+        #account{nonce = N} -> Tx#{nonce := {good, N}};
+        _                   -> Tx
+    end;
+adapt_nonce(_S, _A, Tx) ->
+    Tx. %% Don't fix bad nonces...
+
 
 check_balance(S, Key, Amount) ->
      (account(S, Key))#account.amount >= Amount.
@@ -1128,9 +1149,10 @@ eq_rpc(Local, Remote, InterpretResult) ->
             InterpretResult(Local, Remote)
     end.
 
-apply_transaction(Height, TxMod, TxArgs) ->
+apply_transaction(Height, TxMod, TxArgs0) ->
     Env   = aetx_env:tx_env(Height),
     Trees = get(trees),
+    TxArgs = untag_nonce(TxArgs0),
     {ok, Tx} = rpc(TxMod, new, [TxArgs]),
 
     Remote = case rpc:call(?REMOTE_NODE, aetx, check, [Tx, Trees, Env], 1000) of
@@ -1145,6 +1167,9 @@ apply_transaction(Height, TxMod, TxArgs) ->
             ok;
         Other -> Other
     end.
+
+untag_nonce(M = #{nonce := {_Tag, N}}) -> M#{nonce := N};
+untag_nonce(M)                         -> M.
 
 valid_mismatch({'EXIT',{different, {error, account_nonce_too_low},
                         {error, insufficient_funds}}}) -> true;
@@ -1205,9 +1230,9 @@ unique_name(List) ->
          W).
 
 gen_nonce(false) ->
-    1;  %% account is not present
+    {bad, 1};  %% account is not present
 gen_nonce(#account{nonce = N}) ->
-    weighted_default({49, N}, {1, ?LET(X, elements([N-5, N-1, N+1, N+5]), abs(X))}).
+    weighted_default({49, {good, N}}, {1, ?LET(X, elements([N-5, N-1, N+1, N+5]), {bad, abs(X)})}).
 
 gen_spend_amount(#account{ amount = X }) when X == 0 ->
     choose(0, 10000000);
