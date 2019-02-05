@@ -189,39 +189,14 @@ spend(Height, _Sender, _Receiver, Tx) ->
     apply_transaction(Height, aec_spend_tx, Tx).
 
 
-spend_next(#{accounts := Accounts} = S, _Value,
-           [_Height, {_SenderTag, Sender}, {ReceiverTag, Receiver}, Tx] = Args) ->
-    Correct = spend_valid(S, Args),
-    if Correct ->
-            %% Classical mistake if sender and receiver are the same! Update carefully
-            SAccount = lists:keyfind(Sender, #account.key, Accounts),
-            RAccount =
-                case ReceiverTag of
-                    name ->
-                        RealReceiver = maps:get(Receiver, maps:get(named_accounts, S, #{})),
-                        case lists:keyfind(RealReceiver, #account.key, Accounts) of
-                            false -> #account{key = RealReceiver, amount = 0, nonce = 1};
-                            Acc -> Acc
-                        end;
-                    new -> #account{key = Receiver, amount = 0, nonce = 1};
-                    existing ->
-                        lists:keyfind(Receiver, #account.key, Accounts)
-                end,
-            case Sender == RAccount#account.key of
-                false ->
-                    S#{accounts =>
-                           (Accounts -- [RAccount, SAccount]) ++
-                           [SAccount#account{amount = SAccount#account.amount - maps:get(amount,Tx) - maps:get(fee, Tx),
-                                             nonce = maps:get(nonce, Tx) + 1},
-                            RAccount#account{amount = maps:get(amount,Tx) + RAccount#account.amount}]};  %% add to end of list
-                true ->
-                    S#{accounts =>
-                           (Accounts -- [SAccount]) ++
-                           [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx),
-                                             nonce = maps:get(nonce, Tx) + 1}]}
-            end;
-       not Correct ->
-            S
+spend_next(S, _Value, [_Height, {_SenderTag, Sender}, Receiver, Tx] = Args) ->
+    case spend_valid(S, Args) of
+        false -> S;
+        true  ->
+            #{ amount := Amount, fee := Fee } = Tx,
+            RKey = resolve_account(S, Receiver),
+            bump_and_charge(Sender, Amount + Fee,
+                credit(RKey, Amount, S))
     end.
 
 spend_features(S, [_Height, {_, Sender}, {Tag, Receiver}, Tx] = Args, Res) ->
@@ -271,18 +246,14 @@ register_oracle(Height, _Sender, Tx) ->
     apply_transaction(Height, aeo_register_tx, Tx).
 
 
-register_oracle_next(#{accounts := Accounts} = S, _Value, [_Height, {_, Sender}, Tx] = Args) ->
-    Correct = register_oracle_valid(S, Args),
-    if Correct ->
-            SAccount = lists:keyfind(Sender, #account.key, Accounts),
-            S#{accounts =>
-                   (Accounts -- [SAccount]) ++
-                   [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx),
-                                     nonce = maps:get(nonce, Tx) + 1}],
-               oracles =>
-                   maps:get(oracles, S, []) ++ [{Sender, maps:get(query_fee, Tx)}]};
-       not Correct ->
-            S
+register_oracle_next(S, _Value, [_Height, {_, Sender}, Tx] = Args) ->
+    case register_oracle_valid(S, Args) of
+        false -> S;
+        true  ->
+            #{ fee := Fee, query_fee := QFee } = Tx,
+            Oracle = {Sender, QFee},
+            bump_and_charge(Sender, Fee,
+                add(oracles, Oracle, S))
     end.
 
 register_oracle_features(S, [_Height, {_, _Sender}, Tx] = Args, Res) ->
@@ -330,23 +301,17 @@ query_oracle_adapt(_, _) ->
 query_oracle(Height, _Sender, _Oracle, Tx) ->
     apply_transaction(Height, aeo_query_tx, Tx).
 
-query_oracle_next(#{accounts := Accounts} = S, _Value, [Height, {_, Sender}, Oracle, Tx] = Args) ->
-    Correct = query_oracle_valid(S, Args),
-    if Correct ->
-            {delta, Delta} = maps:get(response_ttl, Tx),
-            SAccount = lists:keyfind(Sender, #account.key, Accounts),
-            S#{accounts =>
-                   (Accounts -- [SAccount]) ++
-                   [SAccount#account{
-                      amount = SAccount#account.amount - maps:get(fee, Tx) - maps:get(query_fee, Tx),
-                      nonce = maps:get(nonce, Tx) + 1}],
-              queries => maps:get(queries, S, []) ++
-                   [#query{sender = Sender,
-                           id = {Sender, maps:get(nonce, Tx), Oracle},
+query_oracle_next(S, _Value, [Height, {_, Sender}, Oracle, Tx] = Args) ->
+    case query_oracle_valid(S, Args) of
+        false -> S;
+        true  ->
+            #{ response_ttl := {delta, Delta}, fee := Fee, query_fee := QFee } = Tx,
+            Query = #query{sender       = Sender,
+                           id           = {Sender, maps:get(nonce, Tx), Oracle},
                            response_ttl = Delta + Height,
-                           fee = maps:get(query_fee, Tx)}]};
-       not Correct ->
-            S
+                           fee          = maps:get(query_fee, Tx)},
+            bump_and_charge(Sender, Fee + QFee,
+                add(queries, Query, S))
     end.
 
 query_oracle_features(S, [_Height, _, _, Tx] = Args, Res) ->
@@ -398,22 +363,15 @@ response_oracle_adapt(_, _) ->
 response_oracle(Height, _QueryId, Tx) ->
     apply_transaction(Height, aeo_response_tx, Tx).
 
-response_oracle_next(#{accounts := Accounts} = S, _Value, [_Height, QueryId, Tx] = Args) ->
-    Correct = response_oracle_valid(S, Args),
-    if Correct ->
+response_oracle_next(S, _Value, [_Height, QueryId, Tx] = Args) ->
+    case response_oracle_valid(S, Args) of
+        false -> S;
+        true  ->
+            #{ fee := Fee } = Tx,
             {_, _, Oracle} = QueryId,
-            OracleAccount = lists:keyfind(Oracle, #account.key, Accounts),
-            Query = lists:keyfind(QueryId, #query.id, maps:get(queries, S, [])),
-            QueryFee = Query#query.fee,
-
-            S#{accounts =>
-                   (Accounts -- [OracleAccount]) ++
-                   [OracleAccount#account{
-                      amount = OracleAccount#account.amount - maps:get(fee, Tx) + QueryFee,
-                      nonce = maps:get(nonce, Tx) + 1}],
-              queries => maps:get(queries, S, []) -- [Query]};
-       not Correct ->
-            S
+            #query{ fee = QueryFee } = get_query(S, QueryId),
+            bump_and_charge(Oracle, Fee - QueryFee,
+                remove_query(QueryId, S))
     end.
 
 response_oracle_features(S, [_Height, _, _Tx] = Args, Res) ->
@@ -464,28 +422,21 @@ channel_create_adapt(_, _) ->
 channel_create(Height, _Initiator, _Responder, Tx) ->
     apply_transaction(Height, aesc_create_tx, Tx).
 
-channel_create_next(#{accounts := Accounts} = S, _Value, [_Height, Initiator, Responder, Tx] = Args) ->
-    Correct = channel_create_valid(S, Args),
-    if Correct ->
-            IAccount = lists:keyfind(Initiator, #account.key, Accounts),
-            RAccount = lists:keyfind(Responder, #account.key, Accounts),
-            S#{accounts =>
-                   (Accounts -- [IAccount, RAccount]) ++
-                   [IAccount#account{amount =
-                                         IAccount#account.amount -
-                                         maps:get(fee, Tx) -
-                                         maps:get(initiator_amount, Tx),
-                                     nonce = maps:get(nonce, Tx) + 1},
-                   RAccount#account{amount =
-                                        RAccount#account.amount -
-                                        maps:get(responder_amount, Tx)}],
-               channels =>
-                   maps:get(channels, S, []) ++ [#channel{id = {Initiator, maps:get(nonce, Tx), Responder},
-                                                          amount = maps:get(initiator_amount, Tx) +
-                                                              maps:get(responder_amount, Tx),
-                                                          reserve = maps:get(channel_reserve, Tx)}]};
-       not Correct ->
-            S
+channel_create_next(S, _Value, [_Height, Initiator, Responder, Tx] = Args) ->
+    case channel_create_valid(S, Args) of
+        false -> S;
+        true  ->
+            #{ fee              := Fee,
+               nonce            := Nonce,
+               initiator_amount := IAmount,
+               responder_amount := RAmount,
+               channel_reserve  := Reserve } = Tx,
+            Channel = #channel{ id = {Initiator, Nonce, Responder},
+                                amount = IAmount + RAmount,
+                                reserve = Reserve },
+            bump_and_charge(Initiator, Fee + IAmount,
+                charge(Responder, RAmount,
+                add(channels, Channel, S)))
     end.
 
 %% --- Operation: channel_deposit ---
@@ -535,33 +486,19 @@ channel_deposit_adapt(_, _) ->
 channel_deposit(Height, _Channeld, _Party, Tx) ->
     apply_transaction(Height, aesc_deposit_tx, Tx).
 
-channel_deposit_next(#{accounts := Accounts} = S, _Value, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx] = Args) ->
-    Correct = channel_deposit_valid(S, Args),
-    if Correct ->
-            case {lists:keyfind(Initiator, #account.key, maps:get(accounts, S, [])),
-                  lists:keyfind(Responder, #account.key, maps:get(accounts, S, []))} of
-                {false, _} -> false;
-                {_, false} -> false;
-                {IAccount, RAccount} ->
-                    FromAccount = case Party of
-                                      initiator -> IAccount;
-                                      responder -> RAccount
-                                  end,
-                    Channels = maps:get(channels, S),
-                    Channel = lists:keyfind(ChannelId, #channel.id, Channels),
-                    S#{accounts =>
-                           (Accounts -- [FromAccount]) ++
-                           [FromAccount#account{amount =
-                                                    FromAccount#account.amount -
-                                                    maps:get(fee, Tx) -
-                                                    maps:get(amount, Tx),
-                                                nonce = maps:get(nonce, Tx) + 1}],
-                       channels =>
-                           (Channels -- [Channel]) ++ [Channel#channel{round = maps:get(round, Tx),
-                                                                       amount = Channel#channel.amount + maps:get(amount, Tx)}]}
-            end;
-       not Correct ->
-            S
+channel_deposit_next(S, _Value, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx] = Args) ->
+    case channel_deposit_valid(S, Args) of
+        false -> S;
+        true  ->
+            From = case Party of
+                     initiator -> Initiator;
+                     responder -> Responder
+                   end,
+            #{ fee    := Fee,
+               amount := Amount,
+               round  := Round } = Tx,
+            bump_and_charge(From, Fee + Amount,
+                credit_channel(ChannelId, Round, Amount, S))
     end.
 
 channel_deposit_features(S, [_Height, _Channeld, _Party, _Tx] = Args, Res) ->
@@ -619,33 +556,19 @@ channel_withdraw_adapt(_, _) ->
 channel_withdraw(Height, _Channeld, _Party, Tx) ->
     apply_transaction(Height, aesc_withdraw_tx, Tx).
 
-channel_withdraw_next(#{accounts := Accounts} = S, _Value, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx] = Args) ->
-    Correct = channel_withdraw_valid(S, Args),
-    if Correct ->
-            case {lists:keyfind(Initiator, #account.key, maps:get(accounts, S, [])),
-                  lists:keyfind(Responder, #account.key, maps:get(accounts, S, []))} of
-                {false, _} -> false;
-                {_, false} -> false;
-                {IAccount, RAccount} ->
-                    FromAccount = case Party of
-                                      initiator -> IAccount;
-                                      responder -> RAccount
-                                  end,
-                    Channels = maps:get(channels, S),
-                    Channel = lists:keyfind(ChannelId, #channel.id, Channels),
-                    S#{accounts =>
-                           (Accounts -- [FromAccount]) ++
-                           [FromAccount#account{amount =
-                                                    FromAccount#account.amount -
-                                                    maps:get(fee, Tx) +
-                                                    maps:get(amount, Tx),
-                                                nonce = maps:get(nonce, Tx) + 1}],
-                       channels =>
-                           (Channels -- [Channel]) ++ [Channel#channel{round = maps:get(round, Tx),
-                                                                       amount = Channel#channel.amount - maps:get(amount, Tx)}]}
-            end;
-       not Correct ->
-            S
+channel_withdraw_next(S, _Value, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx] = Args) ->
+    case channel_withdraw_valid(S, Args) of
+        false -> S;
+        true  ->
+            From = case Party of
+                     initiator -> Initiator;
+                     responder -> Responder
+                   end,
+            #{ fee    := Fee,
+               amount := Amount,
+               round  := Round } = Tx,
+            bump_and_charge(From, Fee - Amount,
+                credit_channel(ChannelId, Round, -Amount, S))
     end.
 
 channel_withdraw_features(S, [_Height, _Channeld, _Party, _Tx] = Args, Res) ->
@@ -690,24 +613,17 @@ ns_preclaim_adapt(_, _) ->
 ns_preclaim(Height, _Sender, {_Name,_Salt}, Tx) ->
     apply_transaction(Height, aens_preclaim_tx, Tx).
 
-ns_preclaim_next(#{height := Height,
-                     accounts := Accounts,
-                     preclaims := Preclaims} = S,
-                   _Value, [_Height, {_, Sender}, {Name, Salt}, Tx] = Args) ->
-    Correct = ns_preclaim_valid(S, Args),
-    if Correct ->
-            SAccount = lists:keyfind(Sender, #account.key, Accounts),
-            S#{accounts =>
-                   (Accounts -- [SAccount]) ++
-                   [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx),
-                                     nonce = maps:get(nonce, Tx) + 1}],
-               preclaims =>
-                   Preclaims ++ [#preclaim{name = Name,
-                                           salt = Salt,
-                                           height = Height,
-                                           claimer = Sender}]};
-       not Correct ->
-            S
+ns_preclaim_next(#{height := Height} = S, _, [_Height, {_, Sender}, {Name, Salt}, Tx] = Args) ->
+    case ns_preclaim_valid(S, Args) of
+        false -> S;
+        true  ->
+            #{ fee := Fee } = Tx,
+            Preclaim = #preclaim{name    = Name,
+                                 salt    = Salt,
+                                 height  = Height,
+                                 claimer = Sender},
+            bump_and_charge(Sender, Fee,
+                add(preclaims, Preclaim, S))
     end.
 
 ns_preclaim_features(#{claims := Claims} = S,
@@ -772,26 +688,17 @@ ns_claim_adapt(_, _) ->
 ns_claim(Height, _Sender, Tx) ->
     apply_transaction(Height, aens_claim_tx, Tx).
 
-ns_claim_next(#{height := Height,
-             accounts := Accounts,
-             claims := Claims} = S,
-           _Value, [_Height, {_, Sender}, Tx] = Args) ->
-    Correct = ns_claim_valid(S, Args),
-    if Correct ->
-            SAccount = lists:keyfind(Sender, #account.key, Accounts),
-            S#{accounts =>
-                   (Accounts -- [SAccount]) ++
-                   [SAccount#account{amount = SAccount#account.amount -
-                                         maps:get(fee, Tx) -
-                                         aec_governance:name_claim_locked_fee(),
-                                     nonce = maps:get(nonce, Tx) + 1}],
-              claims =>
-                   Claims ++ [#claim{name = maps:get(name, Tx),
-                                     height = Height,
-                                     valid_height = -1,
-                                     claimer = Sender}]};
-       not Correct ->
-            S
+ns_claim_next(#{height := Height} = S, _, [_Height, {_, Sender}, Tx] = Args) ->
+    case ns_claim_valid(S, Args) of
+        false -> S;
+        true  ->
+            #{ fee := Fee, name := Name } = Tx,
+            Claim = #claim{ name         = Name,
+                            height       = Height,
+                            valid_height = -1,
+                            claimer      = Sender },
+            bump_and_charge(Sender, Fee + aec_governance:name_claim_locked_fee(),
+                add(claims, Claim, S))
     end.
 
 ns_claim_features(S, [_Height, {_, _Sender}, _Tx] = Args, Res) ->
@@ -839,32 +746,18 @@ ns_update_adapt(_, _) ->
 ns_update(Height, _Name, _Sender, _NameAccount, Tx) ->
     apply_transaction(Height, aens_update_tx, Tx).
 
-ns_update_next(#{accounts := Accounts} = S, _Value, [Height, Name, {_, Sender}, {_, NameAccount}, Tx] = Args) ->
-    Correct = ns_update_valid(S, Args),
-    if Correct ->
-            SAccount = lists:keyfind(Sender, #account.key, Accounts),
-            Claims = maps:get(claims, S, []),
-            Claim = lists:keyfind(Name, #claim.name, Claims),
-            S#{accounts =>
-                   (Accounts -- [SAccount]) ++
-                   [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx),
-                                     nonce = maps:get(nonce, Tx) + 1,
-                                     names_owned = (SAccount#account.names_owned -- [Name]) ++ [Name]
-                                    }],
-               named_accounts =>
-                   %% bit of a drity hack, but only zero or 1 pointer
-                   case maps:get(pointers, Tx) of
-                       [] -> maps:remove(Name, maps:get(named_accounts, S, #{}));
-                       _ -> maps:merge(maps:get(named_accounts, S, #{}), #{Name => NameAccount})
-                   end,
-               claims =>
-                   (Claims -- [Claim]) ++
-                   [Claim#claim{update_height = Height,
-                                valid_height = max(Claim#claim.valid_height,
-                                                   Height + maps:get(name_ttl, Tx))}]
-              };
-       not Correct ->
-            S
+ns_update_next(S, _, [Height, Name, {_, Sender}, {_, NameAccount}, Tx] = Args) ->
+    case ns_update_valid(S, Args) of
+        false -> S;
+        true  ->
+            #{ fee := Fee, pointers := Pointers, name_ttl := TTL } = Tx,
+            S1 = case Pointers of
+                    [] -> remove_named_account(Name, S);
+                    _  -> add_named_account(Name, NameAccount, S)
+                 end,
+            bump_and_charge(Sender, Fee,
+                grant_name(Sender, Name,
+                update_claim_height(Name, Height, TTL, S1)))
     end.
 
 ns_update_features(S, [_Height, _Name, _Sender, {Tag, _NameAccount}, _Tx] = Args, Res) ->
@@ -907,28 +800,15 @@ ns_revoke_adapt(_, _) ->
 ns_revoke(Height, _Sender, _Name, Tx) ->
     apply_transaction(Height, aens_revoke_tx, Tx).
 
-ns_revoke_next(#{accounts := Accounts} = S, _Value, [Height, {_SenderTag, Sender}, Name, Tx] = Args) ->
-    Correct = ns_revoke_valid(S, Args),
-    if Correct ->
-            SAccount = lists:keyfind(Sender, #account.key, Accounts),
-            Claims = maps:get(claims, S, []),
-            Claim = lists:keyfind(Name, #claim.name, Claims),
-            S#{accounts =>
-                   (Accounts -- [SAccount]) ++
-                   [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx),
-                                     nonce = maps:get(nonce, Tx) + 1,
-                                     names_owned = (SAccount#account.names_owned -- [Name])
-                                    }],
-               named_accounts =>
-                   maps:remove(Name, maps:get(named_accounts, S, #{})),
-               claims =>
-                   (Claims -- [ Claim || Claim#claim.revoke_height == undefined ]) ++
-                   [ Claim#claim{valid_height = -1,
-                                revoke_height = aec_governance:name_protection_period() + Height}
-                     || Claim#claim.revoke_height == undefined ]
-              };
-       not Correct ->
-            S
+ns_revoke_next(S, _Value, [Height, {_SenderTag, Sender}, Name, Tx] = Args) ->
+    case ns_revoke_valid(S, Args) of
+        false -> S;
+        true  ->
+            #{ fee := Fee } = Tx,
+            bump_and_charge(Sender, Fee,
+                ungrant_name(Sender, Name,
+                remove_named_account(Name,
+                revoke_claim(Name, Height, S))))
     end.
 
 ns_revoke_features(S, [_Height, _Sender, _Name, _Tx] = Args, Res) ->
@@ -991,54 +871,16 @@ ns_transfer(Height, _Sender, _Receiver, _Name, Tx) ->
 
 %% Assumption the recipient does not need to exist, it is created when we provided
 %% it with a name
-ns_transfer_next(#{accounts := Accounts} = S, _Value,
-                 [_Height, {_SenderTag, Sender}, {ReceiverTag, Receiver}, Name, Tx] = Args) ->
-    Correct = ns_transfer_valid(S, Args),
-    ReceiverKey =
-         case ReceiverTag of
-             name ->
-                 maps:get(Receiver, maps:get(named_accounts, S, #{}), Sender);
-                 %% a hack, but if the Receievr name does not point to an account, then
-                 %% we only need to increment the nonce and reduce amount of the sender
-             _ -> Receiver
-         end,
-    if Correct ->
-            SAccount = lists:keyfind(Sender, #account.key, Accounts),
-            RAccount =
-                case ReceiverTag of
-                    name ->
-                       case lists:keyfind(ReceiverKey, #account.key, Accounts) of
-                           false -> #account{key = ReceiverKey, amount = 0, nonce = 1};
-                           Acc -> Acc
-                       end;
-                    new -> #account{key = Receiver, amount = 0, nonce = 1};
-                    existing ->
-                        lists:keyfind(Receiver, #account.key, Accounts)
-                end,
-            case Sender == ReceiverKey of
-                true ->
-                    S#{accounts =>
-                           (Accounts -- [SAccount]) ++
-                           [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx),
-                                             nonce = maps:get(nonce, Tx) + 1
-                                            }]};
-                false ->
-                    S#{accounts =>
-                           (Accounts -- [SAccount, RAccount]) ++
-                               [SAccount#account{amount = SAccount#account.amount - maps:get(fee, Tx),
-                                                 nonce = maps:get(nonce, Tx) + 1,
-                                                 names_owned = SAccount#account.names_owned -- [Name]
-                                                },
-                                RAccount#account{names_owned =
-                                                     (RAccount#account.names_owned -- [Name]) ++ [Name]}],
-                       named_accounts =>
-                           %% Should this point to the name (and if that name changes go to new account)
-                           %% or the resolved key???
-                           maps:put(Name, Receiver, maps:get(named_accounts, S, #{}))
-                      }
-            end;
-       not Correct ->
-            S
+ns_transfer_next(S, _, [_Height, {_SenderTag, Sender}, Receiver, Name, Tx] = Args) ->
+    case ns_transfer_valid(S, Args) of
+        false -> S;
+        true  ->
+            #{ fee := Fee } = Tx,
+            ReceiverKey = resolve_account(S, Receiver),
+            bump_and_charge(Sender, Fee,
+                ungrant_name(Sender, Name,
+                grant_name(ReceiverKey, Name,
+                credit(ReceiverKey, 0, S))))   %% to create it if it doesn't exist
     end.
 
 ns_transfer_features(S, [_Height, _Sender, _Receiver, _Name, _Tx] = Args, Res) ->
@@ -1087,9 +929,100 @@ bugs(N) -> bugs(N, []).
 bugs(Time, Bugs) ->
     more_bugs(eqc:testing_time(Time, prop_tx_primops()), 20, Bugs).
 
+%% -- State update and query functions ---------------------------------------
 
+lookup_name(S, Name) ->
+    maps:get(Name, maps:get(named_accounts, S, #{})).
+
+get_account(S, {name, Name}) ->
+    lookup_name(S, Name);
+get_account(_, {new, Acc}) ->
+    #account{ key = Acc, amount = 0, nonce = 1 };
+get_account(#{ accounts := Accounts }, {existing, Acc}) ->
+    lists:keyfind(Acc, #account.key, Accounts).
+
+resolve_account(S, {name, Name})    -> (lookup_name(S, Name))#account.key;
+resolve_account(_, {new, Key})      -> Key;
+resolve_account(_, {existing, Key}) -> Key.
+
+on_account(Key, Fun, S = #{accounts := Accounts}) ->
+    Upd = fun(Acc = #account{ key = Key1 }) when Key1 == Key -> Fun(Acc);
+             (Acc) -> Acc end,
+    S#{ accounts => lists:map(Upd, Accounts) }.
+
+credit(Key, Amount, S = #{ accounts := Accounts }) ->
+    case is_account(S, Key) of
+        true ->
+            on_account(Key, fun(Acc) -> Acc#account{ amount = Acc#account.amount + Amount } end, S);
+        false ->
+            S#{ accounts => Accounts ++ [#account{ key = Key, amount = Amount, nonce = 1 }] }
+    end.
+
+charge(Key, Amount, S) -> credit(Key, -Amount, S).
+
+bump_nonce(Key, S) ->
+    on_account(Key, fun(Acc) -> Acc#account{ nonce = Acc#account.nonce + 1 } end, S).
+
+bump_and_charge(Key, Fee, S) ->
+    bump_nonce(Key, charge(Key, Fee, S)).
+
+add(Tag, X, S) ->
+    S#{ Tag => maps:get(Tag, S, []) ++ [X] }.
+
+remove(Tag, X, I, S) ->
+    S#{ Tag := lists:keydelete(X, I, maps:get(Tag, S)) }.
+
+remove_query(Id, S) ->
+    remove(queries, Id, #query.id, S).
+
+get(S, Tag, Key, I) ->
+    lists:keyfind(Key, I, maps:get(Tag, S)).
+
+get_query(S, Id) ->
+    get(S, queries, Id, #query.id).
+
+on_channel(Id, Fun, S = #{ channels := Channels }) ->
+    Upd = fun(C = #channel{ id = I }) when I == Id -> Fun(C);
+             (C) -> C end,
+    S#{ channels => lists:map(Upd, Channels) }.
+
+credit_channel(Id, Round, Amount, S) ->
+    on_channel(Id, fun(C) -> C#channel{ amount = C#channel.amount + Amount,
+                                        round = Round }
+                   end, S).
+
+grant_name(Key, Name, S) ->
+    on_account(Key, fun(Acc) -> Acc#account{ names_owned = lists:umerge([Name], Acc#account.names_owned) }
+                    end, S).
+
+ungrant_name(Key, Name, S) ->
+    on_account(Key, fun(Acc) -> Acc#account{ names_owned = lists:delete(Name, Acc#account.names_owned) }
+                    end, S).
+
+on_claim(Name, Fun, S = #{ claims := Claims }) ->
+    Upd = fun(C = #claim{ name = N }) when Name == N -> Fun(C);
+             (C) -> C end,
+    S#{ claims := lists:map(Upd, Claims) }.
+
+update_claim_height(Name, Height, TTL, S) ->
+    on_claim(Name, fun(C) -> C#claim{ update_height = Height,
+                                      valid_height  = max(C#claim.valid_height, Height + TTL) }
+                   end, S).
+
+revoke_claim(Name, Height, S) ->
+    on_claim(Name, fun(C) when C#claim.revoke_height == undefined ->
+                        C#claim{ valid_height = -1,
+                                 revoke_height = aec_governance:name_protection_period() + Height };
+                      (C) -> C end, S).
+
+remove_named_account(Name, S) ->
+    S#{ named_accounts => maps:remove(Name, maps:get(named_accounts, S, #{})) }.
+
+add_named_account(Name, Acc, S) ->
+    S#{ named_accounts => maps:merge(maps:get(named_accounts, S, #{}), #{ Name => Acc }) }.
 
 %% --- local helpers ------
+
 is_valid_name(#{claims := Names}, Name, Height) ->
     case lists:keyfind(Name, #claim.name, Names) of
         false -> false;
