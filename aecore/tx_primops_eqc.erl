@@ -215,13 +215,13 @@ spend_features(S, [_Height, {_, _Sender}, {_Tag, _Receiver}, _Tx] = Args, Res) -
 register_oracle_pre(S) ->
     length(maps:get(accounts, S, [])) > 1.
 
-register_oracle_args(#{accounts := Accounts, height := Height}) ->
-     ?LET({SenderTag, Sender}, gen_account_pubkey(lists:keydelete(?Patron, #account.key, Accounts)),
+register_oracle_args(S = #{height := Height}) ->
+     ?LET({SenderTag, Sender}, gen_new_oracle_account(S),
           [Height, {SenderTag, Sender#account.key},
                 #{account_id => aec_id:create(account, Sender#account.key),
                   query_format    => <<"send me any string"/utf8>>,
                   response_format => <<"boolean()"/utf8>>,
-                  query_fee       => nat(),
+                  query_fee       => gen_query_fee(),
                   fee => gen_fee(),
                   nonce => gen_nonce(Sender),
                   oracle_ttl => {delta, 100}}]).
@@ -258,27 +258,33 @@ register_oracle_next(S, _Value, [_Height, {_, Sender}, Tx] = Args) ->
 
 register_oracle_features(S, [_Height, {_, _Sender}, _Tx] = Args, Res) ->
     Correct = register_oracle_valid(S, Args),
-    [{correct, if Correct -> register_oracle; true -> false end} ] ++
-        [{register_oracle, Res} || is_tuple(Res) andalso element(1, Res) == error].
+    [{correct, if Correct -> register_oracle; true -> false end},
+     {register_oracle, Res}].
 
 
 %% --- Operation: query_oracle ---
 query_oracle_pre(S) ->
      maps:is_key(accounts, S).
 
-query_oracle_args(#{accounts := Accounts, height := Height}) ->
-     ?LET([{SenderTag, Sender}, {_, Oracle}],
-          vector(2, gen_account_pubkey(Accounts)),
-               [Height, {SenderTag, Sender#account.key}, Oracle#account.key,
-                #{sender_id => aec_id:create(account, Sender#account.key),
-                  oracle_id => aec_id:create(oracle, Oracle#account.key),
-                  query => oneof([<<"{foo: bar}"/utf8>>, <<"any string"/utf8>>, <<>>]),
-                  query_fee => nat(),
-                  query_ttl => {delta, 3},
-                  response_ttl => {delta, 3},
-                  fee => gen_fee(),
-                  nonce => gen_nonce(Sender)
-                 }]).
+query_oracle_args(S = #{accounts := Accounts, height := Height}) ->
+     ?LET({{SenderTag, Sender}, {_, Oracle}},
+          {gen_account(1, 49, Accounts), gen_oracle_account(S)},
+          begin
+              QFee = case oracle(S, Oracle#account.key) of
+                       false -> 100;
+                       {_, QFee0} -> QFee0
+                     end,
+              [Height, {SenderTag, Sender#account.key}, Oracle#account.key,
+               #{sender_id => aec_id:create(account, Sender#account.key),
+                 oracle_id => aec_id:create(oracle, Oracle#account.key),
+                 query => oneof([<<"{foo: bar}"/utf8>>, <<"any string"/utf8>>, <<>>]),
+                 query_fee => gen_query_fee(QFee),
+                 query_ttl => {delta, 3},
+                 response_ttl => {delta, 3},
+                 fee => gen_fee(),
+                 nonce => gen_nonce(Sender)
+                }]
+          end).
 
 query_oracle_pre(S, [Height, _Sender, _Oracle, _Tx]) ->
     correct_height(S, Height).
@@ -313,12 +319,10 @@ query_oracle_next(S, _Value, [Height, {_, Sender}, Oracle, Tx] = Args) ->
                 add(queries, Query, S))
     end.
 
-query_oracle_features(S, [_Height, _, _, Tx] = Args, Res) ->
+query_oracle_features(S, [_Height, _, _, _Tx] = Args, Res) ->
     Correct = query_oracle_valid(S, Args),
-    [{correct, if Correct -> query_oracle; true -> false end} ] ++
-             [ {query_oracle, query_fee_zero} || maps:get(query_fee, Tx) == 0 andalso Correct] ++
-             [ {query_oracle, zero_fee} ||  maps:get(fee, Tx) == 0 ] ++
-        [{query_oracle, Res} || is_tuple(Res) andalso element(1, Res) == error].
+    [{correct, if Correct -> query_oracle; true -> false end},
+     {query_oracle, Res}].
 
 %% --- Operation: response_oracle ---
 response_oracle_pre(S) ->
@@ -375,8 +379,8 @@ response_oracle_next(S, _Value, [_Height, QueryId, Tx] = Args) ->
 
 response_oracle_features(S, [_Height, _, _Tx] = Args, Res) ->
     Correct = response_oracle_valid(S, Args),
-    [{correct, if Correct -> response_oracle; true -> false end} ] ++
-        [{response_oracle, Res} || is_tuple(Res) andalso element(1, Res) == error].
+    [{correct, if Correct -> response_oracle; true -> false end},
+     {response_oracle, Res}].
 
 %% --- Operation: channel_create ---
 channel_create_pre(S) ->
@@ -1045,6 +1049,9 @@ is_account(#{accounts := Accounts}, Key) ->
 is_oracle(#{oracles := Oracles}, Oracle) ->
     lists:keymember(Oracle, 1, Oracles).
 
+oracle(#{oracles := Oracles}, Oracle) ->
+    lists:keyfind(Oracle, 1, Oracles).
+
 oracle_query_fee(#{oracles := Oracles}, Oracle) ->
     {_, QFee} = lists:keyfind(Oracle, 1, Oracles),
     QFee.
@@ -1076,6 +1083,11 @@ correct_round(S, CId, #{round := Round}) ->
 is_claimed(#{claims := Cs}, Name) ->
     lists:keymember(Name, #claim.name, Cs).
 
+non_oracle_accounts(#{accounts := As, oracles := Os}) ->
+    [ A || A = #account{ key = K } <- As, not lists:keymember(K, 1, Os) ].
+
+good_preclaims(#{ preclaims := Ps, height := H}) ->
+    [ P || P = #preclaim{ height = H0 } <- Ps, H0 < H ].
 
 correct_height(#{height := Height0}, Height1) ->
     Height0 == Height1.
@@ -1166,6 +1178,22 @@ gen_account(New, Exist, Accounts) ->
 
 gen_account() ->  #account{key = noshrink(binary(32)), amount = 0, nonce = 0 }.
 
+gen_oracle_account(#{accounts := As, oracles := []}) ->
+    gen_account(1, 1, As);
+gen_oracle_account(#{accounts := As, oracles := Os}) ->
+    weighted_default(
+        {39, ?LET({O, _}, elements(Os), {existing, lists:keyfind(O, #account.key, As)})},
+        {1,  gen_account(9, 1, As)}).
+
+
+gen_new_oracle_account(S = #{accounts := As}) ->
+    case non_oracle_accounts(S) of
+        [] -> gen_account(1, 1, As); %% We can't get a good one, fail evenly
+        GoodAs ->
+            weighted_default({29, {existing, elements(GoodAs)}},
+                             {1,  gen_account(1, 9, As)})
+    end.
+
 gen_account_pubkey(Accounts) ->
     oneof([?LAZY({existing, elements(Accounts)}),
            ?LAZY({new, gen_account()})]).
@@ -1199,3 +1227,10 @@ gen_fee() ->
     weighted_default({29, choose(20000, 50000)},
                      {1,  choose(0, 15000)}).    %% too low
 
+gen_query_fee() ->
+    choose(10, 1000).
+
+gen_query_fee(QF) ->
+    weighted_default({29, QF}, {1, elements([QF - 10, QF - 1, QF + 1, QF + 10, QF + 100])}).
+
+gen_salt() -> choose(270, 280).
