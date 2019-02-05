@@ -199,7 +199,7 @@ spend_next(S, _Value, [_Height, {_SenderTag, Sender}, Receiver, Tx] = Args) ->
                 credit(RKey, Amount, S))
     end.
 
-spend_features(S, [_Height, {_, Sender}, {Tag, Receiver}, Tx] = Args, Res) ->
+spend_features(S, [_Height, {_, _Sender}, {_Tag, _Receiver}, _Tx] = Args, Res) ->
     Correct = spend_valid(S, Args),
     [%{spend, {accounts, length(maps:get(accounts, S))}},
      {correct,  if Correct -> spend; true -> false end}] ++
@@ -256,10 +256,9 @@ register_oracle_next(S, _Value, [_Height, {_, Sender}, Tx] = Args) ->
                 add(oracles, Oracle, S))
     end.
 
-register_oracle_features(S, [_Height, {_, _Sender}, Tx] = Args, Res) ->
+register_oracle_features(S, [_Height, {_, _Sender}, _Tx] = Args, Res) ->
     Correct = register_oracle_valid(S, Args),
     [{correct, if Correct -> register_oracle; true -> false end} ] ++
-        [ {oracle_query_fee, zero} || maps:get(query_fee, Tx) == 0 andalso Correct] ++
         [{register_oracle, Res} || is_tuple(Res) andalso element(1, Res) == error].
 
 
@@ -317,7 +316,7 @@ query_oracle_next(S, _Value, [Height, {_, Sender}, Oracle, Tx] = Args) ->
 query_oracle_features(S, [_Height, _, _, Tx] = Args, Res) ->
     Correct = query_oracle_valid(S, Args),
     [{correct, if Correct -> query_oracle; true -> false end} ] ++
-             [ {query_query_fee, zero} || maps:get(query_fee, Tx) == 0 andalso Correct] ++
+             [ {query_oracle, query_fee_zero} || maps:get(query_fee, Tx) == 0 andalso Correct] ++
              [ {query_oracle, zero_fee} ||  maps:get(fee, Tx) == 0 ] ++
         [{query_oracle, Res} || is_tuple(Res) andalso element(1, Res) == error].
 
