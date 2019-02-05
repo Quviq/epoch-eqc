@@ -64,8 +64,8 @@ valid_common(response_oracle, S, Args)  -> response_oracle_valid(S, Args);
 valid_common(channel_create, S, Args)   -> channel_create_valid(S, Args);
 valid_common(channel_deposit, S, Args)  -> channel_deposit_valid(S, Args);
 valid_common(channel_withdraw, S, Args) -> channel_withdraw_valid(S, Args);
-valid_common(name_preclaim, S, Args)    -> name_preclaim_valid(S, Args);
-valid_common(claim, S, Args)            -> claim_valid(S, Args);
+valid_common(ns_preclaim, S, Args)      -> ns_preclaim_valid(S, Args);
+valid_common(ns_claim, S, Args)         -> ns_claim_valid(S, Args);
 valid_common(ns_update, S, Args)        -> ns_update_valid(S, Args);
 valid_common(ns_revoke, S, Args)        -> ns_revoke_valid(S, Args);
 valid_common(ns_transfer, S, Args)      -> ns_transfer_valid(S, Args).
@@ -226,12 +226,12 @@ spend_next(#{accounts := Accounts} = S, _Value,
 
 spend_features(S, [_Height, {_, Sender}, {Tag, Receiver}, Tx] = Args, Res) ->
     Correct = spend_valid(S, Args),
-    [{spend_accounts, length(maps:get(accounts, S))},
+    [{spend, {accounts, length(maps:get(accounts, S))}},
      {correct,  if Correct -> spend; true -> false end}] ++
-        [ spend_to_self || Sender == Receiver andalso Correct] ++
+        [ {spend, to_self} || Sender == Receiver andalso Correct] ++
              [ {spend, zero} || maps:get(amount, Tx) == 0 andalso Correct] ++
              [ {spend, zero_fee} ||  maps:get(fee, Tx) == 0 ] ++
-        [ {spend_to_name, Receiver} || Tag == name ] ++
+        [ {spend, to_name} || Tag == name ] ++
         [ {spend, Res} || is_tuple(Res) andalso element(1, Res) == error].
 
 
@@ -653,12 +653,12 @@ channel_withdraw_features(S, [_Height, _Channeld, _Party, _Tx] = Args, Res) ->
     [{channel_withdraw, Res} || is_tuple(Res) andalso element(1, Res) == error].
 
 
-%% --- Operation: name_preclaim ---
+%% --- Operation: ns_preclaim ---
 
-name_preclaim_pre(S) ->
+ns_preclaim_pre(S) ->
     maps:is_key(accounts, S).
 
-name_preclaim_args(#{accounts := Accounts, height := Height}) ->
+ns_preclaim_args(#{accounts := Accounts, height := Height}) ->
      ?LET([{SenderTag, Sender}, Name, Salt],
           [gen_account_pubkey(Accounts), gen_name(), choose(270,280)],
           [Height, {SenderTag, Sender#account.key}, {Name, Salt},
@@ -669,31 +669,31 @@ name_preclaim_args(#{accounts := Accounts, height := Height}) ->
                                aens_hash:commitment_hash(Name, Salt)),
              nonce =>gen_nonce(Sender)}]).
 
-name_preclaim_pre(S, [Height, _Sender, {Name, Salt}, Tx]) ->
+ns_preclaim_pre(S, [Height, _Sender, {Name, Salt}, Tx]) ->
     %% Let us not test the unlikely case that someone provides the same name with the same salt
     [present || #preclaim{name = N, salt = St} <- maps:get(preclaims, S, []), N == Name, St == Salt] == []
         andalso aec_id:create(commitment, aens_hash:commitment_hash(Name, Salt)) == maps:get(commitment_id, Tx)
         andalso correct_height(S, Height).
 
-name_preclaim_valid(S, [_Height, {_, Sender}, {_Name, _Salt}, Tx]) ->
+ns_preclaim_valid(S, [_Height, {_, Sender}, {_Name, _Salt}, Tx]) ->
     is_account(S, Sender)
     andalso correct_nonce(S, Sender, Tx)
     andalso valid_fee(Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx)).
 
-name_preclaim_adapt(#{height := Height}, [_Height, {SenderTag, Sender}, {Name, Salt}, Tx]) ->
+ns_preclaim_adapt(#{height := Height}, [_Height, {SenderTag, Sender}, {Name, Salt}, Tx]) ->
     [Height, {SenderTag, Sender}, {Name, Salt}, Tx];
-name_preclaim_adapt(_, _) ->
+ns_preclaim_adapt(_, _) ->
     false.
 
-name_preclaim(Height, _Sender, {_Name,_Salt}, Tx) ->
+ns_preclaim(Height, _Sender, {_Name,_Salt}, Tx) ->
     apply_transaction(Height, aens_preclaim_tx, Tx).
 
-name_preclaim_next(#{height := Height,
+ns_preclaim_next(#{height := Height,
                      accounts := Accounts,
                      preclaims := Preclaims} = S,
                    _Value, [_Height, {_, Sender}, {Name, Salt}, Tx] = Args) ->
-    Correct = name_preclaim_valid(S, Args),
+    Correct = ns_preclaim_valid(S, Args),
     if Correct ->
             SAccount = lists:keyfind(Sender, #account.key, Accounts),
             S#{accounts =>
@@ -709,21 +709,21 @@ name_preclaim_next(#{height := Height,
             S
     end.
 
-name_preclaim_features(#{claims := Claims} = S,
+ns_preclaim_features(#{claims := Claims} = S,
                        [_Height, {_, _Sender}, {Name,_Salt}, _Tx] = Args, Res) ->
-    Correct = name_preclaim_valid(S, Args),
-    [ {correct, if Correct -> name_preclaim; true -> false end} ] ++
-    [ {name_preclaim, Res} || is_tuple(Res) andalso element(1, Res) == error] ++
-        [{reclaim_name, Res} || lists:keymember(Name, #claim.name, Claims)].
+    Correct = ns_preclaim_valid(S, Args),
+    [ {correct, if Correct -> ns_preclaim; true -> false end} ] ++
+    [ {ns_preclaim, Res} || is_tuple(Res) andalso element(1, Res) == error] ++
+    [ {ns_preclaim, {reclaim_name, Res}} || lists:keymember(Name, #claim.name, Claims) ].
 
 
 %% --- Operation: claim ---
-claim_pre(S) ->
+ns_claim_pre(S) ->
     maps:is_key(accounts, S).
 
-%% @doc claim_args - Argument generator
--spec claim_args(S :: eqc_statem:symbolic_state()) -> eqc_gen:gen([term()]).
-claim_args(#{accounts := Accounts, height := Height}) ->
+%% @doc ns_claim_args - Argument generator
+-spec ns_claim_args(S :: eqc_statem:symbolic_state()) -> eqc_gen:gen([term()]).
+ns_claim_args(#{accounts := Accounts, height := Height}) ->
      ?LET([Name, {SenderTag, Sender}],
           [gen_name(), gen_account_pubkey(Accounts)],
           [Height, {SenderTag, Sender#account.key},
@@ -734,10 +734,10 @@ claim_args(#{accounts := Accounts, height := Height}) ->
              nonce => gen_nonce(Sender)}]).
 
 
-claim_pre(S, [Height, _Sender, _Tx]) ->
+ns_claim_pre(S, [Height, _Sender, _Tx]) ->
     correct_height(S, Height).
 
-claim_valid(S, [Height, {_, Sender}, Tx]) ->
+ns_claim_valid(S, [Height, {_, Sender}, Tx]) ->
     is_account(S, Sender)
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx) + aec_governance:name_claim_locked_fee())
@@ -762,20 +762,20 @@ valid_name(Tx) ->
         _ -> false
     end.
 
-claim_adapt(#{height := Height}, [_Height, {SenderTag, Sender}, Tx]) ->
+ns_claim_adapt(#{height := Height}, [_Height, {SenderTag, Sender}, Tx]) ->
     [Height, {SenderTag, Sender}, Tx];
-claim_adapt(_, _) ->
+ns_claim_adapt(_, _) ->
     false.
 
 
-claim(Height, _Sender, Tx) ->
+ns_claim(Height, _Sender, Tx) ->
     apply_transaction(Height, aens_claim_tx, Tx).
 
-claim_next(#{height := Height,
+ns_claim_next(#{height := Height,
              accounts := Accounts,
              claims := Claims} = S,
            _Value, [_Height, {_, Sender}, Tx] = Args) ->
-    Correct = claim_valid(S, Args),
+    Correct = ns_claim_valid(S, Args),
     if Correct ->
             SAccount = lists:keyfind(Sender, #account.key, Accounts),
             S#{accounts =>
@@ -793,8 +793,8 @@ claim_next(#{height := Height,
             S
     end.
 
-claim_features(S, [_Height, {_, _Sender}, _Tx] = Args, Res) ->
-    Correct = claim_valid(S, Args),
+ns_claim_features(S, [_Height, {_, _Sender}, _Tx] = Args, Res) ->
+    Correct = ns_claim_valid(S, Args),
     [{correct, if Correct -> ns_claim; true -> false end} ] ++
         [{ns_claim, Res} || is_tuple(Res) andalso element(1, Res) == error].
 
@@ -1066,10 +1066,18 @@ prop_tx_primops() ->
             measure(length, commands_length(Cmds),
             measure(height, Height,
             features(call_features(H),
-            aggregate(call_features(H),
+            aggregate_feats([atoms, correct | all_command_names()], call_features(H),
                 pretty_commands(?MODULE, Cmds, {H, S, Res},
                                 Res == ok))))))
     end))).
+
+aggregate_feats([], [], Prop) -> Prop;
+aggregate_feats([atoms | Kinds], Features, Prop) ->
+    {Atoms, Rest} = lists:partition(fun is_atom/1, Features),
+    aggregate(with_title(atoms), Atoms, aggregate_feats(Kinds, Rest, Prop));
+aggregate_feats([Tag | Kinds], Features, Prop) ->
+    {Tuples, Rest} = lists:partition(fun(X) -> is_tuple(X) andalso element(1, X) == Tag end, Features),
+    aggregate(with_title(Tag), [ Arg || {_, Arg} <- Tuples ], aggregate_feats(Kinds, Rest, Prop)).
 
 bugs() -> bugs(10).
 
@@ -1186,7 +1194,7 @@ apply_transaction(Height, TxMod, TxArgs) ->
             end,
     Local = rpc:call(node(), aetx, process, [Tx, Trees, Env], 1000),
 
-    case eq_rpc(Local, Remote) of
+    case catch eq_rpc(Local, Remote) of
         {ok, NewTrees} ->
             put(trees, NewTrees),
             ok;
