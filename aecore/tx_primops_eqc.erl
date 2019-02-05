@@ -176,7 +176,7 @@ spend_valid(S, [Height, {_, Sender}, {ReceiverTag, Receiver}, Tx]) ->
     andalso case ReceiverTag of
                new      -> true;
                existing -> is_account(S, Receiver);
-               name     -> is_valid_name(S, Receiver, Height)
+               name     -> is_valid_name_account(S, Receiver, Height)
                            andalso correct_name_id(Receiver, maps:get(recipient_id, Tx))
             end.
 
@@ -591,7 +591,7 @@ ns_preclaim_pre(S) ->
 
 ns_preclaim_args(#{accounts := Accounts, height := Height}) ->
      ?LET([{SenderTag, Sender}, Name, Salt],
-          [gen_account_pubkey(Accounts), gen_name(), choose(270,280)],
+          [gen_account(1, 49, Accounts), gen_name(), gen_salt()],
           [Height, {SenderTag, Sender#account.key}, {Name, Salt},
            #{account_id => aec_id:create(account, Sender#account.key),
              fee => gen_fee(),
@@ -633,27 +633,24 @@ ns_preclaim_next(#{height := Height} = S, _, [_Height, {_, Sender}, {Name, Salt}
                 add(preclaims, Preclaim, S))
     end.
 
-ns_preclaim_features(#{claims := Claims} = S,
-                       [_Height, {_, _Sender}, {Name,_Salt}, _Tx] = Args, Res) ->
+ns_preclaim_features(S, [_Height, {_, _Sender}, {_Name,_Salt}, _Tx] = Args, Res) ->
     Correct = ns_preclaim_valid(S, Args),
-    [ {correct, if Correct -> ns_preclaim; true -> false end} ] ++
-    [ {ns_preclaim, Res} || is_tuple(Res) andalso element(1, Res) == error] ++
-    [ {ns_preclaim, {reclaim_name, Res}} || lists:keymember(Name, #claim.name, Claims) ].
+    [{correct, if Correct -> ns_preclaim; true -> false end},
+     {ns_preclaim, Res} ].
 
 
 %% --- Operation: claim ---
 ns_claim_pre(S) ->
-    maps:is_key(accounts, S).
+    maps:is_key(accounts, S) andalso maps:get(preclaims, S, []) /= [].
 
 %% @doc ns_claim_args - Argument generator
 -spec ns_claim_args(S :: eqc_statem:symbolic_state()) -> eqc_gen:gen([term()]).
-ns_claim_args(#{accounts := Accounts, height := Height}) ->
-     ?LET([Name, {SenderTag, Sender}],
-          [gen_name(), gen_account_pubkey(Accounts)],
+ns_claim_args(S = #{height := Height}) ->
+     ?LET({Name, Salt, {SenderTag, Sender}}, gen_preclaim(S),
           [Height, {SenderTag, Sender#account.key},
            #{account_id => aec_id:create(account, Sender#account.key),
              name => Name,
-             name_salt => choose(270,280),
+             name_salt => Salt,
              fee => gen_fee(),
              nonce => gen_nonce(Sender)}]).
 
@@ -701,25 +698,25 @@ ns_claim_next(#{height := Height} = S, _, [_Height, {_, Sender}, Tx] = Args) ->
             #{ fee := Fee, name := Name } = Tx,
             Claim = #claim{ name         = Name,
                             height       = Height,
-                            valid_height = -1,
+                            valid_height = Height + aec_governance:name_claim_max_expiration(),
                             claimer      = Sender },
+            remove_preclaim(Tx,
             bump_and_charge(Sender, Fee + aec_governance:name_claim_locked_fee(),
-                add(claims, Claim, S))
+                add(claims, Claim, S)))
     end.
 
 ns_claim_features(S, [_Height, {_, _Sender}, _Tx] = Args, Res) ->
     Correct = ns_claim_valid(S, Args),
-    [{correct, if Correct -> ns_claim; true -> false end} ] ++
-        [{ns_claim, Res} || is_tuple(Res) andalso element(1, Res) == error].
-
+    [{correct, if Correct -> ns_claim; true -> false end},
+     {ns_claim, Res}].
 
 %% --- Operation: claim_update ---
 ns_update_pre(S) ->
     maps:is_key(accounts, S).
 
 ns_update_args(#{accounts := Accounts, height := Height} = S) ->
-     ?LET([Name, {SenderTag, Sender}, {Tag, NameAccount}],
-          [gen_name(S), gen_account_pubkey(Accounts), gen_account_pubkey(Accounts)],
+     ?LET({{Name, {SenderTag, Sender}}, {Tag, NameAccount}},
+          {gen_name_claim(S), gen_account(1, 5, Accounts)},
           [Height, Name, {SenderTag, Sender#account.key}, {Tag, NameAccount#account.key},
            #{account_id => aec_id:create(account, Sender#account.key),
              name_id => aec_id:create(name, aens_hash:name_hash(Name)),
@@ -728,9 +725,13 @@ ns_update_args(#{accounts := Accounts, height := Height} = S) ->
              fee => gen_fee(),
              nonce => gen_nonce(Sender),
              pointers =>
-                 oneof([[],
-                        [aens_pointer:new(<<"account_pubkey">>, aec_id:create(account, NameAccount#account.key))]
-                        ])}]).
+                 gen_pointers(aec_id:create(account, NameAccount#account.key))
+            }]).
+
+gen_pointers(Id) ->
+    weighted_default(
+        {3, [aens_pointer:new(<<"account_pubkey">>, Id)]},
+        {1, []}).
 
 ns_update_pre(S, [Height, Name, {_, Sender}, _NameAccount, Tx]) ->
     aec_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx)
@@ -766,20 +767,17 @@ ns_update_next(S, _, [Height, Name, {_, Sender}, {_, NameAccount}, Tx] = Args) -
                 update_claim_height(Name, Height, TTL, S1)))
     end.
 
-ns_update_features(S, [_Height, _Name, _Sender, {Tag, _NameAccount}, _Tx] = Args, Res) ->
+ns_update_features(S, [_Height, _Name, _Sender, {_Tag, _NameAccount}, _Tx] = Args, Res) ->
     Correct = ns_update_valid(S, Args),
-    [{correct, if Correct -> ns_update; true -> false end} ] ++
-        [{ns_update, Tag} ] ++
-        [{ns_update, Res} || is_tuple(Res) andalso element(1, Res) == error].
-
+    [{correct, if Correct -> ns_update; true -> false end},
+     {ns_update, Res}].
 
 %% --- Operation: ns_revoke ---
 ns_revoke_pre(S) ->
     maps:is_key(accounts, S).
 
-ns_revoke_args(#{accounts := Accounts, height := Height} = S) ->
-     ?LET([Name, {SenderTag, Sender}],
-          [gen_name(S), gen_account_pubkey(Accounts)],
+ns_revoke_args(#{height := Height} = S) ->
+     ?LET({Name, {SenderTag, Sender}}, gen_name_claim(S),
           [Height, {SenderTag, Sender#account.key}, Name,
            #{account_id => aec_id:create(account, Sender#account.key),
              name_id => aec_id:create(name, aens_hash:name_hash(Name)),
@@ -791,12 +789,13 @@ ns_revoke_pre(S, [Height, {_, Sender}, Name, Tx]) ->
     aec_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx)
         andalso correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
 
-ns_revoke_valid(S, [_Height, {_SenderTag, Sender}, Name, Tx]) ->
+ns_revoke_valid(S, [Height, {_SenderTag, Sender}, Name, Tx]) ->
     is_account(S, Sender)
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx))
     andalso valid_fee(Tx)
-    andalso owns_name(S, Sender, Name).
+    andalso owns_name(S, Sender, Name)
+    andalso is_valid_name(S, Name, Height).
 
 ns_revoke_adapt(#{height := Height} = S, [_Height, {SenderTag, Sender}, Name, Tx]) ->
     [Height, {SenderTag, Sender}, Name, adapt_nonce(S, Sender, Tx)];
@@ -819,8 +818,8 @@ ns_revoke_next(S, _Value, [Height, {_SenderTag, Sender}, Name, Tx] = Args) ->
 
 ns_revoke_features(S, [_Height, _Sender, _Name, _Tx] = Args, Res) ->
     Correct = ns_revoke_valid(S, Args),
-    [{correct, if Correct -> ns_revoke; true -> false end} ] ++
-        [{ns_revoke, Res} || is_tuple(Res) andalso element(1, Res) == error].
+    [{correct, if Correct -> ns_revoke; true -> false end},
+     {ns_revoke, Res}].
 
 
 %% --- Operation: ns_transfer ---
@@ -828,11 +827,9 @@ ns_transfer_pre(S) ->
     maps:is_key(accounts, S).
 
 ns_transfer_args(#{accounts := Accounts, height := Height} = S) ->
-    ?LET([{SenderTag, Sender}, {ReceiverTag, Receiver}],
-         vector(2, gen_account_pubkey(Accounts)),
-         ?LET([Name, To], [gen_name(S),
-                           oneof([account, {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++
-                                                               [<<"ta.test">>])}])],
+    ?LET({{Name, {SenderTag, Sender}}, {ReceiverTag, Receiver}},
+         {gen_name_claim(S), gen_account(1, 49, Accounts)},
+         ?LET(To, oneof([account, {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++ [<<"ta.test">>])}]),
               [Height, {SenderTag, Sender#account.key},
                case To of
                    account -> {ReceiverTag, Receiver#account.key};
@@ -861,14 +858,15 @@ ns_transfer_valid(S, [Height, {_SenderTag, Sender}, {ReceiverTag, Receiver}, Nam
     andalso check_balance(S, Sender, maps:get(fee, Tx))
     andalso valid_fee(Tx)
     andalso owns_name(S, Sender, Name)
+    andalso is_valid_name(S, Name, Height)
     andalso case ReceiverTag of
                new      -> true;
                existing -> is_account(S, Receiver);
-               name     -> is_valid_name(S, Receiver, Height)
+               name     -> is_valid_name_account(S, Receiver, Height)
             end.
 
-ns_transfer_adapt(#{height := Height} = S, [_Height, Sender, Receiver, Name, Tx]) ->
-    [Height, Sender, Receiver, Name, adapt_nonce(S, Sender, Tx)];
+ns_transfer_adapt(#{height := Height} = S, [_Height, {STag, Sender}, Receiver, Name, Tx]) ->
+    [Height, {STag, Sender}, Receiver, Name, adapt_nonce(S, Sender, Tx)];
 ns_transfer_adapt(_, _) ->
     false.
 
@@ -891,8 +889,8 @@ ns_transfer_next(S, _, [_Height, {_SenderTag, Sender}, Receiver, Name, Tx] = Arg
 
 ns_transfer_features(S, [_Height, _Sender, _Receiver, _Name, _Tx] = Args, Res) ->
     Correct = ns_transfer_valid(S, Args),
-    [{correct, if Correct -> ns_transfer; true -> false end} ] ++
-        [{ns_transfer, Res} || is_tuple(Res) andalso element(1, Res) == error].
+    [{correct, if Correct -> ns_transfer; true -> false end},
+     {ns_transfer, Res}].
 
 
 
@@ -947,7 +945,7 @@ get_account(_, {new, Acc}) ->
 get_account(#{ accounts := Accounts }, {existing, Acc}) ->
     lists:keyfind(Acc, #account.key, Accounts).
 
-resolve_account(S, {name, Name})    -> (lookup_name(S, Name))#account.key;
+resolve_account(S, {name, Name})    -> lookup_name(S, Name);
 resolve_account(_, {new, Key})      -> Key;
 resolve_account(_, {existing, Key}) -> Key.
 
@@ -981,6 +979,10 @@ remove(Tag, X, I, S) ->
 remove_query(Id, S) ->
     remove(queries, Id, #query.id, S).
 
+remove_preclaim(#{name := Na, name_salt := Sa}, S = #{preclaims := Ps}) ->
+    S#{preclaims := [ P || P = #preclaim{name = Na0, salt = Sa0} <- Ps,
+                           Na0 /= Na orelse Sa0 /= Sa ]}.
+
 get(S, Tag, Key, I) ->
     lists:keyfind(Key, I, maps:get(Tag, S)).
 
@@ -1012,7 +1014,8 @@ on_claim(Name, Fun, S = #{ claims := Claims }) ->
 
 update_claim_height(Name, Height, TTL, S) ->
     on_claim(Name, fun(C) -> C#claim{ update_height = Height,
-                                      valid_height  = max(C#claim.valid_height, Height + TTL) }
+                                      %% valid_height  = max(C#claim.valid_height, Height + TTL) }
+                                      valid_height  = Height + TTL }
                    end, S).
 
 revoke_claim(Name, Height, S) ->
@@ -1034,6 +1037,14 @@ is_valid_name(#{claims := Names}, Name, Height) ->
         false -> false;
         Claim -> Claim#claim.revoke_height == undefined
                  andalso Claim#claim.valid_height >= Height
+    end.
+
+is_valid_name_account(#{claims := Names} = S, Name, Height) ->
+    case lists:keyfind(Name, #claim.name, Names) of
+        false -> false;
+        Claim -> Claim#claim.revoke_height == undefined
+                 andalso Claim#claim.valid_height >= Height
+                 andalso maps:is_key(Name, maps:get(named_accounts, S, #{}))
     end.
 
 owns_name(#{claims := Names}, Who, Name) ->
@@ -1222,6 +1233,29 @@ gen_new_oracle_account(S = #{accounts := As}) ->
 gen_account_pubkey(Accounts) ->
     oneof([?LAZY({existing, elements(Accounts)}),
            ?LAZY({new, gen_account()})]).
+
+gen_preclaim(#{preclaims := [], accounts := As}) ->
+    {gen_name(), gen_salt(), gen_account(1, 1, As)};
+gen_preclaim(#{preclaims := Ps, accounts := As}) ->
+    weighted_default(
+        {39, ?LET(#preclaim{name = N, salt = S, claimer = C}, elements(Ps),
+                  begin
+                    A = {existing, lists:keyfind(C, #account.key, As)},
+                    frequency([{1, {N, S+1, A}}, {1, {gen_name(), S, A}}, {37, {N, S, A}}])
+                  end)},
+        {1, {gen_name(), gen_salt(), gen_account(1, 1, As)}}).
+
+gen_name_claim(#{claims := [], accounts := As}) ->
+    {gen_name(), gen_account(1, 1, As)};
+gen_name_claim(#{claims := Cs, accounts := As}) ->
+    weighted_default(
+        {39, ?LET(#claim{name = N, claimer = C}, elements(Cs),
+                  begin
+                    A = {existing, lists:keyfind(C, #account.key, As)},
+                    frequency([{1, {gen_name(), A}}, {38, {N, A}}])
+                  end)},
+        {1, {gen_name(), gen_account(1, 1, As)}}).
+
 
 unique_name(List) ->
     ?LET([W],
