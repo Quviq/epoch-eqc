@@ -182,27 +182,7 @@ spend_adapt(_, _) ->
 
 
 spend(Height, _Sender, _Receiver, Tx, _Correct) ->
-    Trees = get(trees),
-    {ok, AeTx} = rpc(aec_spend_tx, new, [Tx]),
-    {_, SpendTx} = aetx:specialize_type(AeTx),
-
-    Env = aetx_env:tx_env(Height),
-    %% old version
-    Remote =
-        case rpc:call(?REMOTE_NODE, aec_spend_tx, check, [SpendTx, Trees, Env], 1000) of
-            {ok, Ts} ->
-                rpc:call(?REMOTE_NODE, aec_spend_tx, process, [SpendTx, Ts, Env], 1000);
-            OldError ->
-                OldError
-        end,
-
-    Local = rpc:call(node(), aec_spend_tx, process, [SpendTx, Trees, Env], 1000),
-    case catch eq_rpc(Local, Remote, fun hash_equal/2) of
-        {ok, NewTrees} ->
-            put(trees, NewTrees),
-            ok;
-        Other -> Other
-    end.
+    apply_transaction(Height, aec_spend_tx, Tx).
 
 
 spend_next(#{accounts := Accounts} = S, _Value,
@@ -293,27 +273,7 @@ register_oracle_adapt(_, _) ->
     false.
 
 register_oracle(Height, _Sender, Tx, _Correct) ->
-    Trees = get(trees),
-    {ok, AeTx} = rpc(aeo_register_tx, new, [Tx]),
-    {oracle_register_tx, OracleTx} = aetx:specialize_type(AeTx),
-
-    Env = aetx_env:tx_env(Height),
-    %% old version
-    Remote =
-        case rpc:call(?REMOTE_NODE,aeo_register_tx, check, [OracleTx, Trees, Env], 1000) of
-            {ok, Ts} ->
-                rpc:call(?REMOTE_NODE, aeo_register_tx, process, [OracleTx, Ts, Env], 1000);
-            OldError ->
-                OldError
-        end,
-
-    Local = rpc:call(node(), aeo_register_tx, process, [OracleTx, Trees, Env], 1000),
-    case catch eq_rpc(Local, Remote, fun hash_equal/2) of
-        {ok, NewTrees} ->
-            put(trees, NewTrees),
-            ok;
-        Other -> Other
-    end.
+    apply_transaction(Height, aeo_register_tx, Tx).
 
 
 register_oracle_next(#{accounts := Accounts} = S, _Value, [_Height, {_, Sender}, Tx, Correct]) ->
@@ -384,27 +344,7 @@ query_oracle_adapt(_, _) ->
 
 
 query_oracle(Height, _Sender, _Oracle, Tx, _Correct) ->
-    Trees = get(trees),
-    {ok, AeTx} = rpc(aeo_query_tx, new, [Tx]),
-    {oracle_query_tx, OracleTx} = aetx:specialize_type(AeTx),
-
-    Env = aetx_env:tx_env(Height),
-    %% old version
-    Remote =
-        case rpc:call(?REMOTE_NODE,aeo_query_tx, check, [OracleTx, Trees, Env], 1000) of
-            {ok, Ts} ->
-                rpc:call(?REMOTE_NODE, aeo_query_tx, process, [OracleTx, Ts, Env], 1000);
-            OldError ->
-                OldError
-        end,
-
-    Local = rpc:call(node(), aeo_query_tx, process, [OracleTx, Trees, Env], 1000),
-    case catch eq_rpc(Local, Remote, fun hash_equal/2) of
-        {ok, NewTrees} ->
-            put(trees, NewTrees),
-            ok;
-        Other -> Other
-    end.
+    apply_transaction(Height, aeo_query_tx, Tx).
 
 query_oracle_next(#{accounts := Accounts} = S, _Value, [Height, {_, Sender}, Oracle, Tx, Correct]) ->
     if Correct ->
@@ -482,27 +422,7 @@ response_oracle_adapt(_, _) ->
 
 
 response_oracle(Height, _QueryId, Tx, _Correct) ->
-    Trees = get(trees),
-    {ok, AeTx} = rpc(aeo_response_tx, new, [Tx]),
-    {oracle_response_tx, OracleTx} = aetx:specialize_type(AeTx),
-
-    Env = aetx_env:tx_env(Height),
-    %% old version
-    Remote =
-        case rpc:call(?REMOTE_NODE,aeo_response_tx, check, [OracleTx, Trees, Env], 1000) of
-            {ok, Ts} ->
-                rpc:call(?REMOTE_NODE, aeo_response_tx, process, [OracleTx, Ts, Env], 1000);
-            OldError ->
-                OldError
-        end,
-
-    Local = rpc:call(node(), aeo_response_tx, process, [OracleTx, Trees, Env], 1000),
-    case catch eq_rpc(Local, Remote, fun hash_equal/2) of
-        {ok, NewTrees} ->
-            put(trees, NewTrees),
-            ok;
-        Other -> Other
-    end.
+    apply_transaction(Height, aeo_response_tx, Tx).
 
 response_oracle_next(#{accounts := Accounts} = S, _Value, [_Height, QueryId, Tx, Correct]) ->
     if Correct ->
@@ -579,27 +499,7 @@ channel_create_adapt(_, _) ->
 
 
 channel_create(Height, _Initiator, _Responder, Tx, _Correct) ->
-    Trees = get(trees),
-    {ok, AeTx} = rpc(aesc_create_tx, new, [Tx]),
-    {channel_create_tx, ChannelTx} = aetx:specialize_type(AeTx),
-
-    Env = aetx_env:tx_env(Height),
-    %% old version
-    Remote =
-        case rpc:call(?REMOTE_NODE,aesc_create_tx, check, [ChannelTx, Trees, Env], 1000) of
-            {ok, Ts} ->
-                rpc:call(?REMOTE_NODE, aesc_create_tx, process, [ChannelTx, Ts, Env], 1000);
-            OldError ->
-                OldError
-        end,
-
-    Local = rpc:call(node(), aesc_create_tx, process, [ChannelTx, Trees, Env], 1000),
-    case catch eq_rpc(Local, Remote, fun hash_equal/2) of
-        {ok, NewTrees} ->
-            put(trees, NewTrees),
-            ok;
-        Other -> Other
-    end.
+    apply_transaction(Height, aesc_create_tx, Tx).
 
 channel_create_next(#{accounts := Accounts} = S, _Value, [_Height, Initiator, Responder, Tx, Correct]) ->
     if Correct ->
@@ -688,27 +588,7 @@ channel_deposit_adapt(_, _) ->
 
 
 channel_deposit(Height, _Channeld, _Party, Tx, _Correct) ->
-    Trees = get(trees),
-    {ok, AeTx} = rpc(aesc_deposit_tx, new, [Tx]),
-    {channel_deposit_tx, ChannelTx} = aetx:specialize_type(AeTx),
-
-    Env = aetx_env:tx_env(Height),
-    %% old version
-    Remote =
-        case rpc:call(?REMOTE_NODE,aesc_deposit_tx, check, [ChannelTx, Trees, Env], 1000) of
-            {ok, Ts} ->
-                rpc:call(?REMOTE_NODE, aesc_deposit_tx, process, [ChannelTx, Ts, Env], 1000);
-            OldError ->
-                OldError
-        end,
-
-    Local = rpc:call(node(), aesc_deposit_tx, process, [ChannelTx, Trees, Env], 1000),
-    case catch eq_rpc(Local, Remote, fun hash_equal/2) of
-        {ok, NewTrees} ->
-            put(trees, NewTrees),
-            ok;
-        Other -> Other
-    end.
+    apply_transaction(Height, aesc_deposit_tx, Tx).
 
 channel_deposit_next(#{accounts := Accounts} = S, _Value, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx, Correct]) ->
     if Correct ->
@@ -808,27 +688,7 @@ channel_withdraw_adapt(_, _) ->
 
 
 channel_withdraw(Height, _Channeld, _Party, Tx, _Correct) ->
-    Trees = get(trees),
-    {ok, AeTx} = rpc(aesc_withdraw_tx, new, [Tx]),
-    {channel_withdraw_tx, ChannelTx} = aetx:specialize_type(AeTx),
-
-    Env = aetx_env:tx_env(Height),
-    %% old version
-    Remote =
-        case rpc:call(?REMOTE_NODE,aesc_withdraw_tx, check, [ChannelTx, Trees, Env], 1000) of
-            {ok, Ts} ->
-                rpc:call(?REMOTE_NODE, aesc_withdraw_tx, process, [ChannelTx, Ts, Env], 1000);
-            OldError ->
-                OldError
-        end,
-
-    Local = rpc:call(node(), aesc_withdraw_tx, process, [ChannelTx, Trees, Env], 1000),
-    case catch eq_rpc(Local, Remote, fun hash_equal/2) of
-        {ok, NewTrees} ->
-            put(trees, NewTrees),
-            ok;
-        Other -> Other
-    end.
+    apply_transaction(Height, aesc_withdraw_tx, Tx).
 
 channel_withdraw_next(#{accounts := Accounts} = S, _Value, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx, Correct]) ->
     if Correct ->
@@ -910,27 +770,7 @@ name_preclaim_adapt(_, _) ->
     false.
 
 name_preclaim(Height, _Sender, {_Name,_Salt}, Tx, _Correct) ->
-    Trees = get(trees),
-    {ok, NTx} = rpc(aens_preclaim_tx, new, [Tx]),
-    {_, NameTx} = aetx:specialize_type(NTx),
-
-    Env = aetx_env:tx_env(Height),
-    %% old version
-    Remote =
-        case rpc:call(?REMOTE_NODE, aens_preclaim_tx, check, [NameTx, Trees, Env], 1000) of
-            {ok, Ts} ->
-                rpc:call(?REMOTE_NODE, aens_preclaim_tx, process, [NameTx, Ts, Env], 1000);
-            OldError ->
-                OldError
-        end,
-
-    Local = rpc:call(node(), aens_preclaim_tx, process, [NameTx, Trees, Env], 1000),
-    case catch eq_rpc(Local, Remote, fun hash_equal/2) of
-        {ok, NewTrees} ->
-            put(trees, NewTrees),
-            ok;
-        Other -> Other
-    end.
+    apply_transaction(Height, aens_preclaim_tx, Tx).
 
 name_preclaim_next(#{height := Height,
                      accounts := Accounts,
@@ -1027,27 +867,7 @@ claim_adapt(_, _) ->
 
 
 claim(Height, _Sender, Tx,_Correct) ->
-    Trees = get(trees),
-    {ok, NTx} = rpc(aens_claim_tx, new, [Tx]),
-    {_, NameTx} = aetx:specialize_type(NTx),
-
-    Env = aetx_env:tx_env(Height),
-    %% old version
-    Remote =
-        case rpc:call(?REMOTE_NODE, aens_claim_tx, check, [NameTx, Trees, Env], 1000) of
-            {ok, Ts} ->
-                rpc:call(?REMOTE_NODE, aens_claim_tx, process, [NameTx, Ts, Env], 1000);
-            OldError ->
-                OldError
-        end,
-
-    Local = rpc:call(node(), aens_claim_tx, process, [NameTx, Trees, Env], 1000),
-    case catch eq_rpc(Local, Remote, fun hash_equal/2) of
-        {ok, NewTrees} ->
-            put(trees, NewTrees),
-            ok;
-        Other -> Other
-    end.
+    apply_transaction(Height, aens_claim_tx, Tx).
 
 claim_next(#{height := Height,
              accounts := Accounts,
@@ -1133,27 +953,7 @@ ns_update_adapt(_, _) ->
     false.
 
 ns_update(Height, _Name, _Sender, _NameAccount, Tx, _Correct) ->
-    Trees = get(trees),
-    {ok, NTx} = rpc(aens_update_tx, new, [Tx]),
-    {_, NameTx} = aetx:specialize_type(NTx),
-
-    Env = aetx_env:tx_env(Height),
-    %% old version
-    Remote =
-        case rpc:call(?REMOTE_NODE, aens_update_tx, check, [NameTx, Trees, Env], 1000) of
-            {ok, Ts} ->
-                rpc:call(?REMOTE_NODE, aens_update_tx, process, [NameTx, Ts, Env], 1000);
-            OldError ->
-                OldError
-        end,
-
-    Local = rpc:call(node(), aens_update_tx, process, [NameTx, Trees, Env], 1000),
-    case catch eq_rpc(Local, Remote, fun hash_equal/2) of
-        {ok, NewTrees} ->
-            put(trees, NewTrees),
-            ok;
-        Other -> Other
-    end.
+    apply_transaction(Height, aens_update_tx, Tx).
 
 ns_update_next(#{accounts := Accounts} = S, _Value, [Height, Name, {_, Sender}, {_, NameAccount}, Tx, Correct]) ->
     if Correct ->
@@ -1240,27 +1040,7 @@ ns_revoke_adapt(_, _) ->
     false.
 
 ns_revoke(Height, _Sender, _Name, Tx, _Correct) ->
-    Trees = get(trees),
-    {ok, NTx} = rpc(aens_revoke_tx, new, [Tx]),
-    {_, NameTx} = aetx:specialize_type(NTx),
-
-    Env = aetx_env:tx_env(Height),
-    %% old version
-    Remote =
-        case rpc:call(?REMOTE_NODE, aens_revoke_tx, check, [NameTx, Trees, Env], 1000) of
-            {ok, Ts} ->
-                rpc:call(?REMOTE_NODE, aens_revoke_tx, process, [NameTx, Ts, Env], 1000);
-            OldError ->
-                OldError
-        end,
-
-    Local = rpc:call(node(), aens_revoke_tx, process, [NameTx, Trees, Env], 1000),
-    case catch eq_rpc(Local, Remote, fun hash_equal/2) of
-        {ok, NewTrees} ->
-            put(trees, NewTrees),
-            ok;
-        Other -> Other
-    end.
+    apply_transaction(Height, aens_revoke_tx, Tx).
 
 ns_revoke_next(#{accounts := Accounts} = S, _Value, [Height, {_SenderTag, Sender}, Name, Tx, Correct]) ->
     if Correct ->
@@ -1368,27 +1148,7 @@ ns_transfer_adapt(_, _) ->
     false.
 
 ns_transfer(Height, _Sender, _Receiver, _Name, Tx, _Correct) ->
-    Trees = get(trees),
-    {ok, NTx} = rpc(aens_transfer_tx, new, [Tx]),
-    {_, NameTx} = aetx:specialize_type(NTx),
-
-    Env = aetx_env:tx_env(Height),
-    %% old version
-    Remote =
-        case rpc:call(?REMOTE_NODE, aens_transfer_tx, check, [NameTx, Trees, Env], 1000) of
-            {ok, Ts} ->
-                rpc:call(?REMOTE_NODE, aens_transfer_tx, process, [NameTx, Ts, Env], 1000);
-            OldError ->
-                OldError
-        end,
-
-    Local = rpc:call(node(), aens_transfer_tx, process, [NameTx, Trees, Env], 1000),
-    case catch eq_rpc(Local, Remote, fun hash_equal/2) of
-        {ok, NewTrees} ->
-            put(trees, NewTrees),
-            ok;
-        Other -> Other
-    end.
+    apply_transaction(Height, aens_transfer_tx, Tx).
 
 %% Assumption the recipient does not need to exist, it is created when we provided
 %% it with a name
@@ -1525,6 +1285,28 @@ eq_rpc(Local, Remote, InterpretResult) ->
             InterpretResult(Local, Remote)
     end.
 
+apply_transaction(Height, TxMod, TxArgs) ->
+    Env   = aetx_env:tx_env(Height),
+    Trees = get(trees),
+    {ok, AeTx} = rpc(TxMod, new, [TxArgs]),
+    {_, Tx} = aetx:specialize_type(AeTx),
+
+    %% old version
+    Remote =
+        case rpc:call(?REMOTE_NODE, TxMod, check, [Tx, Trees, Env], 1000) of
+            {ok, Ts} ->
+                rpc:call(?REMOTE_NODE, TxMod, process, [Tx, Ts, Env], 1000);
+            OldError ->
+                OldError
+        end,
+
+    Local = rpc:call(node(), TxMod, process, [Tx, Trees, Env], 1000),
+    case eq_rpc(Local, Remote, fun hash_equal/2) of
+        {ok, NewTrees} ->
+            put(trees, NewTrees),
+            ok;
+        Other -> Other
+    end.
 
 valid_mismatch({'EXIT',{different, {error, account_nonce_too_low},
                         {error, insufficient_funds}}}) -> true;
