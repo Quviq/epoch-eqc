@@ -1277,6 +1277,9 @@ rpc(Module, Fun, Args, InterpretResult) ->
     Remote = rpc:call(?REMOTE_NODE, Module, Fun, Args, 1000),
     eq_rpc(Local, Remote, InterpretResult).
 
+eq_rpc(Local, Remote) ->
+    eq_rpc(Local, Remote, fun hash_equal/2).
+
 eq_rpc(Local, Remote, InterpretResult) ->
     case {Local, Remote} of
         {{badrpc, {'EXIT', {E1, ST}}},{badrpc, {'EXIT', {E2, _}}}} when E1 == E2 ->
@@ -1288,20 +1291,15 @@ eq_rpc(Local, Remote, InterpretResult) ->
 apply_transaction(Height, TxMod, TxArgs) ->
     Env   = aetx_env:tx_env(Height),
     Trees = get(trees),
-    {ok, AeTx} = rpc(TxMod, new, [TxArgs]),
-    {_, Tx} = aetx:specialize_type(AeTx),
+    {ok, Tx} = rpc(TxMod, new, [TxArgs]),
 
-    %% old version
-    Remote =
-        case rpc:call(?REMOTE_NODE, TxMod, check, [Tx, Trees, Env], 1000) of
-            {ok, Ts} ->
-                rpc:call(?REMOTE_NODE, TxMod, process, [Tx, Ts, Env], 1000);
-            OldError ->
-                OldError
-        end,
+    Remote = case rpc:call(?REMOTE_NODE, aetx, check, [Tx, Trees, Env], 1000) of
+                {ok, RemoteTrees} -> rpc:call(node(), aetx, process, [Tx, RemoteTrees, Env], 1000);
+                RemoteErr         -> RemoteErr
+            end,
+    Local = rpc:call(node(), aetx, process, [Tx, Trees, Env], 1000),
 
-    Local = rpc:call(node(), TxMod, process, [Tx, Trees, Env], 1000),
-    case eq_rpc(Local, Remote, fun hash_equal/2) of
+    case eq_rpc(Local, Remote) of
         {ok, NewTrees} ->
             put(trees, NewTrees),
             ok;
