@@ -844,9 +844,11 @@ ns_transfer_args(#{accounts := Accounts, height := Height} = S) ->
                  nonce => gen_nonce(Sender)
                 }])).
 
-ns_transfer_pre(S, [Height, {_, Sender}, _Receiver, Name, Tx]) ->
+ns_transfer_pre(S, [Height, {STag, Sender}, Receiver, Name, Tx]) ->
     aec_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx)
-        andalso correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
+        andalso correct_height(S, Height)
+        andalso valid_nonce(S, Sender, Tx)
+        andalso valid_account(S, STag, Sender) andalso valid_account(S, Receiver).
 
 ns_transfer_valid(S, [Height, {_SenderTag, Sender}, {ReceiverTag, Receiver}, Name, Tx]) ->
     is_account(S, Sender)
