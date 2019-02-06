@@ -7,6 +7,7 @@
 %%%            The test profile has a name and a cookie set in {dist_node, ...}
 %%%
 %%%       TODO:
+%%%          - better shrinking for channel Ids (they contain the nonce...) - use good/bad tagging?
 %%%          - add oracle names to the state such that we can use names with oracles
 %%%          - add names to oracle txs
 %%%          - add contract txs (quite a lot of work, I fear)
@@ -1361,6 +1362,8 @@ valid_mismatch({'EXIT', {different, {error, pointer_id_not_found},
                          {error, insufficient_funds}}}) -> true;
 valid_mismatch({'EXIT', {different, {error, name_revoked},
                          {error, insufficient_funds}}}) -> true;
+valid_mismatch({'EXIT', {different, {error, account_nonce_too_low},
+                         {error, channel_does_not_exist}}}) -> true;
 valid_mismatch(_) -> false.
 
 %% -- Generators -------------------------------------------------------------
