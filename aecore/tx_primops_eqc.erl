@@ -1005,6 +1005,57 @@ ns_transfer_features(S, [_Height, _Sender, _Receiver, _Name, _Tx] = Args, Res) -
 
 
 %% -- Property ---------------------------------------------------------------
+weight(_S, spend) -> 10;
+weight(_S, mine)  -> 20;
+weight(_S, init)  -> 1;
+weight(S, register_oracle) ->
+    case non_oracle_accounts(S) of
+        [] -> 1;
+        _  -> 10 end;
+weight(S, extend_oracle) ->
+    case maps:get(oracles, S, []) of
+        [] -> 0;
+        _  -> 5 end;
+weight(S, query_oracle)  ->
+    case maps:get(oracles, S, []) of
+        [] -> 1;
+        _  -> 10 end;
+weight(S, response_oracle)  ->
+    case maps:get(queries, S, []) of
+        [] -> 1;
+        _  -> 10 end;
+weight(_S, ns_preclaim) -> 10;
+weight(S, ns_claim)    ->
+    case good_preclaims(S) of
+        [] -> 1;
+        _  -> 10 end;
+weight(S, ns_update) ->
+    case maps:get(claims, S, []) of
+        [] -> 1;
+        _  -> 9 end;
+weight(S, ns_revoke) ->
+    case maps:get(claims, S, []) of
+        [] -> 1;
+        _  -> 3 end;
+weight(S, ns_transfer) ->
+    case maps:get(claims, S, []) of
+        [] -> 1;
+        _  -> 5 end;
+weight(_S, channel_create) -> 5;
+weight(S, channel_deposit) ->
+    case maps:get(channels, S, []) of
+        [] -> 0;
+        _  -> 10 end;
+weight(S, channel_withdraw) ->
+    case maps:get(channels, S, []) of
+        [] -> 0;
+        _  -> 10 end;
+weight(S, channel_close_mutual) ->
+    case maps:get(channels, S, []) of
+        [] -> 0;
+        _  -> 4 end;
+weight(_S, _) -> 0.
+
 prop_tx_primops() ->
     eqc:dont_print_counterexample(
     in_parallel(
