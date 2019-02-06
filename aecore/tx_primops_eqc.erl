@@ -7,8 +7,6 @@
 %%%            The test profile has a name and a cookie set in {dist_node, ...}
 %%%
 %%%       TODO:
-%%%          - fix channel_withdraw
-%%%          - add channel mutual close
 %%%          - add oracle names to the state such that we can use names with oracles
 %%%          - add names to oracle txs
 %%%          - add contract txs (quite a lot of work, I fear)
@@ -64,6 +62,7 @@ valid_common(response_oracle, S, Args)  -> response_oracle_valid(S, Args);
 valid_common(channel_create, S, Args)   -> channel_create_valid(S, Args);
 valid_common(channel_deposit, S, Args)  -> channel_deposit_valid(S, Args);
 valid_common(channel_withdraw, S, Args) -> channel_withdraw_valid(S, Args);
+valid_common(channel_close_mutual, S, Args) -> channel_close_mutual_valid(S, Args);
 valid_common(ns_preclaim, S, Args)      -> ns_preclaim_valid(S, Args);
 valid_common(ns_claim, S, Args)         -> ns_claim_valid(S, Args);
 valid_common(ns_update, S, Args)        -> ns_update_valid(S, Args);
@@ -440,7 +439,6 @@ channel_create_args(#{accounts := Accounts, height := Height}) ->
                   state_hash => <<1:256>>,
                   initiator_amount => IAmount,
                   responder_amount => RAmount,
-                  push_amount => gen_channel_amount(),
                   lock_period => choose(0,2),
                   channel_reserve => ChannelReserve,
                   fee => gen_fee(),
@@ -624,6 +622,72 @@ channel_withdraw_features(S, [_Height, _Channeld, _Party, _Tx] = Args, Res) ->
     Correct = channel_withdraw_valid(S, Args),
     [{correct, if Correct -> channel_withdraw; true -> false end},
      {channel_withdraw, Res}].
+
+%% --- Operation: channel_close_mutual ---
+channel_close_mutual_pre(S) ->
+    maps:is_key(channels, S).
+
+channel_close_mutual_args(#{height := Height} = S) ->
+    ?LET({CId = {Initiator, N, Responder}, Party},
+         {gen_state_channel_id(S), gen_party()},
+    ?LET({IFinal, RFinal, Fee}, gen_close_channel_amounts(S, CId),
+    begin
+         From = case Party of initiator -> Initiator; responder -> Responder end,
+         [Height, {Initiator, N, Responder}, Party,
+               #{channel_id => aec_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder)),
+                 from_id => aec_id:create(account, From),
+                 initiator_amount_final => IFinal,
+                 responder_amount_final => RFinal,
+                 %% round => gen_channel_round(S, CId),
+                 fee => Fee,
+                 nonce => gen_nonce(account(S, From))
+                }]
+    end)).
+
+channel_close_mutual_pre(S, [Height, {I, _, R}, Party, Tx]) ->
+    From = case Party of initiator -> I; responder -> R end,
+    correct_height(S, Height) andalso valid_nonce(S, From, Tx).
+
+channel_close_mutual_valid(S, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx]) ->
+    From = case Party of initiator -> Initiator; responder -> Responder end,
+    is_account(S, Initiator)
+    andalso is_account(S, Responder)
+    andalso is_channel(S, ChannelId)
+    andalso correct_nonce(S, From, Tx)
+    andalso check_balance(S, From, maps:get(fee, Tx))
+    andalso valid_fee(Tx)
+    andalso (channel(S, ChannelId))#channel.amount >=
+                maps:get(initiator_amount_final, Tx) + maps:get(responder_amount_final, Tx) + maps:get(fee, Tx).
+
+channel_close_mutual_adapt(#{height := Height} = S, [_, ChannelId = {I, _ ,R}, Party, Tx]) ->
+    From = case Party of initiator -> I; responder -> R end,
+    [Height, ChannelId, Party, adapt_nonce(S, From, Tx)];
+channel_close_mutual_adapt(_, _) ->
+    %% in case we don't even have a Height
+    false.
+
+channel_close_mutual(Height, _Channeld, _Party, Tx) ->
+    apply_transaction(Height, aesc_close_mutual_tx, Tx).
+
+channel_close_mutual_next(S, _Value, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx] = Args) ->
+    case channel_close_mutual_valid(S, Args) of
+        false -> S;
+        true  ->
+            #{ initiator_amount_final := IFinal,
+               responder_amount_final := RFinal } = Tx,
+            {{From, AF}, {To, AT}} =
+                case Party of
+                    initiator -> {{Initiator, IFinal}, {Responder, RFinal}};
+                    responder -> {{Responder, RFinal}, {Initiator, IFinal}}
+                end,
+            bump_and_charge(From, -AF,
+                charge(To, -AT, delete_channel(ChannelId, S)))
+    end.
+
+channel_close_mutual_features(S, [_Height, _Channeld, _Party, _Tx] = Args, Res) ->
+    Correct = channel_close_mutual_valid(S, Args),
+    [{correct, if Correct -> channel_close_mutual; true -> false end},
+     {channel_close_mutual, Res}].
 
 
 %% --- Operation: ns_preclaim ---
@@ -1039,6 +1103,8 @@ credit_channel(Id, Round, Amount, S) ->
     on_channel(Id, fun(C) -> C#channel{ amount = C#channel.amount + Amount,
                                         round = Round }
                    end, S).
+delete_channel(CId, S = #{ channels := Channels }) ->
+    S#{ channels := lists:keydelete(CId, #channel.id, Channels) }.
 
 transfer_name(NewOwner, Name, S) ->
     on_claim(Name, fun(C) -> C#claim{ claimer = NewOwner } end, S).
@@ -1344,7 +1410,7 @@ gen_channel_round(#{channels := Cs}, CId) ->
     end.
 
 gen_fee() ->
-    weighted_default({29, choose(20000, 50000)},
+    weighted_default({29, choose(20000, 30000)},
                      {1,  choose(0, 15000)}).    %% too low
 
 gen_query_fee() ->
@@ -1356,11 +1422,31 @@ gen_query_fee(QF) ->
 gen_salt() -> choose(270, 280).
 
 gen_channel_amount() ->
-    choose(100, 10000).
+    choose(20000, 200000).
 
 gen_create_channel_amounts() ->
     ?LET({I, R}, {gen_channel_amount(), gen_channel_amount()},
-            weighted_default({29, {I, R, min(I, R) - 20}}, {1, {I, R, gen_channel_amount()}})).
+            weighted_default({29, {I, R, min(I, R) - 2000}}, {1, {I, R, gen_channel_amount()}})).
+
+gen_close_channel_amounts(#{channels := Cs}, CId) ->
+    case lists:keyfind(CId, #channel.id, Cs) of
+        false -> {gen_channel_amount(), gen_channel_amount(), gen_fee()};
+        #channel{amount = A} ->
+            weighted_default(
+                {5, ?LET({Fee, Factor1, Factor2}, {gen_fee(), choose(0, 50), choose(0, 50)},
+                     begin
+                        I = ((A - Fee) * Factor1) div 100,
+                        R = ((A - Fee) * Factor2) div 100,
+                        {I, R, Fee}
+                     end)},
+                {1, ?LET({Fee, Factor1, Factor2}, {gen_fee(), choose(0, 100), choose(0, 100)},
+                     begin
+                        I = ((A - Fee) * Factor1) div 100,
+                        R = ((A - Fee) * Factor2) div 100,
+                        {I, R, Fee}
+                     end)})
+    end.
+
 
 gen_ttl() ->
     choose(5, 50).
