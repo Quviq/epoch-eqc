@@ -761,8 +761,7 @@ ns_update_next(S, _, [Height, Name, {_, Sender}, {_, NameAccount}, Tx] = Args) -
                     _  -> add_named_account(Name, NameAccount, S)
                  end,
             bump_and_charge(Sender, Fee,
-                grant_name(Sender, Name,
-                update_claim_height(Name, Height, TTL, S1)))
+                update_claim_height(Name, Height, TTL, S1))
     end.
 
 ns_update_features(S, [_Height, _Name, _Sender, {_Tag, _NameAccount}, _Tx] = Args, Res) ->
@@ -809,9 +808,8 @@ ns_revoke_next(S, _Value, [Height, {_SenderTag, Sender}, Name, Tx] = Args) ->
         true  ->
             #{ fee := Fee } = Tx,
             bump_and_charge(Sender, Fee,
-                ungrant_name(Sender, Name,
                 remove_named_account(Name,
-                revoke_claim(Name, Height, S))))
+                revoke_claim(Name, Height, S)))
     end.
 
 ns_revoke_features(S, [_Height, _Sender, _Name, _Tx] = Args, Res) ->
@@ -880,9 +878,8 @@ ns_transfer_next(S, _, [_Height, {_SenderTag, Sender}, Receiver, Name, Tx] = Arg
             #{ fee := Fee } = Tx,
             ReceiverKey = resolve_account(S, Receiver),
             bump_and_charge(Sender, Fee,
-                ungrant_name(Sender, Name,
-                grant_name(ReceiverKey, Name,
-                credit(ReceiverKey, 0, S))))   %% to create it if it doesn't exist
+                transfer_name(ReceiverKey, Name,
+                credit(ReceiverKey, 0, S)))   %% to create it if it doesn't exist
     end.
 
 ns_transfer_features(S, [_Height, _Sender, _Receiver, _Name, _Tx] = Args, Res) ->
@@ -997,13 +994,8 @@ credit_channel(Id, Round, Amount, S) ->
                                         round = Round }
                    end, S).
 
-grant_name(Key, Name, S) ->
-    on_account(Key, fun(Acc) -> Acc#account{ names_owned = lists:umerge([Name], Acc#account.names_owned) }
-                    end, S).
-
-ungrant_name(Key, Name, S) ->
-    on_account(Key, fun(Acc) -> Acc#account{ names_owned = lists:delete(Name, Acc#account.names_owned) }
-                    end, S).
+transfer_name(NewOwner, Name, S) ->
+    on_claim(Name, fun(C) -> C#claim{ claimer = NewOwner } end, S).
 
 on_claim(Name, Fun, S = #{ claims := Claims }) ->
     Upd = fun(C = #claim{ name = N }) when Name == N -> Fun(C);
@@ -1057,6 +1049,13 @@ correct_name_id(Name, NameId) ->
 
 is_account(#{accounts := Accounts}, Key) ->
     lists:keymember(Key, #account.key, Accounts).
+
+
+valid_account(S, Tag, Key) -> valid_account(S, {Tag, Key}).
+valid_account(_S, {name, _}) -> true;
+valid_account(S, {Tag, Key}) ->
+    IsA = is_account(S, Key),
+    (IsA andalso Tag == existing) orelse (not IsA andalso Tag == new).
 
 is_oracle(#{oracles := Oracles}, Oracle) ->
     lists:keymember(Oracle, 1, Oracles).
@@ -1250,7 +1249,7 @@ gen_name_claim(#{claims := Cs, accounts := As}) ->
         {39, ?LET(#claim{name = N, claimer = C}, elements(Cs),
                   begin
                     A = {existing, lists:keyfind(C, #account.key, As)},
-                    frequency([{1, {gen_name(), A}}, {38, {N, A}}])
+                    frequency([{1, {gen_name(), A}}, {1, {N, gen_account(0, 1, As)}}, {38, {N, A}}])
                   end)},
         {1, {gen_name(), gen_account(1, 1, As)}}).
 
