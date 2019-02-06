@@ -1362,7 +1362,12 @@ valid_mismatch({'EXIT', {different, {error, pointer_id_not_found},
                          {error, insufficient_funds}}}) -> true;
 valid_mismatch({'EXIT', {different, {error, name_revoked},
                          {error, insufficient_funds}}}) -> true;
+%% Close mutual
 valid_mismatch({'EXIT', {different, {error, account_nonce_too_low},
+                         {error, channel_does_not_exist}}}) -> true;
+valid_mismatch({'EXIT', {different, {error, account_nonce_too_high},
+                         {error, channel_does_not_exist}}}) -> true;
+valid_mismatch({'EXIT', {different, {error, account_not_found},
                          {error, channel_does_not_exist}}}) -> true;
 valid_mismatch(_) -> false.
 
