@@ -654,7 +654,6 @@ channel_close_mutual_valid(S, [_Height, {Initiator, _, Responder} = ChannelId, P
     andalso is_account(S, Responder)
     andalso is_channel(S, ChannelId)
     andalso correct_nonce(S, From, Tx)
-    andalso check_balance(S, From, maps:get(fee, Tx))
     andalso valid_fee(Tx)
     andalso (channel(S, ChannelId))#channel.amount >=
                 maps:get(initiator_amount_final, Tx) + maps:get(responder_amount_final, Tx) + maps:get(fee, Tx).
