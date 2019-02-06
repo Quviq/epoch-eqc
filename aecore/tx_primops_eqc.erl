@@ -388,18 +388,19 @@ channel_create_pre(S) ->
 
 channel_create_args(#{accounts := Accounts, height := Height}) ->
      ?LET([{_, Initiator}, {_, Responder}],
-          vector(2, gen_account_pubkey(Accounts)),
+          vector(2, gen_account(1, 49, Accounts)),
+     ?LET({IAmount, RAmount, ChannelReserve}, gen_create_channel_amounts(),
           [Height, Initiator#account.key, Responder#account.key,
                 #{initiator_id => aec_id:create(account, Initiator#account.key),
                   responder_id => aec_id:create(account, Responder#account.key),
                   state_hash => <<1:256>>,
-                  initiator_amount => nat(),
-                  responder_amount => nat(),
-                  push_amount => nat(),
+                  initiator_amount => IAmount,
+                  responder_amount => RAmount,
+                  push_amount => gen_channel_amount(),
                   lock_period => choose(0,2),
-                  channel_reserve => choose(0,10),
+                  channel_reserve => ChannelReserve,
                   fee => gen_fee(),
-                  nonce => gen_nonce(Initiator)}]).
+                  nonce => gen_nonce(Initiator)}])).
 
 channel_create_pre(S, [Height, Initiator, Responder, Tx]) ->
     Initiator =/= Responder
@@ -430,7 +431,7 @@ channel_create_next(S, _Value, [_Height, Initiator, Responder, Tx] = Args) ->
         false -> S;
         true  ->
             #{ fee              := Fee,
-               nonce            := Nonce,
+               nonce            := {_, Nonce},
                initiator_amount := IAmount,
                responder_amount := RAmount,
                channel_reserve  := Reserve } = Tx,
@@ -442,29 +443,31 @@ channel_create_next(S, _Value, [_Height, Initiator, Responder, Tx] = Args) ->
                 add(channels, Channel, S)))
     end.
 
+channel_create_features(S, [_Height, _, _, _Tx] = Args, Res) ->
+    Correct = channel_create_valid(S, Args),
+    [{correct, if Correct -> channel_create; true -> false end},
+     {channel_create, Res}].
+
 %% --- Operation: channel_deposit ---
 channel_deposit_pre(S) ->
     maps:is_key(channels, S).
 
+
 channel_deposit_args(#{height := Height} = S) ->
-     ?LET([{Initiator, N, Responder}, Party],
-          [frequency([{99, ?LET(Channel, elements(maps:get(channels, S)), Channel#channel.id)},
-                      {1, {?Patron, 2, ?Patron}}]), elements([initiator, responder])],
+     ?LET({CId = {Initiator, N, Responder}, Party},
+          {gen_state_channel_id(S), gen_party()},
+     begin
+          From = case Party of initiator -> Initiator; responder -> Responder end,
           [Height, {Initiator, N, Responder}, Party,
                 #{channel_id => aec_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder)),
-                  from_id => case Party of
-                                 initiator -> aec_id:create(account, Initiator);
-                                 responder ->  aec_id:create(account, Responder)
-                             end,
-                  amount => nat(),
-                  round => nat(),
+                  from_id => aec_id:create(account, From),
+                  amount => gen_channel_amount(),
+                  round => gen_channel_round(S, CId),
                   fee => gen_fee(),
                   state_hash => <<0:256>>,
-                  nonce =>
-                      case Party of
-                          initiator -> gen_nonce(lists:keyfind(Initiator, #account.key, maps:get(accounts, S, [])));
-                          responder ->  gen_nonce(lists:keyfind(Responder, #account.key, maps:get(accounts, S, [])))
-                      end}]).
+                  nonce => gen_nonce(account(S, From))
+                 }]
+     end).
 
 channel_deposit_pre(S, [Height, {I, _, R}, Party, Tx]) ->
     From = case Party of initiator -> I; responder -> R end,
@@ -508,34 +511,29 @@ channel_deposit_next(S, _Value, [_Height, {Initiator, _, Responder} = ChannelId,
 
 channel_deposit_features(S, [_Height, _Channeld, _Party, _Tx] = Args, Res) ->
     Correct = channel_deposit_valid(S, Args),
-    [{correct, if Correct -> channel_deposit; true -> false end} ] ++
-        [{channel_deposit, Res} || is_tuple(Res) andalso element(1, Res) == error].
+    [{correct, if Correct -> channel_deposit; true -> false end},
+     {channel_deposit, Res}].
 
 %% --- Operation: channel_withdraw ---
 channel_withdraw_pre(S) ->
-    false andalso maps:is_key(channels, S).
-
+    maps:is_key(channels, S).
 
 %% We do not yet test wirthdraw by third party!
 channel_withdraw_args(#{height := Height} = S) ->
-     ?LET([{Initiator, N, Responder}, Party],
-          [frequency([{99, ?LET(Channel, elements(maps:get(channels, S)), Channel#channel.id)},
-                      {1, {?Patron, 2, ?Patron}}]), elements([initiator, responder])],
+    ?LET({CId = {Initiator, N, Responder}, Party},
+         {gen_state_channel_id(S), gen_party()},
+    begin
+         From = case Party of initiator -> Initiator; responder -> Responder end,
           [Height, {Initiator, N, Responder}, Party,
                 #{channel_id => aec_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder)),
-                  to_id => case Party of
-                                 initiator -> aec_id:create(account, Initiator);
-                                 responder ->  aec_id:create(account, Responder)
-                             end,
-                  amount => nat(),
-                  round => nat(),
+                 to_id => aec_id:create(account, From),
+                 amount => gen_channel_amount(),
+                 round => gen_channel_round(S, CId),
                   fee => gen_fee(),
                   state_hash => <<0:256>>,
-                  nonce =>
-                      case Party of
-                          initiator -> gen_nonce(lists:keyfind(Initiator, #account.key, maps:get(accounts, S, [])));
-                          responder ->  gen_nonce(lists:keyfind(Responder, #account.key, maps:get(accounts, S, [])))
-                      end}]).
+                 nonce => gen_nonce(account(S, From))
+                }]
+    end).
 
 channel_withdraw_pre(S, [Height, {I, _, R}, Party, Tx]) ->
     From = case Party of initiator -> I; responder -> R end,
@@ -550,7 +548,8 @@ channel_withdraw_valid(S, [_Height, {Initiator, _, Responder} = ChannelId, Party
     andalso check_balance(S, From, maps:get(fee, Tx))
     andalso valid_fee(Tx)
     andalso correct_round(S, ChannelId, Tx)
-    andalso (channel(S, ChannelId))#channel.amount >= maps:get(amount, Tx).
+    andalso (channel(S, ChannelId))#channel.amount >= maps:get(amount, Tx)
+    andalso (channel(S, ChannelId))#channel.amount - maps:get(amount, Tx) >= (channel(S, ChannelId))#channel.reserve*2.
 
 channel_withdraw_adapt(#{height := Height} = S, [_, ChannelId = {I, _ ,R}, Party, Tx]) ->
     From = case Party of initiator -> I; responder -> R end,
@@ -558,7 +557,6 @@ channel_withdraw_adapt(#{height := Height} = S, [_, ChannelId = {I, _ ,R}, Party
 channel_withdraw_adapt(_, _) ->
     %% in case we don't even have a Height
     false.
-
 
 channel_withdraw(Height, _Channeld, _Party, Tx) ->
     apply_transaction(Height, aesc_withdraw_tx, Tx).
@@ -580,8 +578,8 @@ channel_withdraw_next(S, _Value, [_Height, {Initiator, _, Responder} = ChannelId
 
 channel_withdraw_features(S, [_Height, _Channeld, _Party, _Tx] = Args, Res) ->
     Correct = channel_withdraw_valid(S, Args),
-    [{correct, if Correct -> channel_withdraw; true -> false end} ] ++
-    [{channel_withdraw, Res} || is_tuple(Res) andalso element(1, Res) == error].
+    [{correct, if Correct -> channel_withdraw; true -> false end},
+     {channel_withdraw, Res}].
 
 
 %% --- Operation: ns_preclaim ---
@@ -1282,6 +1280,24 @@ gen_name(S) ->
     frequency([{90, elements(maps:keys(maps:get(names, S, #{})) ++ [<<"ta.test">>])},
                {1, gen_name()}]).
 
+gen_state_channel_id(#{channels := [], accounts := As}) ->
+    ?LET([{_, A1}, {_, A2}], vector(2, gen_account(0, 1, As)),
+         {A1#account.key, choose(1, 5), A2#account.key});
+gen_state_channel_id(#{channels := Cs} = S) ->
+    weighted_default(
+        {39, ?LET(C, elements(Cs), C#channel.id)},
+        {1,  gen_state_channel_id(S#{channels := []})}).
+
+gen_party() ->
+    elements([initiator, responder]).
+
+gen_channel_round(#{channels := Cs}, CId) ->
+    case lists:keyfind(CId, #channel.id, Cs) of
+        false -> choose(0, 5);
+        #channel{round = R} ->
+            weighted_default({29, R+1}, {1, ?LET(R_, elements([R-3, R-1, R, R+3]), abs(R_))})
+    end.
+
 gen_fee() ->
     weighted_default({29, choose(20000, 50000)},
                      {1,  choose(0, 15000)}).    %% too low
@@ -1293,3 +1309,10 @@ gen_query_fee(QF) ->
     weighted_default({29, QF}, {1, elements([QF - 10, QF - 1, QF + 1, QF + 10, QF + 100])}).
 
 gen_salt() -> choose(270, 280).
+
+gen_channel_amount() ->
+    choose(100, 10000).
+
+gen_create_channel_amounts() ->
+    ?LET({I, R}, {gen_channel_amount(), gen_channel_amount()},
+            weighted_default({29, {I, R, min(I, R) - 20}}, {1, {I, R, gen_channel_amount()}})).
