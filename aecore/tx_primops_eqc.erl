@@ -11,7 +11,6 @@
 %%%          - add channel mutual close
 %%%          - add oracle names to the state such that we can use names with oracles
 %%%          - add names to oracle txs
-%%%          - add extend oracle
 %%%          - add contract txs (quite a lot of work, I fear)
 %%%          - tune distribution (all EXIT differences should show up in features)
 %%%          - mock aec_governance values to test for name revoke re-use etc.
@@ -59,6 +58,7 @@ valid_common(init, _, _)                -> true;
 valid_common(mine, _, _)                -> true;
 valid_common(spend, S, Args)            -> spend_valid(S, Args);
 valid_common(register_oracle, S, Args)  -> register_oracle_valid(S, Args);
+valid_common(extend_oracle, S, Args)    -> extend_oracle_valid(S, Args);
 valid_common(query_oracle, S, Args)     -> query_oracle_valid(S, Args);
 valid_common(response_oracle, S, Args)  -> response_oracle_valid(S, Args);
 valid_common(channel_create, S, Args)   -> channel_create_valid(S, Args);
@@ -261,6 +261,50 @@ register_oracle_features(S, [_Height, {_, _Sender}, _Tx] = Args, Res) ->
     [{correct, if Correct -> register_oracle; true -> false end},
      {register_oracle, Res}].
 
+%% --- Operation: extend_oracle ---
+extend_oracle_pre(S) ->
+    maps:is_key(accounts, S) andalso maps:get(oracles, S, []) /= [].
+
+extend_oracle_args(S = #{height := Height}) ->
+    ?LET({{_, Oracle}, DeltaTTL},
+         {gen_oracle_account(S), gen_ttl()},
+         [Height, Oracle#account.key,
+          #{oracle_id  => aec_id:create(oracle, Oracle#account.key),
+            nonce      => gen_nonce(Oracle),
+            oracle_ttl => {delta, DeltaTTL},
+            fee        => gen_fee()
+           }]).
+
+extend_oracle_pre(S, [Height, Oracle, Tx]) ->
+    correct_height(S, Height) andalso valid_nonce(S, Oracle, Tx).
+
+extend_oracle_valid(S, [_Height, Oracle, Tx]) ->
+    is_account(S, Oracle)
+    andalso is_oracle(S, Oracle)
+    andalso correct_nonce(S, Oracle, Tx)
+    andalso check_balance(S, Oracle, maps:get(fee, Tx))
+    andalso valid_fee(Tx).
+
+extend_oracle_adapt(#{height := Height} = S, [_Height, Oracle, Tx]) ->
+    [Height, Oracle, adapt_nonce(S, Oracle, Tx)];
+extend_oracle_adapt(_, _) ->
+    false.
+
+extend_oracle(Height, _Oracle, Tx) ->
+    apply_transaction(Height, aeo_extend_tx, Tx).
+
+extend_oracle_next(S, _Value, [_Height, Oracle, Tx] = Args) ->
+    case extend_oracle_valid(S, Args) of
+        false -> S;
+        true  ->
+            #{ oracle_ttl := {delta, _Delta}, fee := Fee} = Tx,
+            bump_and_charge(Oracle, Fee, S)
+    end.
+
+extend_oracle_features(S, [_Height, _, _Tx] = Args, Res) ->
+    Correct = extend_oracle_valid(S, Args),
+    [{correct, if Correct -> extend_oracle; true -> false end},
+     {extend_oracle, Res}].
 
 %% --- Operation: query_oracle ---
 query_oracle_pre(S) ->
@@ -1317,3 +1361,6 @@ gen_channel_amount() ->
 gen_create_channel_amounts() ->
     ?LET({I, R}, {gen_channel_amount(), gen_channel_amount()},
             weighted_default({29, {I, R, min(I, R) - 20}}, {1, {I, R, gen_channel_amount()}})).
+
+gen_ttl() ->
+    choose(5, 50).
