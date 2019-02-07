@@ -263,7 +263,8 @@ register_oracle_args(S = #{height := Height}) ->
                   query_fee       => gen_query_fee(),
                   fee => gen_fee(),
                   nonce => gen_nonce(Sender),
-                  oracle_ttl => {delta, 100}}]).
+                  oracle_ttl => {delta, 100},
+                  abi_version => 0}]).
 
 register_oracle_pre(S, [Height, {_, Sender}, Tx]) ->
     correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
