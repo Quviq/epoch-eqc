@@ -18,6 +18,7 @@
 
 -compile([export_all, nowarn_export_all]).
 -define(Patron, <<1, 1, 0:240>>).
+-define(PatronAmount, 120000000).
 -define(NAMEFRAGS, ["foo", "bar", "baz"]).
 
 -record(account, {key, amount, nonce, names_owned = []}).
@@ -76,7 +77,7 @@ init_args(_S) ->
 init(_Height) ->
     Trees         = aec_trees:new_without_backend(),
     AccountTrees  = aec_trees:accounts(Trees),
-    PatronAccount = aec_accounts:new(?Patron, 120000000),
+    PatronAccount = aec_accounts:new(?Patron, ?PatronAmount),
     AccountTrees1 = aec_accounts_trees:enter(PatronAccount, AccountTrees),
     Trees1        = aec_trees:set_accounts(Trees, AccountTrees1),
     put(trees, Trees1),
@@ -84,7 +85,7 @@ init(_Height) ->
 
 init_next(S, _Value, [Height]) ->
     S#{height   => Height,
-       accounts => [#account{key = ?Patron, amount = 120000000, nonce = 1}]}.
+       accounts => [#account{key = ?Patron, amount = ?PatronAmount, nonce = 1}]}.
 
 %% --- Operation: mine ---
 mine_pre(S) ->
