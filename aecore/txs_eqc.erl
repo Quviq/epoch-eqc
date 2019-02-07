@@ -267,18 +267,18 @@ register_oracle_args(S = #{height := Height}) ->
                   query_fee       => gen_query_fee(),
                   fee => gen_fee(),
                   nonce => gen_nonce(Sender),
-                  oracle_ttl => {delta, 100},
+                  oracle_ttl => {delta, elements([0, 1, 2, 100])},
                   abi_version => 0}]).
 
 register_oracle_pre(S, [Height, {_, Sender}, Tx]) ->
     correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
 
-register_oracle_valid(S, [_, {_, Sender}, Tx]) ->
+register_oracle_valid(S, [Height, {_, Sender}, Tx]) ->
     is_account(S, Sender)
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx))
     andalso valid_fee(Tx)
-    andalso not is_oracle(S, Sender).
+    andalso (not is_oracle(S, Sender) orelse oracle_ttl(S, Sender) =< Height).
 
 register_oracle_adapt(#{height := Height} = S, [_, {STag, Sender}, Tx]) ->
     [Height, {STag, Sender}, adapt_nonce(S, Sender, Tx)];
@@ -294,11 +294,12 @@ register_oracle_next(S, _Value, [_Height, {_, Sender}, Tx] = Args) ->
     case register_oracle_valid(S, Args) of
         false -> S;
         true  ->
-            #{ fee := Fee, query_fee := QFee } = Tx,
-            Oracle = {Sender, QFee},
+            #{ fee := Fee, query_fee := QFee, oracle_ttl := {delta, D} } = Tx,
+            Oracle = {Sender, QFee, D + maps:get(height, S)},
             reserve_fee(Fee,
             bump_and_charge(Sender, Fee,
-                add(oracles, Oracle, S)))
+                add(oracles, Oracle, 
+                remove(oracles, Oracle, 1, S))))
     end.
 
 register_oracle_features(S, [_Height, {_, _Sender}, _Tx] = Args, Res) ->
@@ -323,12 +324,13 @@ extend_oracle_args(S = #{height := Height}) ->
 extend_oracle_pre(S, [Height, Oracle, Tx]) ->
     correct_height(S, Height) andalso valid_nonce(S, Oracle, Tx).
 
-extend_oracle_valid(S, [_Height, Oracle, Tx]) ->
+extend_oracle_valid(S, [Height, Oracle, Tx]) ->
     is_account(S, Oracle)
     andalso is_oracle(S, Oracle)
     andalso correct_nonce(S, Oracle, Tx)
     andalso check_balance(S, Oracle, maps:get(fee, Tx))
-    andalso valid_fee(Tx).
+    andalso valid_fee(Tx)
+    andalso oracle_ttl(S, Oracle) >= Height.
 
 extend_oracle_adapt(#{height := Height} = S, [_Height, Oracle, Tx]) ->
     [Height, Oracle, adapt_nonce(S, Oracle, Tx)];
@@ -342,9 +344,10 @@ extend_oracle_next(S, _Value, [_Height, Oracle, Tx] = Args) ->
     case extend_oracle_valid(S, Args) of
         false -> S;
         true  ->
-            #{ oracle_ttl := {delta, _Delta}, fee := Fee} = Tx,
+            #{ oracle_ttl := {delta, Delta}, fee := Fee} = Tx,
             reserve_fee(Fee,
-            bump_and_charge(Oracle, Fee, S))
+            bump_and_charge(Oracle, Fee, 
+            oracle_ext(Oracle, Delta, S)))
     end.
 
 extend_oracle_features(S, [_Height, _, _Tx] = Args, Res) ->
@@ -362,7 +365,7 @@ query_oracle_args(S = #{accounts := Accounts, height := Height}) ->
           begin
               QFee = case oracle(S, Oracle#account.key) of
                        false -> 100;
-                       {_, QFee0} -> QFee0
+                       {_, QFee0, _} -> QFee0
                      end,
               [Height, {SenderTag, Sender#account.key}, Oracle#account.key,
                #{sender_id => aec_id:create(account, Sender#account.key),
@@ -379,13 +382,16 @@ query_oracle_args(S = #{accounts := Accounts, height := Height}) ->
 query_oracle_pre(S, [Height, {_, Sender}, _Oracle, Tx]) ->
     correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
 
-query_oracle_valid(S, [_Height, {_SenderTag, Sender}, Oracle, Tx]) ->
+query_oracle_valid(S, [Height, {_SenderTag, Sender}, Oracle, Tx]) ->
+    {delta, ResponseTTL} = maps:get(response_ttl, Tx),
+    {delta, QueryTTL} = maps:get(query_ttl, Tx),
     is_account(S, Sender)
     andalso is_oracle(S, Oracle)
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx) + maps:get(query_fee, Tx))
     andalso valid_fee(Tx)
-    andalso oracle_query_fee(S, Oracle) =< maps:get(query_fee, Tx).
+    andalso oracle_query_fee(S, Oracle) =< maps:get(query_fee, Tx)
+    andalso oracle_ttl(S, Oracle) > Height + ResponseTTL + QueryTTL.
 
 query_oracle_adapt(#{height := Height} = S, [_Height, {STag, Sender}, Oracle, Tx]) ->
     [Height, {STag, Sender}, Oracle, adapt_nonce(S, Sender, Tx)];
@@ -1198,6 +1204,9 @@ bump_and_charge(Key, Fee, S) ->
 add(Tag, X, S) ->
     S#{ Tag => maps:get(Tag, S, []) ++ [X] }.
 
+oracle_ext(Id, Delta, S) ->
+    {Id, QFee, TTL} = oracle(S, Id),
+    add(oracles, {Id, QFee, TTL + Delta}, remove(oracles, Id, 1, S)).
 remove(Tag, X, I, S) ->
     S#{ Tag := lists:keydelete(X, I, maps:get(Tag, S)) }.
 
@@ -1296,8 +1305,12 @@ oracle(#{oracles := Oracles}, Oracle) ->
     lists:keyfind(Oracle, 1, Oracles).
 
 oracle_query_fee(#{oracles := Oracles}, Oracle) ->
-    {_, QFee} = lists:keyfind(Oracle, 1, Oracles),
+    {_, QFee, _} = lists:keyfind(Oracle, 1, Oracles),
     QFee.
+
+oracle_ttl(#{oracles := Oracles}, Oracle) ->
+    {_, _, TTL} = lists:keyfind(Oracle, 1, Oracles),
+    TTL.
 
 is_query(#{queries := Qs}, Q) ->
     lists:keymember(Q, #query.id, Qs).
@@ -1402,7 +1415,7 @@ gen_oracle_account(#{accounts := As, oracles := []}) ->
     gen_account(1, 1, As);
 gen_oracle_account(#{accounts := As, oracles := Os}) ->
     weighted_default(
-        {39, ?LET({O, _}, elements(Os), {existing, lists:keyfind(O, #account.key, As)})},
+        {39, ?LET({O, _, _}, elements(Os), {existing, lists:keyfind(O, #account.key, As)})},
         {1,  gen_account(9, 1, As)}).
 
 
