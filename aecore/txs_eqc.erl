@@ -29,7 +29,7 @@
 
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
-    #{claims => [], preclaims => [], oracles => []}.
+    #{claims => [], preclaims => [], oracles => [], fees => []}.
 
 %% -- Common pre-/post-conditions --------------------------------------------
 command_precondition_common(_S, _Cmd) ->
@@ -108,6 +108,8 @@ mine(Height) ->
     put(trees, Trees1),
     ok.
 
+%% In this model we do not pay beneficiaries (that's on a higher level)
+%% Thus no update needed when we reach aec_governance:beneficiary_reward_delay()
 mine_next(#{height := Height, accounts := Accounts} = S, _Value, [_H]) ->
     ExpiredQs = expired_queries(S, Height),
     Accounts1 = lists:foldl(
@@ -235,8 +237,9 @@ spend_next(S, _Value, [_Height, {_SenderTag, Sender}, Receiver, Tx] = Args) ->
         true  ->
             #{ amount := Amount, fee := Fee } = Tx,
             RKey = resolve_account(S, Receiver),
+            reserve_fee(Fee,
             bump_and_charge(Sender, Amount + Fee,
-                credit(RKey, Amount, S))
+                credit(RKey, Amount, S)))
     end.
 
 spend_features(S, [_Height, {_, _Sender}, {_Tag, _Receiver}, _Tx] = Args, Res) ->
@@ -293,8 +296,9 @@ register_oracle_next(S, _Value, [_Height, {_, Sender}, Tx] = Args) ->
         true  ->
             #{ fee := Fee, query_fee := QFee } = Tx,
             Oracle = {Sender, QFee},
+            reserve_fee(Fee,
             bump_and_charge(Sender, Fee,
-                add(oracles, Oracle, S))
+                add(oracles, Oracle, S)))
     end.
 
 register_oracle_features(S, [_Height, {_, _Sender}, _Tx] = Args, Res) ->
@@ -339,7 +343,8 @@ extend_oracle_next(S, _Value, [_Height, Oracle, Tx] = Args) ->
         false -> S;
         true  ->
             #{ oracle_ttl := {delta, _Delta}, fee := Fee} = Tx,
-            bump_and_charge(Oracle, Fee, S)
+            reserve_fee(Fee,
+            bump_and_charge(Oracle, Fee, S))
     end.
 
 extend_oracle_features(S, [_Height, _, _Tx] = Args, Res) ->
@@ -400,8 +405,9 @@ query_oracle_next(S, _Value, [Height, {_, Sender}, Oracle, Tx] = Args) ->
                            id           = {Sender, maps:get(nonce, untag_nonce(Tx)), Oracle},
                            response_ttl = Delta + Height,
                            fee          = maps:get(query_fee, Tx)},
+            reserve_fee(Fee,
             bump_and_charge(Sender, Fee + QFee,
-                add(queries, Query, S))
+                add(queries, Query, S)))
     end.
 
 query_oracle_features(S, [_Height, _, _, _Tx] = Args, Res) ->
@@ -458,8 +464,9 @@ response_oracle_next(S, _Value, [_Height, QueryId, Tx] = Args) ->
             #{ fee := Fee } = Tx,
             {_, _, Oracle} = QueryId,
             #query{ fee = QueryFee } = get_query(S, QueryId),
+            reserve_fee(Fee,
             bump_and_charge(Oracle, Fee - QueryFee,
-                remove_query(QueryId, S))
+                remove_query(QueryId, S)))
     end.
 
 response_oracle_features(S, [_Height, _, _Tx] = Args, Res) ->
@@ -522,9 +529,10 @@ channel_create_next(S, _Value, [_Height, Initiator, Responder, Tx] = Args) ->
             Channel = #channel{ id = {Initiator, Nonce, Responder},
                                 amount = IAmount + RAmount,
                                 reserve = Reserve },
+            reserve_fee(Fee,
             bump_and_charge(Initiator, Fee + IAmount,
                 charge(Responder, RAmount,
-                add(channels, Channel, S)))
+                add(channels, Channel, S))))
     end.
 
 channel_create_features(S, [_Height, _, _, _Tx] = Args, Res) ->
@@ -589,8 +597,9 @@ channel_deposit_next(S, _Value, [_Height, {Initiator, _, Responder} = ChannelId,
             #{ fee    := Fee,
                amount := Amount,
                round  := Round } = Tx,
+            reserve_fee(Fee,
             bump_and_charge(From, Fee + Amount,
-                credit_channel(ChannelId, Round, Amount, S))
+                credit_channel(ChannelId, Round, Amount, S)))
     end.
 
 channel_deposit_features(S, [_Height, _Channeld, _Party, _Tx] = Args, Res) ->
@@ -656,8 +665,9 @@ channel_withdraw_next(S, _Value, [_Height, {Initiator, _, Responder} = ChannelId
             #{ fee    := Fee,
                amount := Amount,
                round  := Round } = Tx,
+            reserve_fee(Fee,
             bump_and_charge(From, Fee - Amount,
-                credit_channel(ChannelId, Round, -Amount, S))
+                credit_channel(ChannelId, Round, -Amount, S)))
     end.
 
 channel_withdraw_features(S, [_Height, _Channeld, _Party, _Tx] = Args, Res) ->
@@ -715,14 +725,16 @@ channel_close_mutual_next(S, _Value, [_Height, {Initiator, _, Responder} = Chann
         false -> S;
         true  ->
             #{ initiator_amount_final := IFinal,
-               responder_amount_final := RFinal } = Tx,
+               responder_amount_final := RFinal,
+               fee := Fee} = Tx,
             {{From, AF}, {To, AT}} =
                 case Party of
                     initiator -> {{Initiator, IFinal}, {Responder, RFinal}};
                     responder -> {{Responder, RFinal}, {Initiator, IFinal}}
                 end,
+            reserve_fee(Fee,
             bump_and_charge(From, -AF,
-                charge(To, -AT, delete_channel(ChannelId, S)))
+                charge(To, -AT, delete_channel(ChannelId, S))))
     end.
 
 channel_close_mutual_features(S, [_Height, _Channeld, _Party, _Tx] = Args, Res) ->
@@ -776,8 +788,9 @@ ns_preclaim_next(#{height := Height} = S, _, [_Height, {_, Sender}, {Name, Salt}
                                  salt    = Salt,
                                  height  = Height,
                                  claimer = Sender},
+            reserve_fee(Fee,
             bump_and_charge(Sender, Fee,
-                add(preclaims, Preclaim, S))
+                add(preclaims, Preclaim, S)))
     end.
 
 ns_preclaim_features(S, [_Height, {_, _Sender}, {_Name,_Salt}, _Tx] = Args, Res) ->
@@ -848,8 +861,9 @@ ns_claim_next(#{height := Height} = S, _, [_Height, {_, Sender}, Tx] = Args) ->
                             valid_height = Height + aec_governance:name_claim_max_expiration(),
                             claimer      = Sender },
             remove_preclaim(Tx,
+            reserve_fee(Fee,
             bump_and_charge(Sender, Fee + aec_governance:name_claim_locked_fee(),
-                add(claims, Claim, S)))
+                add(claims, Claim, S))))
     end.
 
 ns_claim_features(S, [_Height, {_, _Sender}, _Tx] = Args, Res) ->
@@ -909,8 +923,9 @@ ns_update_next(S, _, [Height, Name, {_, Sender}, {_, NameAccount}, Tx] = Args) -
                     [] -> remove_named_account(Name, S);
                     _  -> add_named_account(Name, NameAccount, S)
                  end,
+            reserve_fee(Fee,
             bump_and_charge(Sender, Fee,
-                update_claim_height(Name, Height, TTL, S1))
+                update_claim_height(Name, Height, TTL, S1)))
     end.
 
 ns_update_features(S, [_Height, _Name, _Sender, {_Tag, _NameAccount}, _Tx] = Args, Res) ->
@@ -956,9 +971,10 @@ ns_revoke_next(S, _Value, [Height, {_SenderTag, Sender}, Name, Tx] = Args) ->
         false -> S;
         true  ->
             #{ fee := Fee } = Tx,
+            reserve_fee(Fee,
             bump_and_charge(Sender, Fee,
                 remove_named_account(Name,
-                revoke_claim(Name, Height, S)))
+                revoke_claim(Name, Height, S))))
     end.
 
 ns_revoke_features(S, [_Height, _Sender, _Name, _Tx] = Args, Res) ->
@@ -1028,9 +1044,10 @@ ns_transfer_next(S, _, [_Height, {_SenderTag, Sender}, Receiver, Name, Tx] = Arg
         true  ->
             #{ fee := Fee } = Tx,
             ReceiverKey = resolve_account(S, Receiver),
+            reserve_fee(Fee,
             bump_and_charge(Sender, Fee,
                 transfer_name(ReceiverKey, Name,
-                credit(ReceiverKey, 0, S)))   %% to create it if it doesn't exist
+                credit(ReceiverKey, 0, S))))   %% to create it if it doesn't exist
     end.
 
 ns_transfer_features(S, [_Height, _Sender, _Receiver, _Name, _Tx] = Args, Res) ->
@@ -1109,15 +1126,25 @@ prop_txs() ->
     in_parallel(
     ?FORALL(Cmds, commands(?MODULE),
     begin
+        put(trees, undefined),
         {H, S, Res} = run_commands(Cmds),
         Height = maps:get(height, S, 0),
+        TreesTotal = 
+            case get(trees) of
+                undefined -> #{};
+                Trees -> aec_trees:sum_total_coin(Trees)
+            end,
+        Total = lists:sum(maps:values(TreesTotal)),
+        FeeTotal =  lists:sum([ Fee || {Fee, _} <- maps:get(fees, S, [])]),
         check_command_names(Cmds,
             measure(length, commands_length(Cmds),
             measure(height, Height,
             features(call_features(H),
             aggregate_feats([atoms, correct | all_command_names()], call_features(H),
-                pretty_commands(?MODULE, Cmds, {H, S, Res},
-                                Res == ok))))))
+                ?WHENFAIL(eqc:format("Total = ~p~nFeeTotal = ~p~n", [TreesTotal, FeeTotal]),
+                          pretty_commands(?MODULE, Cmds, {H, S, Res},
+                                          Res == ok andalso 
+                                          (Total == 0 orelse Total == ?PatronAmount - FeeTotal))))))))
     end))).
 
 aggregate_feats([], [], Prop) -> Prop;
@@ -1161,6 +1188,9 @@ charge(Key, Amount, S) -> credit(Key, -Amount, S).
 
 bump_nonce(Key, S) ->
     on_account(Key, fun(Acc) -> Acc#account{ nonce = Acc#account.nonce + 1 } end, S).
+
+reserve_fee(Fee, S = #{fees := Fees, height := H}) ->
+    S#{fees => Fees ++ [{Fee, H}]}.
 
 bump_and_charge(Key, Fee, S) ->
     bump_nonce(Key, charge(Key, Fee, S)).
