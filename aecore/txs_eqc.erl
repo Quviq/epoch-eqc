@@ -24,7 +24,7 @@
 -record(account, {key, amount, nonce, names_owned = []}).
 -record(preclaim,{name, salt, height, claimer}).
 -record(claim,{name, height, update_height, valid_height, revoke_height, claimer}).
--record(query, {sender, id, fee, response_ttl}).
+-record(query, {sender, id, fee, response_ttl, query_ttl}).
 -record(channel, {id, round = 1, amount = 0, reserve = 0}).
 
 %% -- State and state functions ----------------------------------------------
@@ -267,7 +267,7 @@ register_oracle_args(S = #{height := Height}) ->
                   query_fee       => gen_query_fee(),
                   fee => gen_fee(),
                   nonce => gen_nonce(Sender),
-                  oracle_ttl => {delta, elements([0, 1, 2, 100])},
+                  oracle_ttl => {delta, frequency([{9, 1001}, {1, elements([0, 1, 2])}])},
                   abi_version => 0}]).
 
 register_oracle_pre(S, [Height, {_, Sender}, Tx]) ->
@@ -278,7 +278,7 @@ register_oracle_valid(S, [Height, {_, Sender}, Tx]) ->
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx))
     andalso valid_fee(Tx)
-    andalso (not is_oracle(S, Sender) orelse oracle_ttl(S, Sender) =< Height).
+    andalso (not is_oracle(S, Sender) orelse oracle_ttl(S, Sender) < Height).
 
 register_oracle_adapt(#{height := Height} = S, [_, {STag, Sender}, Tx]) ->
     [Height, {STag, Sender}, adapt_nonce(S, Sender, Tx)];
@@ -299,7 +299,7 @@ register_oracle_next(S, _Value, [_Height, {_, Sender}, Tx] = Args) ->
             reserve_fee(Fee,
             bump_and_charge(Sender, Fee,
                 add(oracles, Oracle, 
-                remove(oracles, Oracle, 1, S))))
+                remove(oracles, Sender, 1, S))))
     end.
 
 register_oracle_features(S, [_Height, {_, _Sender}, _Tx] = Args, Res) ->
@@ -372,8 +372,8 @@ query_oracle_args(S = #{accounts := Accounts, height := Height}) ->
                  oracle_id => aec_id:create(oracle, Oracle#account.key),
                  query => oneof([<<"{foo: bar}"/utf8>>, <<"any string"/utf8>>, <<>>]),
                  query_fee => gen_query_fee(QFee),
-                 query_ttl => {delta, 3},
-                 response_ttl => {delta, 3},
+                 query_ttl => {delta, choose(1,5)},
+                 response_ttl => {delta, choose(1,5)},
                  fee => gen_fee(),
                  nonce => gen_nonce(Sender)
                 }]
@@ -391,7 +391,7 @@ query_oracle_valid(S, [Height, {_SenderTag, Sender}, Oracle, Tx]) ->
     andalso check_balance(S, Sender, maps:get(fee, Tx) + maps:get(query_fee, Tx))
     andalso valid_fee(Tx)
     andalso oracle_query_fee(S, Oracle) =< maps:get(query_fee, Tx)
-    andalso oracle_ttl(S, Oracle) > Height + ResponseTTL + QueryTTL.
+    andalso oracle_ttl(S, Oracle) >= Height + ResponseTTL + QueryTTL.
 
 query_oracle_adapt(#{height := Height} = S, [_Height, {STag, Sender}, Oracle, Tx]) ->
     [Height, {STag, Sender}, Oracle, adapt_nonce(S, Sender, Tx)];
@@ -406,10 +406,13 @@ query_oracle_next(S, _Value, [Height, {_, Sender}, Oracle, Tx] = Args) ->
     case query_oracle_valid(S, Args) of
         false -> S;
         true  ->
-            #{ response_ttl := {delta, Delta}, fee := Fee, query_fee := QFee } = Tx,
+            #{ response_ttl := ResponseTTL, 
+               query_ttl := {delta, Delta},
+               fee := Fee, query_fee := QFee } = Tx,
             Query = #query{sender       = Sender,
                            id           = {Sender, maps:get(nonce, untag_nonce(Tx)), Oracle},
-                           response_ttl = Delta + Height,
+                           query_ttl    = Height + Delta,
+                           response_ttl = ResponseTTL,
                            fee          = maps:get(query_fee, Tx)},
             reserve_fee(Fee,
             bump_and_charge(Sender, Fee + QFee,
@@ -427,14 +430,14 @@ response_oracle_pre(S) ->
 
 %% Only responses to existing query tested for the moment, no fault injection
 response_oracle_args(#{accounts := Accounts, height := Height} = S) ->
-     ?LET({Sender, Nonce, Oracle},
+     ?LET({Sender, Nonce, Oracle} = QueryId,
            frequency([{99, ?LET(Query, elements(maps:get(queries, S)), Query#query.id)},
                       {1, {?Patron, 2, ?Patron}}]),
           [Height, {Sender, Nonce, Oracle},
            #{oracle_id => aec_id:create(oracle, Oracle),
              query_id => aeo_query:id(Sender, Nonce, Oracle),
              response => <<"yes, you can">>,
-             response_ttl => {delta, 3},
+             response_ttl => gen_query_response_ttl(S, QueryId),
              fee => gen_fee(),
              nonce => case lists:keyfind(Oracle, #account.key, Accounts) of
                           false -> {bad, 1};
@@ -445,13 +448,15 @@ response_oracle_args(#{accounts := Accounts, height := Height} = S) ->
 response_oracle_pre(S, [Height, {_, _, Q}, Tx]) ->
     correct_height(S, Height) andalso valid_nonce(S, Q, Tx).
 
-response_oracle_valid(S, [_Height, {_, _, Oracle} = QueryId, Tx]) ->
+response_oracle_valid(S, [Height, {_, _, Oracle} = QueryId, Tx]) ->
     is_account(S, Oracle)
     andalso is_oracle(S, Oracle)
     andalso correct_nonce(S, Oracle, Tx)
     andalso check_balance(S, Oracle,  maps:get(fee, Tx))
     andalso valid_fee(Tx)
-    andalso is_query(S, QueryId).
+    andalso is_query(S, QueryId)
+    andalso query_query_ttl(S, QueryId) >= Height
+    andalso query_response_ttl(S, QueryId) == maps:get(response_ttl, Tx).
 
 response_oracle_adapt(#{height := Height} = S, [_, QueryId = {_, _, Q}, Tx]) ->
     [Height, QueryId, adapt_nonce(S, Q, Tx)];
@@ -1312,6 +1317,14 @@ oracle_ttl(#{oracles := Oracles}, Oracle) ->
     {_, _, TTL} = lists:keyfind(Oracle, 1, Oracles),
     TTL.
 
+query_response_ttl(#{queries := Queries}, QueryId) ->
+    Query = lists:keyfind(QueryId, #query.id, Queries),
+    Query#query.response_ttl.
+
+query_query_ttl(#{queries := Queries}, QueryId) ->
+    Query = lists:keyfind(QueryId, #query.id, Queries),
+    Query#query.query_ttl.
+
 is_query(#{queries := Qs}, Q) ->
     lists:keymember(Q, #query.id, Qs).
 
@@ -1506,6 +1519,14 @@ gen_query_fee() ->
 
 gen_query_fee(QF) ->
     weighted_default({29, QF}, {1, elements([QF - 10, QF - 1, QF + 1, QF + 10, QF + 100])}).
+
+gen_query_response_ttl(S, QueryId) ->
+    case lists:keyfind(QueryId, #query.id, maps:get(queries, S, [])) of
+        false ->
+            {delta, nat()};
+        Query ->
+            frequency([{9, Query#query.response_ttl}, {1, {delta, nat()}}])
+    end.
 
 gen_salt() -> choose(270, 280).
 
