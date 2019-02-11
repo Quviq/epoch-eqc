@@ -23,7 +23,7 @@
 
 -record(account, {key, amount, nonce, names_owned = []}).
 -record(preclaim,{name, salt, height, claimer}).
--record(claim,{name, height, update_height, valid_height, revoke_height, claimer}).
+-record(claim,{name, height, expires_by, protected_height,  claimer}).
 -record(query, {sender, id, fee, response_ttl, query_ttl}).
 -record(channel, {id, round = 1, amount = 0, reserve = 0}).
 
@@ -110,19 +110,8 @@ mine(Height) ->
 
 %% In this model we do not pay beneficiaries (that's on a higher level)
 %% Thus no update needed when we reach aec_governance:beneficiary_reward_delay()
-mine_next(#{height := Height, accounts := Accounts} = S, _Value, [_H]) ->
-    ExpiredQs = expired_queries(S, Height),
-    Accounts1 = lists:foldl(
-        fun(Q, As) -> case lists:keyfind(Q#query.sender, #account.key, As) of
-                        false -> As;
-                        A     -> lists:keyreplace(A#account.key, #account.key, As,
-                                                  A#account{ amount = A#account.amount + Q#query.fee })
-                      end
-        end, Accounts, ExpiredQs),
-    S#{height   => Height + 1,
-       accounts => Accounts1,
-       queries  => maps:get(queries, S, []) -- ExpiredQs
-      }.
+mine_next(S, Value, [H]) ->
+    multi_mine_next(S, Value, [H, 1]).
 
 mine_features(S, [H], _Res) ->
     [mine_response_ttl || expired_queries(S, H) =/= [] ] ++
@@ -130,6 +119,10 @@ mine_features(S, [H], _Res) ->
 
 expired_queries(S, Height) ->
     [ Q || Q <- maps:get(queries, S, []), Q#query.response_ttl =< Height ].
+
+expired_claims(S, Height) ->
+    [ C || C <- maps:get(claims, S, []), 
+           C#claim.expires_by + aec_governance:name_protection_period() =< Height ].
 
 %% --- Operation: multi_mine ---
 multi_mine_pre(S) ->
@@ -157,6 +150,8 @@ multi_mine(Height, Blocks) ->
 
 multi_mine_next(#{height := Height, accounts := Accounts} = S, _Value, [_H, Blocks]) ->
     ExpiredQs = expired_queries(S, Height + Blocks - 1),
+    ExpiredClaims = expired_claims(S, Height + Blocks - 1),
+    ExpiredNames = [ C#claim.name || C <- ExpiredClaims ], 
     Accounts1 = lists:foldl(
         fun(Q, As) -> case lists:keyfind(Q#query.sender, #account.key, As) of
                         false -> As;
@@ -166,7 +161,10 @@ multi_mine_next(#{height := Height, accounts := Accounts} = S, _Value, [_H, Bloc
         end, Accounts, ExpiredQs),
     S#{height   => Height + Blocks,
        accounts => Accounts1,
-       queries  => maps:get(queries, S, []) -- ExpiredQs
+       queries  => maps:get(queries, S, []) -- ExpiredQs,
+       claims => maps:get(claims, S, []) -- ExpiredClaims,
+       named_accounts =>
+           maps:without(ExpiredNames, maps:get(named_accounts, S, #{}))
       }.
 
 multi_mine_features(_S, [_, _], _Res) ->
@@ -180,9 +178,10 @@ spend_pre(S) ->
 spend_args(#{accounts := Accounts, height := Height} = S) ->
     ?LET({{SenderTag, Sender}, {ReceiverTag, Receiver}},
          {gen_account(1, 49, Accounts), gen_account(2, 1, Accounts)},
-         ?LET([Amount, Nonce, To], [gen_spend_amount(Sender), gen_nonce(Sender),
-                                    oneof([account, {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++ [<<"ta.test">>])}])],
-              %% important: we should never generate ta.test, it is a definitely wrong name
+         ?LET([Amount, Nonce, To], 
+              [gen_spend_amount(Sender), gen_nonce(Sender),
+               oneof([account, 
+                      {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++ [<<"ta.test">>])}])],
               [Height, {SenderTag, Sender#account.key},
                case To of
                    account -> {ReceiverTag, Receiver#account.key};
@@ -869,7 +868,7 @@ ns_claim_next(#{height := Height} = S, _, [_Height, {_, Sender}, Tx] = Args) ->
             #{ fee := Fee, name := Name } = Tx,
             Claim = #claim{ name         = Name,
                             height       = Height,
-                            valid_height = Height + aec_governance:name_claim_max_expiration(),
+                            expires_by   = Height + aec_governance:name_claim_max_expiration() + 1,
                             claimer      = Sender },
             remove_preclaim(Tx,
             reserve_fee(Fee,
@@ -892,7 +891,7 @@ ns_update_args(#{accounts := Accounts, height := Height} = S) ->
           [Height, Name, {SenderTag, Sender#account.key}, {Tag, NameAccount#account.key},
            #{account_id => aec_id:create(account, Sender#account.key),
              name_id => aec_id:create(name, aens_hash:name_hash(Name)),
-             name_ttl => nat(),
+             name_ttl => frequency([{10, nat()}, {1, 36000}, {10, 25000}, {1, choose(30000, 60000)}]),
              client_ttl => nat(),
              fee => gen_fee(),
              nonce => gen_nonce(Sender),
@@ -914,6 +913,9 @@ ns_update_valid(S, [Height, Name, {_, Sender}, _, Tx]) ->
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx) + aec_governance:name_claim_locked_fee())
     andalso valid_fee(Tx)
+    %% andalso maps:get(name_ttl, Tx) =< 36000   %% The expire_by MUST NOT be more than 36000 blocks into the future.
+                                              %% https://github.com/aeternity/protocol/blob/master/AENS.md
+    andalso maps:get(name_ttl, Tx) =< aec_governance:name_claim_max_expiration()
     andalso owns_name(S, Sender, Name)
     andalso is_valid_name(S, Name, Height).
 
@@ -1249,16 +1251,14 @@ on_claim(Name, Fun, S = #{ claims := Claims }) ->
     S#{ claims := lists:map(Upd, Claims) }.
 
 update_claim_height(Name, Height, TTL, S) ->
-    on_claim(Name, fun(C) -> C#claim{ update_height = Height,
-                                      %% valid_height  = max(C#claim.valid_height, Height + TTL) }
-                                      valid_height  = Height + TTL }
+    on_claim(Name, fun(C) -> C#claim{ expires_by = Height + TTL}
                    end, S).
 
 revoke_claim(Name, Height, S) ->
-    on_claim(Name, fun(C) when C#claim.revoke_height == undefined ->
-                        C#claim{ valid_height = -1,
-                                 revoke_height = aec_governance:name_protection_period() + Height };
-                      (C) -> C end, S).
+    on_claim(Name, fun(C) ->
+                        C#claim{ expires_by = Height - 1}  
+                           %% trick, after a revoke, the name cannot be used any more on that height or heigher
+                    end, S).
 
 remove_named_account(Name, S) ->
     S#{ named_accounts => maps:remove(Name, maps:get(named_accounts, S, #{})) }.
@@ -1271,23 +1271,22 @@ add_named_account(Name, Acc, S) ->
 is_valid_name(#{claims := Names}, Name, Height) ->
     case lists:keyfind(Name, #claim.name, Names) of
         false -> false;
-        Claim -> Claim#claim.revoke_height == undefined
-                 andalso Claim#claim.valid_height >= Height
+        Claim -> Height =< Claim#claim.expires_by
     end.
 
 is_valid_name_account(#{claims := Names} = S, Name, Height) ->
     case lists:keyfind(Name, #claim.name, Names) of
         false -> false;
-        Claim -> Claim#claim.revoke_height == undefined
-                 andalso Claim#claim.valid_height >= Height
-                 andalso maps:is_key(Name, maps:get(named_accounts, S, #{}))
+        _ -> 
+            is_valid_name(S, Name, Height)
+            andalso maps:is_key(Name, maps:get(named_accounts, S, #{}))
     end.
 
-owns_name(#{claims := Names}, Who, Name) ->
+owns_name(#{claims := Names, height := Height}, Who, Name) ->
     case lists:keyfind(Name, #claim.name, Names) of
         false -> false;
         Claim -> Claim#claim.claimer == Who
-                 andalso Claim#claim.revoke_height == undefined
+                 andalso Claim#claim.expires_by >= Height
     end.
 
 correct_name_id(Name, NameId) ->
