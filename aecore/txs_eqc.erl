@@ -241,15 +241,11 @@ spend_next(S, _Value, [_Height, {_SenderTag, Sender}, Receiver, Tx] = Args) ->
                 credit(RKey, Amount, S)))
     end.
 
-spend_features(S, [_Height, {_, _Sender}, {_Tag, _Receiver}, _Tx] = Args, Res) ->
+spend_features(S, [_Height, {_, Sender}, {Tag, Receiver}, _Tx] = Args, Res) ->
     Correct = spend_valid(S, Args),
-    [%{spend, {accounts, length(maps:get(accounts, S))}},
-     {correct,  if Correct -> spend; true -> false end}] ++
-        %% [ {spend, to_self} || Sender == Receiver andalso Correct] ++
-        %% [ {spend, zero} || maps:get(amount, Tx) == 0 andalso Correct] ++
-        %% [ {spend, zero_fee} ||  maps:get(fee, Tx) == 0 ] ++
-        %% [ {spend, to_name} || Tag == name ] ++
-        %% [ {spend, Res} || is_tuple(Res) andalso element(1, Res) == error].
+    [{correct,  if Correct -> spend; true -> false end}] ++
+        [ {spend, to_self, Tag} || Sender == Receiver andalso Correct] ++
+        [ {spend, Tag} ||  Correct] ++
         [{spend, Res}].
 
 
@@ -896,13 +892,17 @@ ns_update_args(#{accounts := Accounts, height := Height} = S) ->
              fee => gen_fee(),
              nonce => gen_nonce(Sender),
              pointers =>
-                 gen_pointers(aec_id:create(account, NameAccount#account.key))
+                 gen_pointers(Accounts, aec_id:create(account, NameAccount#account.key))
             }]).
 
-gen_pointers(Id) ->
-    weighted_default(
+gen_pointers(Accounts, Id) ->
+    frequency([
         {3, [aens_pointer:new(<<"account_pubkey">>, Id)]},
-        {1, []}).
+        {1, [aens_pointer:new(<<"account_pubkey">>, Id), 
+             ?LET({_, Acc}, gen_account(1, 49, Accounts), 
+                  aens_pointer:new(<<"account_pubkey">>, aec_id:create(account, Acc#account.key)))]},
+            %% if there are more than one accounts with same key, node seems to take the first one
+        {1, []}]).
 
 ns_update_pre(S, [Height, Name, {_, Sender}, _NameAccount, Tx]) ->
     aec_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx)
@@ -913,8 +913,6 @@ ns_update_valid(S, [Height, Name, {_, Sender}, _, Tx]) ->
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx) + aec_governance:name_claim_locked_fee())
     andalso valid_fee(Tx)
-    %% andalso maps:get(name_ttl, Tx) =< 36000   %% The expire_by MUST NOT be more than 36000 blocks into the future.
-                                              %% https://github.com/aeternity/protocol/blob/master/AENS.md
     andalso maps:get(name_ttl, Tx) =< aec_governance:name_claim_max_expiration()
     andalso owns_name(S, Sender, Name)
     andalso is_valid_name(S, Name, Height).
@@ -941,10 +939,11 @@ ns_update_next(S, _, [Height, Name, {_, Sender}, {_, NameAccount}, Tx] = Args) -
                 update_claim_height(Name, Height, TTL, S1)))
     end.
 
-ns_update_features(S, [_Height, _Name, _Sender, {_Tag, _NameAccount}, _Tx] = Args, Res) ->
+ns_update_features(S, [_Height, _Name, _Sender, {_Tag, _NameAccount}, Tx] = Args, Res) ->
     Correct = ns_update_valid(S, Args),
     [{correct, if Correct -> ns_update; true -> false end},
-     {ns_update, Res}].
+     {ns_update, Res}] ++ 
+        [{ns_update, double_pointer} || length(maps:get(pointers, Tx)) > 1 ].
 
 %% --- Operation: ns_revoke ---
 ns_revoke_pre(S) ->
