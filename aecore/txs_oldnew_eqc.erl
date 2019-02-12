@@ -245,15 +245,11 @@ untag_nonce(M = #{nonce := {_Tag, N}}) -> M#{nonce := N};
 untag_nonce(M)                         -> M.
 
 valid_mismatch({'EXIT',{different, {error, account_nonce_too_low},
-                        {error, insufficient_funds}}}) -> true;
+                        {error, _}}}) -> true;
 valid_mismatch({'EXIT', {different, {error, account_nonce_too_high},
-                         {error, insufficient_funds}}}) -> true;
-valid_mismatch({'EXIT', {different, {error, account_nonce_too_high},
-                         {error, multiple_namespaces}}}) -> true;
-valid_mismatch({'EXIT', {different, {error, account_nonce_too_low},
-                         {error, multiple_namespaces}}}) -> true;
+                         {error, _}}}) -> true;
 valid_mismatch({'EXIT', {different, {error, account_not_found},
-                         {error, multiple_namespaces}}}) -> true;
+                         {error, _}}}) -> true;
 valid_mismatch({'EXIT', {different, {error, insufficient_funds},
                          {error, multiple_namespaces}}}) -> true;
 valid_mismatch({'EXIT', {different, {error, name_does_not_exist},
@@ -265,12 +261,6 @@ valid_mismatch({'EXIT', {different, {error, pointer_id_not_found},
 valid_mismatch({'EXIT', {different, {error, name_revoked},
                          {error, insufficient_funds}}}) -> true;
 %% Close mutual
-valid_mismatch({'EXIT', {different, {error, account_nonce_too_low},
-                         {error, channel_does_not_exist}}}) -> true;
-valid_mismatch({'EXIT', {different, {error, account_nonce_too_high},
-                         {error, channel_does_not_exist}}}) -> true;
-valid_mismatch({'EXIT', {different, {error, account_not_found},
-                         {error, channel_does_not_exist}}}) -> true;
 valid_mismatch(_) -> false.
 
 %% -- Generators -------------------------------------------------------------
