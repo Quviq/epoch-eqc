@@ -18,7 +18,7 @@
 
 -compile([export_all, nowarn_export_all]).
 -define(Patron, <<1, 1, 0:240>>).
--define(PatronAmount, 120000000).
+-define(PatronAmount, (120000000 * aec_governance:minimum_gas_price())).
 -define(NAMEFRAGS, ["foo", "bar", "baz"]).
 
 -record(account, {key, amount, nonce, names_owned = []}).
@@ -30,6 +30,12 @@
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
     #{claims => [], preclaims => [], oracles => [], fees => []}.
+
+patron() ->
+    {?Patron, ?PatronAmount}.
+
+minimum_gas_price() ->
+    aec_governance:minimum_gas_price().
 
 %% -- Common pre-/post-conditions --------------------------------------------
 command_precondition_common(_S, _Cmd) ->
@@ -75,17 +81,19 @@ init_args(_S) ->
     [0].
 
 init(_Height) ->
+    {PA, PAmount} = patron(),
     Trees         = aec_trees:new_without_backend(),
     AccountTrees  = aec_trees:accounts(Trees),
-    PatronAccount = aec_accounts:new(?Patron, ?PatronAmount),
+    PatronAccount = aec_accounts:new(PA, PAmount),
     AccountTrees1 = aec_accounts_trees:enter(PatronAccount, AccountTrees),
     Trees1        = aec_trees:set_accounts(Trees, AccountTrees1),
     put(trees, Trees1),
     ok.
 
 init_next(S, _Value, [Height]) ->
+    {PA, PAmount} = patron(),
     S#{height   => Height,
-       accounts => [#account{key = ?Patron, amount = ?PatronAmount, nonce = 1}]}.
+       accounts => [#account{key = PA, amount = PAmount, nonce = 1}]}.
 
 %% --- Operation: mine ---
 mine_pre(S) ->
@@ -1327,7 +1335,7 @@ is_query(#{queries := Qs}, Q) ->
     lists:keymember(Q, #query.id, Qs).
 
 valid_fee(#{ fee := Fee }) ->
-    Fee >= 20000.   %% not precise, but we don't generate fees in the shady range
+    Fee >= 20000 * minimum_gas_price().   %% not precise, but we don't generate fees in the shady range
 
 correct_nonce(S, Key, #{nonce := {_Tag, Nonce}}) ->
     (account(S, Key))#account.nonce == Nonce.
@@ -1509,8 +1517,8 @@ gen_channel_round(#{channels := Cs}, CId) ->
     end.
 
 gen_fee() ->
-    weighted_default({29, choose(20000, 30000)},
-                     {1,  choose(0, 15000)}).    %% too low
+    weighted_default({29, ?LET(F, choose(20000, 30000), F * minimum_gas_price())},
+                     {1,  ?LET(F, choose(0, 15000), F * minimum_gas_price())}).    %% too low
 
 gen_query_fee() ->
     choose(10, 1000).
@@ -1529,7 +1537,7 @@ gen_query_response_ttl(S, QueryId) ->
 gen_salt() -> choose(270, 280).
 
 gen_channel_amount() ->
-    choose(20000, 200000).
+    ?LET(F, choose(20000, 200000), F * minimum_gas_price()).
 
 gen_create_channel_amounts() ->
     ?LET({I, R}, {gen_channel_amount(), gen_channel_amount()},

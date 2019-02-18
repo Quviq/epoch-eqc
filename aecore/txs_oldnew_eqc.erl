@@ -24,14 +24,7 @@
 
 -compile([export_all, nowarn_export_all]).
 -define(REMOTE_NODE, 'oldepoch@localhost').
--define(Patron, <<1, 1, 0:240>>).
 -define(NAMEFRAGS, ["foo", "bar", "baz"]).
-
-%% -record(account, {key, amount, nonce, names_owned = []}).
-%% -record(preclaim,{name, salt, height, claimer}).
-%% -record(claim,{name, height, update_height, valid_height, revoke_height, claimer}).
-%% -record(query, {sender, id, fee, response_ttl}).
-%% -record(channel, {id, round = 1, amount = 0, reserve = 0}).
 
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
@@ -67,9 +60,10 @@ all_command_names() ->
 
 %% --- Operation: init ---
 init(_Height) ->
+    {PA, PAmount} = txs_eqc:patron(),
     Trees = rpc(aec_trees, new_without_backend, [], fun hash_equal/2),
     EmptyAccountTree = rpc(aec_trees, accounts, [Trees]),
-    Account = rpc(aec_accounts, new, [?Patron, 120000000]),
+    Account = rpc(aec_accounts, new, [PA, PAmount]),
     AccountTree = rpc(aec_accounts_trees, enter, [Account, EmptyAccountTree]),
     InitialTrees = rpc(aec_trees, set_accounts, [Trees, AccountTree], fun hash_equal/2),
     put(trees, InitialTrees),
