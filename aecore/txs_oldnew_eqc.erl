@@ -194,6 +194,13 @@ hash_equal(X, Y) ->
                  false -> exit({hash_differs, X, Y})
              end;
          {E, E} -> E;
+         {L, R} when is_tuple(L) andalso element(1, L)==trees,
+                is_tuple(R) andalso element(1, R)==trees->
+             %% Compare two trees
+             case aec_trees:hash(L) == aec_trees:hash(R) of
+                 true -> X;
+                 false -> exit({hash_differs, X, Y})
+             end;
          _ -> exit({different, X, Y})
      end.
 
