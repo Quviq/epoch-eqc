@@ -18,7 +18,7 @@
 
 -compile([export_all, nowarn_export_all]).
 -define(Patron, <<1, 1, 0:240>>).
--define(PatronAmount, (120000000 * aec_governance:minimum_gas_price())).
+-define(PatronAmount, 100000000000001).  %% read from file
 -define(NAMEFRAGS, ["foo", "bar", "baz"]).
 
 -record(account, {key, amount, nonce, names_owned = []}).
@@ -34,8 +34,8 @@ initial_state() ->
 patron() ->
     {?Patron, ?PatronAmount}.
 
-minimum_gas_price() ->
-    aec_governance:minimum_gas_price().
+minimum_gas_price(H) ->
+    aec_governance:minimum_gas_price(H).
 
 %% -- Common pre-/post-conditions --------------------------------------------
 command_precondition_common(_S, _Cmd) ->
@@ -204,7 +204,7 @@ spend_args(#{accounts := Accounts, height := Height} = S) ->
                              aec_id:create(name, aens_hash:name_hash(Name))
                      end,
                  amount => Amount,
-                 fee => gen_fee(),
+                 fee => gen_fee(Height),
                  nonce => Nonce,
                  payload => utf8()}])).
 
@@ -221,7 +221,7 @@ spend_valid(S, [Height, {_, Sender}, {ReceiverTag, Receiver}, Tx]) ->
     is_account(S, Sender)
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(amount, Tx) + maps:get(fee, Tx))
-    andalso valid_fee(Tx)
+    andalso valid_fee(Height, Tx)
     andalso case ReceiverTag of
                new      -> true;
                existing -> is_account(S, Receiver);
@@ -268,7 +268,7 @@ register_oracle_args(S = #{height := Height}) ->
                   query_format    => <<"send me any string"/utf8>>,
                   response_format => <<"boolean()"/utf8>>,
                   query_fee       => gen_query_fee(),
-                  fee => gen_fee(),
+                  fee => gen_fee(Height),
                   nonce => gen_nonce(Sender),
                   oracle_ttl => {delta, frequency([{9, 1001}, {1, elements([0, 1, 2])}])},
                   abi_version => 0}]).
@@ -280,7 +280,7 @@ register_oracle_valid(S, [Height, {_, Sender}, Tx]) ->
     is_account(S, Sender)
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx))
-    andalso valid_fee(Tx)
+    andalso valid_fee(Height, Tx)
     andalso (not is_oracle(S, Sender) orelse oracle_ttl(S, Sender) < Height).
 
 register_oracle_adapt(#{height := Height} = S, [_, {STag, Sender}, Tx]) ->
@@ -321,7 +321,7 @@ extend_oracle_args(S = #{height := Height}) ->
           #{oracle_id  => aec_id:create(oracle, Oracle#account.key),
             nonce      => gen_nonce(Oracle),
             oracle_ttl => {delta, DeltaTTL},
-            fee        => gen_fee()
+            fee        => gen_fee(Height)
            }]).
 
 extend_oracle_pre(S, [Height, Oracle, Tx]) ->
@@ -332,7 +332,7 @@ extend_oracle_valid(S, [Height, Oracle, Tx]) ->
     andalso is_oracle(S, Oracle)
     andalso correct_nonce(S, Oracle, Tx)
     andalso check_balance(S, Oracle, maps:get(fee, Tx))
-    andalso valid_fee(Tx)
+    andalso valid_fee(Height, Tx)
     andalso oracle_ttl(S, Oracle) >= Height.
 
 extend_oracle_adapt(#{height := Height} = S, [_Height, Oracle, Tx]) ->
@@ -377,7 +377,7 @@ query_oracle_args(S = #{accounts := Accounts, height := Height}) ->
                  query_fee => gen_query_fee(QFee),
                  query_ttl => {delta, choose(1,5)},
                  response_ttl => {delta, choose(1,5)},
-                 fee => gen_fee(),
+                 fee => gen_fee(Height),
                  nonce => gen_nonce(Sender)
                 }]
           end).
@@ -392,7 +392,7 @@ query_oracle_valid(S, [Height, {_SenderTag, Sender}, Oracle, Tx]) ->
     andalso is_oracle(S, Oracle)
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx) + maps:get(query_fee, Tx))
-    andalso valid_fee(Tx)
+    andalso valid_fee(Height, Tx)
     andalso oracle_query_fee(S, Oracle) =< maps:get(query_fee, Tx)
     andalso oracle_ttl(S, Oracle) >= Height + ResponseTTL + QueryTTL.
 
@@ -441,7 +441,7 @@ response_oracle_args(#{accounts := Accounts, height := Height} = S) ->
              query_id => aeo_query:id(Sender, Nonce, Oracle),
              response => <<"yes, you can">>,
              response_ttl => gen_query_response_ttl(S, QueryId),
-             fee => gen_fee(),
+             fee => gen_fee(Height),
              nonce => case lists:keyfind(Oracle, #account.key, Accounts) of
                           false -> {bad, 1};
                           Account -> {good, Account#account.nonce}
@@ -456,7 +456,7 @@ response_oracle_valid(S, [Height, {_, _, Oracle} = QueryId, Tx]) ->
     andalso is_oracle(S, Oracle)
     andalso correct_nonce(S, Oracle, Tx)
     andalso check_balance(S, Oracle,  maps:get(fee, Tx))
-    andalso valid_fee(Tx)
+    andalso valid_fee(Height, Tx)
     andalso is_query(S, QueryId)
     andalso query_query_ttl(S, QueryId) >= Height
     andalso query_response_ttl(S, QueryId) == maps:get(response_ttl, Tx).
@@ -495,7 +495,7 @@ channel_create_pre(S) ->
 channel_create_args(#{accounts := Accounts, height := Height}) ->
      ?LET([{_, Initiator}, {_, Responder}],
           vector(2, gen_account(1, 49, Accounts)),
-     ?LET({IAmount, RAmount, ChannelReserve}, gen_create_channel_amounts(),
+     ?LET({IAmount, RAmount, ChannelReserve}, gen_create_channel_amounts(Height),
           [Height, Initiator#account.key, Responder#account.key,
                 #{initiator_id => aec_id:create(account, Initiator#account.key),
                   responder_id => aec_id:create(account, Responder#account.key),
@@ -504,20 +504,20 @@ channel_create_args(#{accounts := Accounts, height := Height}) ->
                   responder_amount => RAmount,
                   lock_period => choose(0,2),
                   channel_reserve => ChannelReserve,
-                  fee => gen_fee(),
+                  fee => gen_fee(Height),
                   nonce => gen_nonce(Initiator)}])).
 
 channel_create_pre(S, [Height, Initiator, Responder, Tx]) ->
     Initiator =/= Responder
     andalso correct_height(S, Height) andalso valid_nonce(S, Initiator, Tx).
 
-channel_create_valid(S, [_Height, Initiator, Responder, Tx]) ->
+channel_create_valid(S, [Height, Initiator, Responder, Tx]) ->
     is_account(S, Initiator)
     andalso is_account(S, Responder)
     andalso correct_nonce(S, Initiator, Tx)
     andalso check_balance(S, Initiator, maps:get(fee, Tx) + maps:get(initiator_amount, Tx))
     andalso check_balance(S, Responder, maps:get(responder_amount, Tx))
-    andalso valid_fee(Tx)
+    andalso valid_fee(Height, Tx)
     andalso maps:get(initiator_amount, Tx) >= maps:get(channel_reserve, Tx)
     andalso maps:get(responder_amount, Tx) >= maps:get(channel_reserve, Tx).
 
@@ -567,9 +567,9 @@ channel_deposit_args(#{height := Height} = S) ->
           [Height, {Initiator, N, Responder}, Party,
                 #{channel_id => aec_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder)),
                   from_id => aec_id:create(account, From),
-                  amount => gen_channel_amount(),
+                  amount => gen_channel_amount(Height),
                   round => gen_channel_round(S, CId),
-                  fee => gen_fee(),
+                  fee => gen_fee(Height),
                   state_hash => <<0:256>>,
                   nonce => gen_nonce(account(S, From))
                  }]
@@ -579,14 +579,14 @@ channel_deposit_pre(S, [Height, {I, _, R}, Party, Tx]) ->
     From = case Party of initiator -> I; responder -> R end,
     correct_height(S, Height) andalso valid_nonce(S, From, Tx).
 
-channel_deposit_valid(S, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx]) ->
+channel_deposit_valid(S, [Height, {Initiator, _, Responder} = ChannelId, Party, Tx]) ->
     From = case Party of initiator -> Initiator; responder -> Responder end,
     is_account(S, Initiator)
     andalso is_account(S, Responder)
     andalso is_channel(S, ChannelId)
     andalso correct_nonce(S, From, Tx)
     andalso check_balance(S, From, maps:get(fee, Tx) + maps:get(amount, Tx))
-    andalso valid_fee(Tx)
+    andalso valid_fee(Height, Tx)
     andalso correct_round(S, ChannelId, Tx).
 
 channel_deposit_adapt(#{height := Height} = S, [_, ChannelId = {I, _, R}, Party, Tx]) ->
@@ -634,9 +634,9 @@ channel_withdraw_args(#{height := Height} = S) ->
          [Height, {Initiator, N, Responder}, Party,
                #{channel_id => aec_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder)),
                  to_id => aec_id:create(account, From),
-                 amount => gen_channel_amount(),
+                 amount => gen_channel_amount(Height),
                  round => gen_channel_round(S, CId),
-                 fee => gen_fee(),
+                 fee => gen_fee(Height),
                  state_hash => <<0:256>>,
                  nonce => gen_nonce(account(S, From))
                 }]
@@ -646,14 +646,14 @@ channel_withdraw_pre(S, [Height, {I, _, R}, Party, Tx]) ->
     From = case Party of initiator -> I; responder -> R end,
     correct_height(S, Height) andalso valid_nonce(S, From, Tx).
 
-channel_withdraw_valid(S, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx]) ->
+channel_withdraw_valid(S, [Height, {Initiator, _, Responder} = ChannelId, Party, Tx]) ->
     From = case Party of initiator -> Initiator; responder -> Responder end,
     is_account(S, Initiator)
     andalso is_account(S, Responder)
     andalso is_channel(S, ChannelId)
     andalso correct_nonce(S, From, Tx)
     andalso check_balance(S, From, maps:get(fee, Tx))
-    andalso valid_fee(Tx)
+    andalso valid_fee(Height, Tx)
     andalso correct_round(S, ChannelId, Tx)
     andalso (channel(S, ChannelId))#channel.amount >= maps:get(amount, Tx)
     andalso (channel(S, ChannelId))#channel.amount - maps:get(amount, Tx) >= (channel(S, ChannelId))#channel.reserve*2.
@@ -714,13 +714,13 @@ channel_close_mutual_pre(S, [Height, {I, _, R}, Party, Tx]) ->
     From = case Party of initiator -> I; responder -> R end,
     correct_height(S, Height) andalso valid_nonce(S, From, Tx).
 
-channel_close_mutual_valid(S, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx]) ->
+channel_close_mutual_valid(S, [Height, {Initiator, _, Responder} = ChannelId, Party, Tx]) ->
     From = case Party of initiator -> Initiator; responder -> Responder end,
     is_account(S, Initiator)
     andalso is_account(S, Responder)
     andalso is_channel(S, ChannelId)
     andalso correct_nonce(S, From, Tx)
-    andalso valid_fee(Tx)
+    andalso valid_fee(Height, Tx)
     andalso (channel(S, ChannelId))#channel.amount >=
                 maps:get(initiator_amount_final, Tx) + maps:get(responder_amount_final, Tx) + maps:get(fee, Tx).
 
@@ -767,7 +767,7 @@ ns_preclaim_args(#{accounts := Accounts, height := Height}) ->
           [gen_account(1, 49, Accounts), gen_name(), gen_salt()],
           [Height, {SenderTag, Sender#account.key}, {Name, Salt},
            #{account_id => aec_id:create(account, Sender#account.key),
-             fee => gen_fee(),
+             fee => gen_fee(Height),
              commitment_id =>
                  aec_id:create(commitment,
                                aens_hash:commitment_hash(Name, Salt)),
@@ -779,10 +779,10 @@ ns_preclaim_pre(S, [Height, {_, Sender}, {Name, Salt}, Tx]) ->
         andalso aec_id:create(commitment, aens_hash:commitment_hash(Name, Salt)) == maps:get(commitment_id, Tx)
         andalso correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
 
-ns_preclaim_valid(S, [_Height, {_, Sender}, {_Name, _Salt}, Tx]) ->
+ns_preclaim_valid(S, [Height, {_, Sender}, {_Name, _Salt}, Tx]) ->
     is_account(S, Sender)
     andalso correct_nonce(S, Sender, Tx)
-    andalso valid_fee(Tx)
+    andalso valid_fee(Height, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx)).
 
 ns_preclaim_adapt(#{height := Height} = S, [_Height, {SenderTag, Sender}, {Name, Salt}, Tx]) ->
@@ -825,7 +825,7 @@ ns_claim_args(S = #{height := Height}) ->
            #{account_id => aec_id:create(account, Sender#account.key),
              name => Name,
              name_salt => Salt,
-             fee => gen_fee(),
+             fee => gen_fee(Height),
              nonce => gen_nonce(Sender)}]).
 
 
@@ -836,7 +836,7 @@ ns_claim_valid(S, [Height, {_, Sender}, Tx]) ->
     is_account(S, Sender)
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx) + aec_governance:name_claim_locked_fee())
-    andalso valid_fee(Tx)
+    andalso valid_fee(Height, Tx)
     andalso is_valid_preclaim(S, Tx, Sender, Height).
 
 is_valid_preclaim(S = #{preclaims := Ps}, Tx = #{name := Name, name_salt := Salt}, Claimer, Height) ->
@@ -897,7 +897,7 @@ ns_update_args(#{accounts := Accounts, height := Height} = S) ->
              name_id => aec_id:create(name, aens_hash:name_hash(Name)),
              name_ttl => frequency([{10, nat()}, {1, 36000}, {10, 25000}, {1, choose(30000, 60000)}]),
              client_ttl => nat(),
-             fee => gen_fee(),
+             fee => gen_fee(Height),
              nonce => gen_nonce(Sender),
              pointers =>
                  gen_pointers(Accounts, aec_id:create(account, NameAccount#account.key))
@@ -920,7 +920,7 @@ ns_update_valid(S, [Height, Name, {_, Sender}, _, Tx]) ->
     is_account(S, Sender)
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx) + aec_governance:name_claim_locked_fee())
-    andalso valid_fee(Tx)
+    andalso valid_fee(Height, Tx)
     andalso maps:get(name_ttl, Tx) =< aec_governance:name_claim_max_expiration()
     andalso owns_name(S, Sender, Name)
     andalso is_valid_name(S, Name, Height).
@@ -962,7 +962,7 @@ ns_revoke_args(#{height := Height} = S) ->
           [Height, {SenderTag, Sender#account.key}, Name,
            #{account_id => aec_id:create(account, Sender#account.key),
              name_id => aec_id:create(name, aens_hash:name_hash(Name)),
-             fee => gen_fee(),
+             fee => gen_fee(Height),
              nonce => gen_nonce(Sender)
             }]).
 
@@ -974,7 +974,7 @@ ns_revoke_valid(S, [Height, {_SenderTag, Sender}, Name, Tx]) ->
     is_account(S, Sender)
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx))
-    andalso valid_fee(Tx)
+    andalso valid_fee(Height, Tx)
     andalso owns_name(S, Sender, Name)
     andalso is_valid_name(S, Name, Height).
 
@@ -1025,7 +1025,7 @@ ns_transfer_args(#{accounts := Accounts, height := Height} = S) ->
                              aec_id:create(name, aens_hash:name_hash(ToName))
                      end,
                  name_id => aec_id:create(name, aens_hash:name_hash(Name)),
-                 fee => gen_fee(),
+                 fee => gen_fee(Height),
                  nonce => gen_nonce(Sender)
                 }])).
 
@@ -1039,7 +1039,7 @@ ns_transfer_valid(S, [Height, {_SenderTag, Sender}, {ReceiverTag, Receiver}, Nam
     is_account(S, Sender)
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx))
-    andalso valid_fee(Tx)
+    andalso valid_fee(Height, Tx)
     andalso owns_name(S, Sender, Name)
     andalso is_valid_name(S, Name, Height)
     andalso case ReceiverTag of
@@ -1334,8 +1334,8 @@ query_query_ttl(#{queries := Queries}, QueryId) ->
 is_query(#{queries := Qs}, Q) ->
     lists:keymember(Q, #query.id, Qs).
 
-valid_fee(#{ fee := Fee }) ->
-    Fee >= 20000 * minimum_gas_price().   %% not precise, but we don't generate fees in the shady range
+valid_fee(H, #{ fee := Fee }) ->
+    Fee >= 20000 * minimum_gas_price(H).   %% not precise, but we don't generate fees in the shady range
 
 correct_nonce(S, Key, #{nonce := {_Tag, Nonce}}) ->
     (account(S, Key))#account.nonce == Nonce.
@@ -1516,9 +1516,10 @@ gen_channel_round(#{channels := Cs}, CId) ->
             weighted_default({29, R+1}, {1, ?LET(R_, elements([R-3, R-1, R, R+3]), abs(R_))})
     end.
 
-gen_fee() ->
-    weighted_default({29, ?LET(F, choose(20000, 30000), F * minimum_gas_price())},
-                     {1,  ?LET(F, choose(0, 15000), F * minimum_gas_price())}).    %% too low
+gen_fee(H) ->
+    frequency([{29, ?LET(F, choose(20000, 30000), F * minimum_gas_price(H))},
+                {1,  ?LET(F, choose(0, 15000), F)},   %%  too low (and very low for hard fork)
+                {1,  ?LET(F, choose(0, 15000), F * minimum_gas_price(H))}]).    %% too low
 
 gen_query_fee() ->
     choose(10, 1000).
@@ -1536,31 +1537,32 @@ gen_query_response_ttl(S, QueryId) ->
 
 gen_salt() -> choose(270, 280).
 
-gen_channel_amount() ->
-    ?LET(F, choose(20000, 200000), F * minimum_gas_price()).
+gen_channel_amount(H) ->
+    ?LET(F, choose(20000, 200000), F * minimum_gas_price(H)).
 
-gen_create_channel_amounts() ->
-    ?LET({I, R}, {gen_channel_amount(), gen_channel_amount()},
-            weighted_default({29, {I, R, min(I, R) - 2000}}, {1, {I, R, gen_channel_amount()}})).
+gen_create_channel_amounts(H) ->
+    ?LET({I, R}, {gen_channel_amount(H), gen_channel_amount(H)},
+            weighted_default({29, {I, R, min(I, R) - 2000}}, {1, {I, R, gen_channel_amount(H)}})).
 
-gen_close_channel_amounts(#{channels := Cs}, CId) ->
+gen_close_channel_amounts(#{channels := Cs, height := Height}, CId) ->
+    ?LET(Fee, gen_fee(Height),
     case lists:keyfind(CId, #channel.id, Cs) of
-        false -> {gen_channel_amount(), gen_channel_amount(), gen_fee()};
+        false -> {gen_channel_amount(Height), gen_channel_amount(Height), Fee};
         #channel{amount = A} ->
             weighted_default(
-                {5, ?LET({Fee, Factor1, Factor2}, {gen_fee(), choose(0, 50), choose(0, 50)},
+                {5, ?LET({Factor1, Factor2}, {choose(0, 50), choose(0, 50)},
                      begin
                         I = ((A - Fee) * Factor1) div 100,
                         R = ((A - Fee) * Factor2) div 100,
                         {I, R, Fee}
                      end)},
-                {1, ?LET({Fee, Factor1, Factor2}, {gen_fee(), choose(0, 100), choose(0, 100)},
+                {1, ?LET({Factor1, Factor2}, {choose(0, 100), choose(0, 100)},
                      begin
                         I = ((A - Fee) * Factor1) div 100,
                         R = ((A - Fee) * Factor2) div 100,
                         {I, R, Fee}
                      end)})
-    end.
+    end).
 
 
 gen_ttl() ->
