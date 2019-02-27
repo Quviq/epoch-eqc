@@ -230,7 +230,7 @@ apply_transaction(Height, TxMod, TxArgs0) ->
     {ok, Tx} = rpc(TxMod, new, [TxArgs]),
 
     Remote = case rpc:call(?REMOTE_NODE, aetx, check, [Tx, Trees, Env], 1000) of
-                {ok, RemoteTrees} -> rpc:call(node(), aetx, process, [Tx, RemoteTrees, Env], 1000);
+                {ok, RemoteTrees} -> rpc:call(?REMOTE_NODE, aetx, process, [Tx, RemoteTrees, Env], 1000);
                 RemoteErr         -> RemoteErr
             end,
     Local = rpc:call(node(), aetx, process, [Tx, Trees, Env], 1000),
