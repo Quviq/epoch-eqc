@@ -721,6 +721,8 @@ channel_close_mutual_valid(S, [Height, {Initiator, _, Responder} = ChannelId, Pa
     andalso is_channel(S, ChannelId)
     andalso correct_nonce(S, From, Tx)
     andalso valid_fee(Height, Tx)
+    andalso maps:get(initiator_amount_final, Tx) >= 0
+    andalso maps:get(responder_amount_final, Tx) >= 0
     andalso (channel(S, ChannelId))#channel.amount >=
                 maps:get(initiator_amount_final, Tx) + maps:get(responder_amount_final, Tx) + maps:get(fee, Tx).
 
@@ -1554,13 +1556,13 @@ gen_close_channel_amounts(#{channels := Cs, height := Height}, CId) ->
                      begin
                         I = ((A - Fee) * Factor1) div 100,
                         R = ((A - Fee) * Factor2) div 100,
-                        {I, R, Fee}
+                        {abs(I), abs(R), Fee}
                      end)},
                 {1, ?LET({Factor1, Factor2}, {choose(0, 100), choose(0, 100)},
                      begin
                         I = ((A - Fee) * Factor1) div 100,
                         R = ((A - Fee) * Factor2) div 100,
-                        {I, R, Fee}
+                        {abs(I), abs(R), Fee}
                      end)})
     end).
 
