@@ -45,9 +45,9 @@ next_state(S, V, {call, _M, F, Args}) ->
 
 postcondition(S, {call, _M, F, Args}, Res) ->
     case Res of
-        {'EXIT', _} -> valid_mismatch(Res);
-        _ ->
-            txs_eqc:postcondition(S, {call, txs_eqc, F, Args}, Res)
+        {'EXIT', _} -> aec_hard_forks:protocol_effective_at_height(maps:get(height, S, 0)) > 1 orelse 
+                           valid_mismatch(Res);
+        _ ->  txs_eqc:postcondition(S, {call, txs_eqc, F, Args}, Res)
     end.
 
 call_features(S, {call, _M, F, Args}, Res) ->
@@ -150,6 +150,9 @@ prop_tx_primops() ->
     ?FORALL(Cmds, commands(?MODULE),
     begin
         pong = net_adm:ping(?REMOTE_NODE),
+        rpc(application, load, [aecore]),
+        rpc(application, set_env, [aecore, hard_forks, 
+                                   #{<<"1">> => 0, <<"2">> => 3}]),
 
         {H, S, Res} = run_commands(Cmds),
         Height = maps:get(height, S, 0),
