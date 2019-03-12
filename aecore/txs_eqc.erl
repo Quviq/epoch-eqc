@@ -69,7 +69,9 @@ valid_common(ns_preclaim, S, Args)          -> ns_preclaim_valid(S, Args);
 valid_common(ns_claim, S, Args)             -> ns_claim_valid(S, Args);
 valid_common(ns_update, S, Args)            -> ns_update_valid(S, Args);
 valid_common(ns_revoke, S, Args)            -> ns_revoke_valid(S, Args);
-valid_common(ns_transfer, S, Args)          -> ns_transfer_valid(S, Args).
+valid_common(ns_transfer, S, Args)          -> ns_transfer_valid(S, Args);
+valid_common(contract_create, S, Args)      -> contract_create_valid(S, Args).
+
 
 %% -- Operations -------------------------------------------------------------
 
@@ -1077,6 +1079,94 @@ ns_transfer_features(S, [_Height, _Sender, _Receiver, _Name, _Tx] = Args, Res) -
     [{correct, if Correct -> ns_transfer; true -> false end},
      {ns_transfer, Res}].
 
+%% --- Operation: create_contract ---
+contract_create_pre(S) ->
+    maps:is_key(accounts, S) andalso maps:get(height, S) > 0.
+
+contract_create_args(#{height := Height, accounts := Accounts}) ->
+     ?LET({SenderTag, Sender}, gen_account(1, 100, Accounts),
+          ?LET({_, _, GasFun} = Contract, gen_contract_and_init(),
+          [Height, {SenderTag, Sender#account.key}, Contract,
+           frequency([{10, 1}, {30, 2}]),
+                #{owner_id => aec_id:create(account, Sender#account.key),
+                  vm_version  => frequency([{1, elements([0,4])}, {10, sophia_1}, {2, solidity}, {20, sophia_2}]),
+                  abi_version => frequency([{1, 0}, {10, 1}, {20, 2}, {1, 3}]),
+                  fee => ?LET(Fee, gen_fee(Height), Fee*20),
+                  gas_price => frequency([{1,0}, {10, 1}, {89, minimum_gas_price(Height)}]),
+                  gas => frequency([{7, GasFun(Height)}, {1, GasFun(Height) - 1}, {1, GasFun(Height) + 100}, {1, 1}]),
+                  nonce => gen_nonce(Sender),
+                  deposit => nat(),
+                  amount => gen_spend_amount(Sender)
+                  }])).
+
+%% Generate a contract (by name) and the init arguments
+gen_contract_and_init() ->
+    {"contracts/identity", [], fun(_) -> 193 end}.
+
+
+contract_create_pre(S, [Height, {_, Sender}, _, _, Tx]) ->
+    correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
+
+contract_create_valid(S, [Height, {_, Sender}, {_, _, GasFun}, CompilerVersion, Tx]) ->
+    Protocol = aec_hard_forks:protocol_effective_at_height(Height),
+    is_account(S, Sender)
+    andalso correct_nonce(S, Sender, Tx)
+    andalso check_balance(S, Sender, maps:get(fee, Tx))
+    andalso valid_contract_fee(Height, GasFun, Tx)
+    andalso if Protocol == 1 ->
+                    lists:member({maps:get(vm_version, Tx), maps:get(abi_version, Tx)},
+                                 [{sophia_1, 1}, {sophia_1, 1}]);  %% second compiler could create VM1 code ?
+               Protocol == 2 ->
+                    lists:member({maps:get(vm_version, Tx), maps:get(abi_version, Tx)},
+                                 [{sophia_2, 1}, {sophia_2, 1}])
+            end
+    andalso lists:member(CompilerVersion, [1, 2]).
+
+contract_create_adapt(#{height := Height} = S, [_, {STag, Sender}, Contract, CompilerVersion, Tx]) ->
+    [Height, {STag, Sender}, Contract, CompilerVersion, adapt_nonce(S, Sender, Tx)];
+contract_create_adapt(_, _) ->
+    %% in case we don't even have a Height
+    false.
+
+contract_create(Height, {_, _Sender}, {File, Args, _GasFun}, CompilerVersion, Tx) ->
+    {ok, Contract} = aect_test_utils:read_contract(File),
+    {ok, Code}     = aect_test_utils:compile_contract(CompilerVersion, File),
+    {ok, CallData} = aect_sophia:encode_call_data(Contract, <<"init">>, Args),
+    %% ContractId = compute_contract_pubkey(Sender, maps:get(nonce, Tx)),
+    %% io:format("call data ~p\n", [CallData]),
+    NTx = maps:update_with(vm_version, fun(sophia_1) -> 1;
+                                          (solidity) -> 2;
+                                          (sophia_2) -> 3;
+                                          (N) -> N
+                                       end, Tx),
+    apply_transaction(Height, aect_create_tx, NTx#{code => Code, call_data => CallData}).
+
+contract_create_next(S, _Value, [Height, {_, Sender}, {_, _, GasFun}, _, Tx] = Args) ->
+    case contract_create_valid(S, Args) of
+        false -> S;  %% sometimes you pay gas here!
+        true  ->
+            #{ fee := Fee, gas_price := GasPrice, amount := Amount,
+               deposit := Deposit, gas := Gas} = Tx,
+            case Gas >= GasFun(Height) of
+                true ->
+                    reserve_fee(Fee + GasFun(Height) * GasPrice,
+                                bump_and_charge(Sender,
+                                                Fee + GasFun(Height) * GasPrice + Amount + Deposit,
+                                                S));
+                false ->
+                    %% out of gas
+                    reserve_fee(Fee + Gas * GasPrice,
+                                bump_and_charge(Sender,
+                                                Fee + Gas * GasPrice,
+                                                S))
+            end
+    end.
+
+contract_create_features(S, [_Height, {_, _Sender}, _, CompilerVersion, _Tx] = Args, Res) ->
+    Correct = contract_create_valid(S, Args),
+    [{correct, if Correct -> contract_create; true -> false end},
+     {contract_create, Res},
+     {contract_create, compiler, CompilerVersion}].
 
 
 
@@ -1141,7 +1231,15 @@ weight(S, channel_close_mutual) ->
     case maps:get(channels, S, []) of
         [] -> 0;
         _  -> 4 end;
+weight(_S, contract_create) ->
+    40;
 weight(_S, _) -> 0.
+
+prop_txs(Fork) ->
+    application:load(aecore),
+    application:set_env(aecore, hard_forks,
+                                   #{<<"1">> => 0, <<"2">> => Fork}),
+    prop_txs().
 
 prop_txs() ->
     eqc:dont_print_counterexample(
@@ -1151,7 +1249,7 @@ prop_txs() ->
         put(trees, undefined),
         {H, S, Res} = run_commands(Cmds),
         Height = maps:get(height, S, 0),
-        TreesTotal = 
+        TreesTotal =
             case get(trees) of
                 undefined -> #{};
                 Trees -> aec_trees:sum_total_coin(Trees)
@@ -1165,8 +1263,8 @@ prop_txs() ->
             aggregate_feats([atoms, correct | all_command_names()], call_features(H),
                 ?WHENFAIL(eqc:format("Total = ~p~nFeeTotal = ~p~n", [TreesTotal, FeeTotal]),
                           pretty_commands(?MODULE, Cmds, {H, S, Res},
-                                          Res == ok andalso 
-                                          (Total == 0 orelse Total == ?PatronAmount - FeeTotal))))))))
+                              conjunction([{result, Res == ok},
+                                           {total, Total == 0 orelse equals(Total, ?PatronAmount - FeeTotal)}]))))))))
     end))).
 
 aggregate_feats([], [], Prop) -> Prop;
@@ -1175,7 +1273,10 @@ aggregate_feats([atoms | Kinds], Features, Prop) ->
     aggregate(with_title(atoms), Atoms, aggregate_feats(Kinds, Rest, Prop));
 aggregate_feats([Tag | Kinds], Features, Prop) ->
     {Tuples, Rest} = lists:partition(fun(X) -> is_tuple(X) andalso element(1, X) == Tag end, Features),
-    aggregate(with_title(Tag), [ Arg || {_, Arg} <- Tuples ], aggregate_feats(Kinds, Rest, Prop)).
+    aggregate(with_title(Tag), [ case tl(tuple_to_list(Tuple)) of
+                                     [A] -> A;
+                                     L -> list_to_tuple(L)
+                                 end || Tuple <- Tuples ], aggregate_feats(Kinds, Rest, Prop)).
 
 %% -- State update and query functions ---------------------------------------
 
@@ -1335,6 +1436,10 @@ query_query_ttl(#{queries := Queries}, QueryId) ->
 
 is_query(#{queries := Qs}, Q) ->
     lists:keymember(Q, #query.id, Qs).
+
+valid_contract_fee(H, GasFun, #{ fee := Fee, gas_price := GasPrice }) ->
+    GasPrice >= minimum_gas_price(H) andalso
+    Fee >= GasFun(H) * GasPrice + aec_governance:tx_base_gas(contract_create_tx) * minimum_gas_price(H).
 
 valid_fee(H, #{ fee := Fee }) ->
     Fee >= 20000 * minimum_gas_price(H).   %% not precise, but we don't generate fees in the shady range
