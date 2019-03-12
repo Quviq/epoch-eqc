@@ -1517,7 +1517,7 @@ apply_transaction(Height, TxMod, TxArgs0) ->
     {ok, Tx} = apply(TxMod, new, [TxArgs]),
 
     case aetx:process(Tx, Trees, Env) of
-        {ok, NewTrees, _} ->
+        {ok, NewTrees, _NewEnv} ->
             put(trees, NewTrees),
             ok;
         Other ->
