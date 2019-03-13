@@ -1184,6 +1184,103 @@ contract_create_features(S, [Height, {_, _Sender}, Name, CompilerVersion, Tx] = 
      {contract_create, Res},
      {contract_create, compiler, CompilerVersion}].
 
+%% --- Operation: call_contract ---
+contract_call_pre(S) ->
+    maps:is_key(accounts, S).
+
+
+%% Given https://github.com/aeternity/protocol/blame/44b459970144fb030df55e32b166a9d62a79b523/contracts/contract_vms.md#L23
+%% I would expect vm_version to be present either in ct_version form or as separate key
+%% But not so in aect_call_tx
+%% Most likely determined by the contract's VM version!
+contract_call_args(#{height := Height, accounts := Accounts, contracts := Contracts}) ->
+     ?LET([{SenderTag, Sender}, {ContractTag, Contract}],
+          [gen_account(1, 100, Accounts), gen_contract_id(1, 100, Contracts)],
+          ?LET({Func, As, UseGas},
+               case ContractTag of
+                   invalid -> {<<"main">>, [], 1};
+                   valid -> oneof(maps:get(functions, contract(Contract#contract.name)))
+               end,
+               [Height, {SenderTag, Sender#account.key}, {ContractTag, Contract},
+                #{caller_id => aec_id:create(account, Sender#account.key),   %% could also be a contract!
+                  contract_id => aec_id:create(contract, Contract#contract.id),
+                  abi_version => weighted_default({49, Contract#contract.abi}, {1, elements([0,3])}),
+                  fee => gen_fee_above(Height, call_base_fee(As)),
+                  gas_price => frequency([{1,0}, {10, 1}, {89, minimum_gas_price(Height)}]),
+                  gas => frequency([{7, UseGas}, {1, UseGas-1}, {1, 2*UseGas}, {1, 1}]),
+                  nonce => gen_nonce(Sender),
+                  amount => nat(),
+                  call_data => {Func, As, UseGas}
+                 }])).
+
+%% Give it ten bytes per argument, approx
+call_base_fee(As) ->
+    aec_governance:tx_base_gas(contract_call_tx) + 10000 + 10 * length(As).
+
+contract_call_pre(S, [Height, {_, Sender}, {ContractTag, Contract}, Tx]) ->
+    correct_height(S, Height) andalso valid_nonce(S, Sender, Tx) andalso
+        (ContractTag == invalid  orelse lists:member(Contract, maps:get(contracts, S))).
+
+contract_call_valid(S, [Height, {_, Sender}, {ContractTag, Contract}, Tx]) ->
+    Protocol = aec_hard_forks:protocol_effective_at_height(Height),
+    #{call_data := {_, As, _}} = Tx,
+    is_account(S, Sender)
+    andalso ContractTag == valid
+    andalso correct_nonce(S, Sender, Tx)
+    andalso check_balance(S, Sender, maps:get(fee, Tx) + maps:get(gas, Tx) * maps:get(gas_price, Tx))
+    andalso valid_contract_fee(Height, call_base_fee(As), Tx)
+    andalso maps:get(abi_version, Tx) == 1.
+
+contract_call_adapt(#{height := Height} = S, [_, {STag, Sender}, Contract, Tx]) ->
+    [Height, {STag, Sender}, Contract, adapt_nonce(S, Sender, Tx)];
+contract_call_adapt(_, _) ->
+    %% in case we don't even have a Height
+    false.
+
+contract_call(Height, {_, _Sender}, {invalid, ContractId}, Tx) ->
+    apply_transaction(Height, aect_call_tx, Tx#{call_data => <<"Blubber">>});
+contract_call(Height, {_, _Sender}, {valid, Contract}, #{call_data := {Func, As, _}} = Tx) ->
+    #{file := File} = contract(Contract#contract.name),
+    BinaryAs = [ to_binary(A) || A <- As],
+    {ok, ContractSrc} = aect_test_utils:read_contract(File),
+    {ok, CallData} = aect_sophia:encode_call_data(ContractSrc, Func, BinaryAs),
+    apply_transaction(Height, aect_call_tx, Tx#{call_data => CallData}).
+
+to_binary(B) when is_binary(B) ->
+    B;
+to_binary(I) when is_integer(I) ->
+    integer_to_binary(I);
+to_binary(Other) ->
+    error({cannot_convert, Other}).
+
+
+contract_call_next(S, _Value, [Height, {_, Sender}, Contract, Tx] = Args) ->
+    case contract_call_valid(S, Args) of
+        false -> S;
+        true  ->
+            #{ fee := Fee, gas_price := GasPrice, amount := Amount,
+               gas := Gas, call_data := {_Func, _As, UseGas}} = Tx,
+            case Gas >= UseGas of
+                true ->
+                    %% ContractId = compute_contract_pubkey(Sender, maps:get(nonce, untag_nonce(Tx))),
+                    reserve_fee(Fee + UseGas * GasPrice,
+                                bump_and_charge(Sender,
+                                                Fee + UseGas * GasPrice + Amount,
+                                                S));
+                false ->
+                    %% out of gas
+                    reserve_fee(Fee + Gas * GasPrice,
+                                bump_and_charge(Sender,
+                                                Fee + Gas * GasPrice,
+                                                S))
+            end
+    end.
+
+contract_call_features(S, [Height, {_, _Sender}, _, Tx] = Args, Res) ->
+    Correct = contract_call_valid(S, Args),
+    [{correct, if Correct -> contract_call; true -> false end},
+     {contract_call, Res}] ++
+        [ {contract_call, maps:get(call_data, Tx)} || Correct ].
 
 
 %% ---------------
@@ -1248,6 +1345,8 @@ weight(S, channel_close_mutual) ->
         [] -> 0;
         _  -> 4 end;
 weight(_S, contract_create) ->
+    40;
+weight(_S, contract_call) ->
     40;
 weight(_S, _) -> 0.
 
@@ -1708,7 +1807,9 @@ contracts() ->
        file => "contracts/identity",
        args => [],
        gasfun => fun(_) -> 193 end,
-       basefee => 75000 + 24000}].
+       basefee => 75000 + 24000,
+       functions => [{<<"main">>, [nat()], 192}]
+      }].
 
 gen_contract_id(_, _, []) ->
     {invalid, fake_contract_id()};
