@@ -26,7 +26,7 @@
 -record(claim,{name, height, expires_by, protected_height,  claimer}).
 -record(query, {sender, id, fee, response_ttl, query_ttl}).
 -record(channel, {id, round = 1, amount = 0, reserve = 0}).
--record(contract, {name, id, amount, deposit, vm, abi, compiler_version}).
+-record(contract, {name, id, amount, deposit, vm, abi, compiler_version, protocol}).
 
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
@@ -1167,7 +1167,8 @@ contract_create_next(S, _Value, [Height, {_, Sender}, Name,
                                                               deposit = Deposit,
                                                               vm = Vm,
                                                               abi = Abi,
-                                                              compiler_version = CompilerVersion}, S)));
+                                                              compiler_version = CompilerVersion,
+                                                              protocol = aec_hard_forks:protocol_effective_at_height(Height)}, S)));
                 false ->
                     %% out of gas
                     reserve_fee(Fee + Gas * GasPrice,
@@ -1221,8 +1222,7 @@ contract_call_pre(S, [Height, {_, Sender}, {ContractTag, Contract}, Tx]) ->
     correct_height(S, Height) andalso valid_nonce(S, Sender, Tx) andalso
         (ContractTag == invalid  orelse lists:member(Contract, maps:get(contracts, S))).
 
-contract_call_valid(S, [Height, {_, Sender}, {ContractTag, Contract}, Tx]) ->
-    Protocol = aec_hard_forks:protocol_effective_at_height(Height),
+contract_call_valid(S, [Height, {_, Sender}, {ContractTag, _Contract}, Tx]) ->
     #{call_data := {_, As, _}} = Tx,
     is_account(S, Sender)
     andalso ContractTag == valid
@@ -1237,7 +1237,7 @@ contract_call_adapt(_, _) ->
     %% in case we don't even have a Height
     false.
 
-contract_call(Height, {_, _Sender}, {invalid, ContractId}, Tx) ->
+contract_call(Height, {_, _Sender}, {invalid, _Contract}, Tx) ->
     apply_transaction(Height, aect_call_tx, Tx#{call_data => <<"Blubber">>});
 contract_call(Height, {_, _Sender}, {valid, Contract}, #{call_data := {Func, As, _}} = Tx) ->
     #{file := File} = contract(Contract#contract.name),
@@ -1254,7 +1254,7 @@ to_binary(Other) ->
     error({cannot_convert, Other}).
 
 
-contract_call_next(S, _Value, [Height, {_, Sender}, Contract, Tx] = Args) ->
+contract_call_next(S, _Value, [_Height, {_, Sender}, _Contract, Tx] = Args) ->
     case contract_call_valid(S, Args) of
         false -> S;
         true  ->
@@ -1276,11 +1276,12 @@ contract_call_next(S, _Value, [Height, {_, Sender}, Contract, Tx] = Args) ->
             end
     end.
 
-contract_call_features(S, [Height, {_, _Sender}, _, Tx] = Args, Res) ->
+contract_call_features(S, [Height, {_, _Sender}, {_ContractTag, Contract}, Tx] = Args, Res) ->
     Correct = contract_call_valid(S, Args),
     [{correct, if Correct -> contract_call; true -> false end},
      {contract_call, Res}] ++
-        [ {contract_call, maps:get(call_data, Tx)} || Correct ].
+        [ {protocol, contract_call, element(1, maps:get(call_data, Tx)), aec_hard_forks:protocol_effective_at_height(Height) - Contract#contract.protocol} ||
+            Correct ].
 
 
 %% ---------------
@@ -1345,9 +1346,9 @@ weight(S, channel_close_mutual) ->
         [] -> 0;
         _  -> 4 end;
 weight(_S, contract_create) ->
-    40;
+    10;
 weight(_S, contract_call) ->
-    40;
+    4;
 weight(_S, _) -> 0.
 
 prop_txs(Fork) ->
@@ -1375,7 +1376,7 @@ prop_txs() ->
             measure(length, commands_length(Cmds),
             measure(height, Height,
             features(call_features(H),
-            aggregate_feats([atoms, correct | all_command_names()], call_features(H),
+            aggregate_feats([atoms, correct, protocol | all_command_names()], call_features(H),
                 ?WHENFAIL(eqc:format("Total = ~p~nFeeTotal = ~p~n", [TreesTotal, FeeTotal]),
                           pretty_commands(?MODULE, Cmds, {H, S, Res},
                               conjunction([{result, Res == ok},
