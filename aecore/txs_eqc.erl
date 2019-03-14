@@ -199,13 +199,13 @@ spend_args(#{accounts := Accounts, height := Height} = S) ->
                    account -> {ReceiverTag, Receiver#account.key};
                    {name, Name} -> {name, Name}
                end,
-               #{sender_id => aec_id:create(account, Sender#account.key),  %% The sender is asserted to never be a name.
+               #{sender_id => aeser_id:create(account, Sender#account.key),  %% The sender is asserted to never be a name.
                  recipient_id =>
                      case To of
                          account ->
-                             aec_id:create(account, Receiver#account.key);
+                             aeser_id:create(account, Receiver#account.key);
                          {name, Name} ->
-                             aec_id:create(name, aens_hash:name_hash(Name))
+                             aeser_id:create(name, aens_hash:name_hash(Name))
                      end,
                  amount => Amount,
                  fee => gen_fee(Height),
@@ -268,7 +268,7 @@ register_oracle_pre(S) ->
 register_oracle_args(S = #{height := Height}) ->
      ?LET({SenderTag, Sender}, gen_new_oracle_account(S),
           [Height, {SenderTag, Sender#account.key},
-                #{account_id => aec_id:create(account, Sender#account.key),
+                #{account_id => aeser_id:create(account, Sender#account.key),
                   query_format    => <<"send me any string"/utf8>>,
                   response_format => <<"boolean()"/utf8>>,
                   query_fee       => gen_query_fee(),
@@ -322,7 +322,7 @@ extend_oracle_args(S = #{height := Height}) ->
     ?LET({{_, Oracle}, DeltaTTL},
          {gen_oracle_account(S), gen_ttl()},
          [Height, Oracle#account.key,
-          #{oracle_id  => aec_id:create(oracle, Oracle#account.key),
+          #{oracle_id  => aeser_id:create(oracle, Oracle#account.key),
             nonce      => gen_nonce(Oracle),
             oracle_ttl => {delta, DeltaTTL},
             fee        => gen_fee(Height)
@@ -375,8 +375,8 @@ query_oracle_args(S = #{accounts := Accounts, height := Height}) ->
                        {_, QFee0, _} -> QFee0
                      end,
               [Height, {SenderTag, Sender#account.key}, Oracle#account.key,
-               #{sender_id => aec_id:create(account, Sender#account.key),
-                 oracle_id => aec_id:create(oracle, Oracle#account.key),
+               #{sender_id => aeser_id:create(account, Sender#account.key),
+                 oracle_id => aeser_id:create(oracle, Oracle#account.key),
                  query => oneof([<<"{foo: bar}"/utf8>>, <<"any string"/utf8>>, <<>>]),
                  query_fee => gen_query_fee(QFee),
                  query_ttl => {delta, choose(1,5)},
@@ -441,7 +441,7 @@ response_oracle_args(#{accounts := Accounts, height := Height} = S) ->
            frequency([{99, ?LET(Query, elements(maps:get(queries, S)), Query#query.id)},
                       {1, {?Patron, 2, ?Patron}}]),
           [Height, {Sender, Nonce, Oracle},
-           #{oracle_id => aec_id:create(oracle, Oracle),
+           #{oracle_id => aeser_id:create(oracle, Oracle),
              query_id => aeo_query:id(Sender, Nonce, Oracle),
              response => <<"yes, you can">>,
              response_ttl => gen_query_response_ttl(S, QueryId),
@@ -501,8 +501,8 @@ channel_create_args(#{accounts := Accounts, height := Height}) ->
           vector(2, gen_account(1, 49, Accounts)),
      ?LET({IAmount, RAmount, ChannelReserve}, gen_create_channel_amounts(Height),
           [Height, Initiator#account.key, Responder#account.key,
-                #{initiator_id => aec_id:create(account, Initiator#account.key),
-                  responder_id => aec_id:create(account, Responder#account.key),
+                #{initiator_id => aeser_id:create(account, Initiator#account.key),
+                  responder_id => aeser_id:create(account, Responder#account.key),
                   state_hash => <<1:256>>,
                   initiator_amount => IAmount,
                   responder_amount => RAmount,
@@ -569,8 +569,8 @@ channel_deposit_args(#{height := Height} = S) ->
      begin
           From = case Party of initiator -> Initiator; responder -> Responder end,
           [Height, {Initiator, N, Responder}, Party,
-                #{channel_id => aec_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder)),
-                  from_id => aec_id:create(account, From),
+                #{channel_id => aeser_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder)),
+                  from_id => aeser_id:create(account, From),
                   amount => gen_channel_amount(Height),
                   round => gen_channel_round(S, CId),
                   fee => gen_fee(Height),
@@ -636,8 +636,8 @@ channel_withdraw_args(#{height := Height} = S) ->
     begin
          From = case Party of initiator -> Initiator; responder -> Responder end,
          [Height, {Initiator, N, Responder}, Party,
-               #{channel_id => aec_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder)),
-                 to_id => aec_id:create(account, From),
+               #{channel_id => aeser_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder)),
+                 to_id => aeser_id:create(account, From),
                  amount => gen_channel_amount(Height),
                  round => gen_channel_round(S, CId),
                  fee => gen_fee(Height),
@@ -704,8 +704,8 @@ channel_close_mutual_args(#{height := Height} = S) ->
     begin
          From = case Party of initiator -> Initiator; responder -> Responder end,
          [Height, {Initiator, N, Responder}, Party,
-               #{channel_id => aec_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder)),
-                 from_id => aec_id:create(account, From),
+               #{channel_id => aeser_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder)),
+                 from_id => aeser_id:create(account, From),
                  initiator_amount_final => IFinal,
                  responder_amount_final => RFinal,
                  %% round => gen_channel_round(S, CId),
@@ -772,17 +772,17 @@ ns_preclaim_args(#{accounts := Accounts, height := Height}) ->
      ?LET([{SenderTag, Sender}, Name, Salt],
           [gen_account(1, 49, Accounts), gen_name(), gen_salt()],
           [Height, {SenderTag, Sender#account.key}, {Name, Salt},
-           #{account_id => aec_id:create(account, Sender#account.key),
+           #{account_id => aeser_id:create(account, Sender#account.key),
              fee => gen_fee(Height),
              commitment_id =>
-                 aec_id:create(commitment,
+                 aeser_id:create(commitment,
                                aens_hash:commitment_hash(Name, Salt)),
              nonce =>gen_nonce(Sender)}]).
 
 ns_preclaim_pre(S, [Height, {_, Sender}, {Name, Salt}, Tx]) ->
     %% Let us not test the unlikely case that someone provides the same name with the same salt
     [present || #preclaim{name = N, salt = St} <- maps:get(preclaims, S, []), N == Name, St == Salt] == []
-        andalso aec_id:create(commitment, aens_hash:commitment_hash(Name, Salt)) == maps:get(commitment_id, Tx)
+        andalso aeser_id:create(commitment, aens_hash:commitment_hash(Name, Salt)) == maps:get(commitment_id, Tx)
         andalso correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
 
 ns_preclaim_valid(S, [Height, {_, Sender}, {_Name, _Salt}, Tx]) ->
@@ -829,7 +829,7 @@ ns_claim_pre(S) ->
 ns_claim_args(S = #{height := Height}) ->
      ?LET({Name, Salt, {SenderTag, Sender}}, gen_preclaim(S),
           [Height, {SenderTag, Sender#account.key},
-           #{account_id => aec_id:create(account, Sender#account.key),
+           #{account_id => aeser_id:create(account, Sender#account.key),
              name => Name,
              name_salt => Salt,
              fee => gen_fee(Height),
@@ -905,14 +905,14 @@ ns_update_args(#{accounts := Accounts, height := Height} = S) ->
      ?LET({{Name, {SenderTag, Sender}}, {Tag, NameAccount}},
           {gen_name_claim(S), gen_account(1, 5, Accounts)},
           [Height, Name, {SenderTag, Sender#account.key}, {Tag, NameAccount#account.key},
-           #{account_id => aec_id:create(account, Sender#account.key),
-             name_id => aec_id:create(name, aens_hash:name_hash(Name)),
+           #{account_id => aeser_id:create(account, Sender#account.key),
+             name_id => aeser_id:create(name, aens_hash:name_hash(Name)),
              name_ttl => frequency([{10, nat()}, {1, 36000}, {10, 25000}, {1, choose(30000, 60000)}]),
              client_ttl => nat(),
              fee => gen_fee(Height),
              nonce => gen_nonce(Sender),
              pointers =>
-                 gen_pointers(Accounts, aec_id:create(account, NameAccount#account.key))
+                 gen_pointers(Accounts, aeser_id:create(account, NameAccount#account.key))
             }]).
 
 gen_pointers(Accounts, Id) ->
@@ -920,12 +920,12 @@ gen_pointers(Accounts, Id) ->
         {3, [aens_pointer:new(<<"account_pubkey">>, Id)]},
         {1, [aens_pointer:new(<<"account_pubkey">>, Id),
              ?LET({_, Acc}, gen_account(1, 49, Accounts),
-                  aens_pointer:new(<<"account_pubkey">>, aec_id:create(account, Acc#account.key)))]},
+                  aens_pointer:new(<<"account_pubkey">>, aeser_id:create(account, Acc#account.key)))]},
             %% if there are more than one accounts with same key, node seems to take the first one
         {1, []}]).
 
 ns_update_pre(S, [Height, Name, {_, Sender}, _NameAccount, Tx]) ->
-    aec_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx)
+    aeser_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx)
         andalso correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
 
 ns_update_valid(S, [Height, Name, {_, Sender}, _, Tx]) ->
@@ -972,14 +972,14 @@ ns_revoke_pre(S) ->
 ns_revoke_args(#{height := Height} = S) ->
      ?LET({Name, {SenderTag, Sender}}, gen_name_claim(S),
           [Height, {SenderTag, Sender#account.key}, Name,
-           #{account_id => aec_id:create(account, Sender#account.key),
-             name_id => aec_id:create(name, aens_hash:name_hash(Name)),
+           #{account_id => aeser_id:create(account, Sender#account.key),
+             name_id => aeser_id:create(name, aens_hash:name_hash(Name)),
              fee => gen_fee(Height),
              nonce => gen_nonce(Sender)
             }]).
 
 ns_revoke_pre(S, [Height, {_, Sender}, Name, Tx]) ->
-    aec_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx)
+    aeser_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx)
         andalso correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
 
 ns_revoke_valid(S, [Height, {_SenderTag, Sender}, Name, Tx]) ->
@@ -1033,21 +1033,21 @@ ns_transfer_args(#{accounts := Accounts, height := Height} = S) ->
                    account -> {ReceiverTag, Receiver#account.key};
                    {name, ToName} -> {name, ToName}
                end, Name,
-               #{account_id => aec_id:create(account, Sender#account.key),  %% The sender is asserted to never be a name.
+               #{account_id => aeser_id:create(account, Sender#account.key),  %% The sender is asserted to never be a name.
                  recipient_id =>
                      case To of
                          account ->
-                             aec_id:create(account, Receiver#account.key);
+                             aeser_id:create(account, Receiver#account.key);
                          {name, ToName} ->
-                             aec_id:create(name, aens_hash:name_hash(ToName))
+                             aeser_id:create(name, aens_hash:name_hash(ToName))
                      end,
-                 name_id => aec_id:create(name, aens_hash:name_hash(Name)),
+                 name_id => aeser_id:create(name, aens_hash:name_hash(Name)),
                  fee => gen_fee(Height),
                  nonce => gen_nonce(Sender)
                 }])).
 
 ns_transfer_pre(S, [Height, {STag, Sender}, Receiver, Name, Tx]) ->
-    aec_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx)
+    aeser_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx)
         andalso correct_height(S, Height)
         andalso valid_nonce(S, Sender, Tx)
         andalso valid_account(S, STag, Sender) andalso valid_account(S, Receiver).
@@ -1107,7 +1107,7 @@ contract_create_args(#{height := Height, accounts := Accounts}) ->
                    #{gasfun := GasFun, basefee := Fixed} = contract(Name),
                    [Height, {SenderTag, Sender#account.key}, Name,
                     frequency([{10, 1}, {30, 2}]),
-                    #{owner_id => aec_id:create(account, Sender#account.key),
+                    #{owner_id => aeser_id:create(account, Sender#account.key),
                       vm_version  => frequency([{1, elements([0,4])}, {max(10, Height), sophia_1}, {2, solidity}, {50, sophia_2}]),
                       abi_version => weighted_default({49, 1}, {1, elements([0,3])}),
                       fee => gen_fee_above(Height, Fixed),
@@ -1214,8 +1214,8 @@ contract_call_args(#{height := Height, accounts := Accounts, contracts := Contra
                    valid -> oneof(maps:get(functions, contract(Contract#contract.name)))
                end,
                [Height, {SenderTag, Sender#account.key}, {ContractTag, Contract},
-                #{caller_id => aec_id:create(account, Sender#account.key),   %% could also be a contract!
-                  contract_id => aec_id:create(contract, Contract#contract.id),
+                #{caller_id => aeser_id:create(account, Sender#account.key),   %% could also be a contract!
+                  contract_id => aeser_id:create(contract, Contract#contract.id),
                   abi_version => weighted_default({49, Contract#contract.abi}, {1, elements([0,3])}),
                   fee => gen_fee_above(Height, call_base_fee(As)),
                   gas_price => frequency([{1,0}, {10, 1}, {89, minimum_gas_price(Height)}]),
@@ -1535,7 +1535,7 @@ owns_name(#{claims := Names, height := Height}, Who, Name) ->
     end.
 
 correct_name_id(Name, NameId) ->
-    aec_id:create(name, aens_hash:name_hash(Name)) == NameId.
+    aeser_id:create(name, aens_hash:name_hash(Name)) == NameId.
 
 is_account(#{accounts := Accounts}, Key) ->
     lists:keymember(Key, #account.key, Accounts).

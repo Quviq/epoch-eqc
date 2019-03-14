@@ -19,6 +19,5 @@ gen_encodable(Size) ->
 
 prop_roundtrip() ->
     ?FORALL(Encodable, gen_encodable(),
-        equals(Encodable, aeu_rlp:decode(aeu_rlp:encode(Encodable)))
+        equals(Encodable, aeser_rlp:decode(aeser_rlp:encode(Encodable)))
     ).
-
