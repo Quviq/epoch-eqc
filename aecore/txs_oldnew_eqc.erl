@@ -45,7 +45,7 @@ next_state(S, V, {call, _M, F, Args}) ->
 
 postcondition(S, {call, _M, F, Args}, Res) ->
     case Res of
-        {'EXIT', _} -> aec_hard_forks:protocol_effective_at_height(maps:get(height, S, 0)) > 1 orelse 
+        {'EXIT', _} -> aec_hard_forks:protocol_effective_at_height(maps:get(height, S, 0)) > 1 orelse
                            valid_mismatch(Res);
         _ ->  txs_eqc:postcondition(S, {call, txs_eqc, F, Args}, Res)
     end.
@@ -142,6 +142,17 @@ ns_revoke(Height, _Sender, _Name, Tx) ->
 ns_transfer(Height, _Sender, _Receiver, _Name, Tx) ->
     apply_transaction(Height, aens_transfer_tx, Tx).
 
+contract_create(Height, {_, _Sender}, {File, Args, _GasFun, _}, CompilerVersion, Tx) ->
+    {ok, Contract} = aect_test_utils:read_contract(File),
+    {ok, Code}     = aect_test_utils:compile_contract(CompilerVersion, File),
+    {ok, CallData} = aect_sophia:encode_call_data(Contract, <<"init">>, Args),
+    NTx = maps:update_with(vm_version, fun(sophia_1) -> 1;
+                                          (solidity) -> 2;
+                                          (sophia_2) -> 3;
+                                          (N) -> N
+                                       end, Tx),
+    apply_transaction(Height, aect_create_tx, NTx#{code => Code, call_data => CallData}).
+
 %% -- Property ---------------------------------------------------------------
 
 prop_tx_primops() ->
@@ -151,7 +162,7 @@ prop_tx_primops() ->
     begin
         pong = net_adm:ping(?REMOTE_NODE),
         rpc(application, load, [aecore]),
-        rpc(application, set_env, [aecore, hard_forks, 
+        rpc(application, set_env, [aecore, hard_forks,
                                    #{<<"1">> => 0, <<"2">> => 3}]),
 
         {H, S, Res} = run_commands(Cmds),
@@ -226,17 +237,29 @@ eq_rpc(Local, Remote, InterpretResult) ->
             InterpretResult(Local, Remote)
     end.
 
+apply_transaction(Height, aect_create_tx, TxArgs0) ->
+    TxArgs = untag_nonce(TxArgs0),
+    {ok, RemoteTx} = rpc:call(?REMOTE_NODE, aect_create_tx, new, [TxArgs]),
+    {ok, Tx} = aect_create_tx:new(TxArgs),
+    apply_tx(Height, RemoteTx, Tx);
 apply_transaction(Height, TxMod, TxArgs0) ->
-    Env   = aetx_env:tx_env(Height),
-    Trees = get(trees),
     TxArgs = untag_nonce(TxArgs0),
     {ok, Tx} = rpc(TxMod, new, [TxArgs]),
+    apply_tx(Height, Tx, Tx).
 
-    Remote = case rpc:call(?REMOTE_NODE, aetx, check, [Tx, Trees, Env], 1000) of
-                {ok, RemoteTrees} -> rpc:call(?REMOTE_NODE, aetx, process, [Tx, RemoteTrees, Env], 1000);
+apply_tx(Height, RemoteTx, LocalTx) ->
+    EnvRemote = rpc:call(?REMOTE_NODE, aetx_env, tx_env, [Height]),
+    Env = aetx_env:tx_env(Height),
+    Trees = get(trees),
+
+    Remote = case rpc:call(?REMOTE_NODE, aetx, check, [RemoteTx, Trees, EnvRemote], 1000) of
+                {ok, RemoteTrees} -> rpc:call(?REMOTE_NODE, aetx, process, [RemoteTx, RemoteTrees, EnvRemote], 1000);
                 RemoteErr         -> RemoteErr
             end,
-    Local = rpc:call(node(), aetx, process, [Tx, Trees, Env], 1000),
+    Local = case rpc:call(node(), aetx, process, [LocalTx, Trees, Env], 1000) of
+                {ok, Ts, _} -> {ok, Ts};
+                Ret -> Ret
+            end,
 
     case catch eq_rpc(Local, Remote) of
         {ok, NewTrees} ->
@@ -264,9 +287,10 @@ valid_mismatch({'EXIT', {different, {error, pointer_id_not_found},
                          {error, insufficient_funds}}}) -> true;
 valid_mismatch({'EXIT', {different, {error, name_revoked},
                          {error, insufficient_funds}}}) -> true;
+valid_mismatch({'EXIT',{different, {error, illegal_vm_version},
+                        {badrpc, _}}}) -> true;
+
 %% Close mutual
 valid_mismatch(_) -> false.
 
 %% -- Generators -------------------------------------------------------------
-
-
