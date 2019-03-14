@@ -133,7 +133,7 @@ expired_queries(S, Height) ->
     [ Q || Q <- maps:get(queries, S, []), Q#query.response_ttl =< Height ].
 
 expired_claims(S, Height) ->
-    [ C || C <- maps:get(claims, S, []), 
+    [ C || C <- maps:get(claims, S, []),
            C#claim.expires_by + aec_governance:name_protection_period() =< Height ].
 
 %% --- Operation: multi_mine ---
@@ -163,7 +163,7 @@ multi_mine(Height, Blocks) ->
 multi_mine_next(#{height := Height, accounts := Accounts} = S, _Value, [_H, Blocks]) ->
     ExpiredQs = expired_queries(S, Height + Blocks - 1),
     ExpiredClaims = expired_claims(S, Height + Blocks - 1),
-    ExpiredNames = [ C#claim.name || C <- ExpiredClaims ], 
+    ExpiredNames = [ C#claim.name || C <- ExpiredClaims ],
     Accounts1 = lists:foldl(
         fun(Q, As) -> case lists:keyfind(Q#query.sender, #account.key, As) of
                         false -> As;
@@ -190,9 +190,9 @@ spend_pre(S) ->
 spend_args(#{accounts := Accounts, height := Height} = S) ->
     ?LET({{SenderTag, Sender}, {ReceiverTag, Receiver}},
          {gen_account(1, 49, Accounts), gen_account(2, 1, Accounts)},
-         ?LET([Amount, Nonce, To], 
+         ?LET([Amount, Nonce, To],
               [gen_spend_amount(Sender), gen_nonce(Sender),
-               oneof([account, 
+               oneof([account,
                       {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++ [<<"ta.test">>])}])],
               [Height, {SenderTag, Sender#account.key},
                case To of
@@ -305,7 +305,7 @@ register_oracle_next(S, _Value, [_Height, {_, Sender}, Tx] = Args) ->
             Oracle = {Sender, QFee, D + maps:get(height, S)},
             reserve_fee(Fee,
             bump_and_charge(Sender, Fee,
-                add(oracles, Oracle, 
+                add(oracles, Oracle,
                 remove(oracles, Sender, 1, S))))
     end.
 
@@ -353,7 +353,7 @@ extend_oracle_next(S, _Value, [_Height, Oracle, Tx] = Args) ->
         true  ->
             #{ oracle_ttl := {delta, Delta}, fee := Fee} = Tx,
             reserve_fee(Fee,
-            bump_and_charge(Oracle, Fee, 
+            bump_and_charge(Oracle, Fee,
             oracle_ext(Oracle, Delta, S)))
     end.
 
@@ -413,7 +413,7 @@ query_oracle_next(S, _Value, [Height, {_, Sender}, Oracle, Tx] = Args) ->
     case query_oracle_valid(S, Args) of
         false -> S;
         true  ->
-            #{ response_ttl := ResponseTTL, 
+            #{ response_ttl := ResponseTTL,
                query_ttl := {delta, Delta},
                fee := Fee, query_fee := QFee } = Tx,
             Query = #query{sender       = Sender,
@@ -912,8 +912,8 @@ ns_update_args(#{accounts := Accounts, height := Height} = S) ->
 gen_pointers(Accounts, Id) ->
     frequency([
         {3, [aens_pointer:new(<<"account_pubkey">>, Id)]},
-        {1, [aens_pointer:new(<<"account_pubkey">>, Id), 
-             ?LET({_, Acc}, gen_account(1, 49, Accounts), 
+        {1, [aens_pointer:new(<<"account_pubkey">>, Id),
+             ?LET({_, Acc}, gen_account(1, 49, Accounts),
                   aens_pointer:new(<<"account_pubkey">>, aec_id:create(account, Acc#account.key)))]},
             %% if there are more than one accounts with same key, node seems to take the first one
         {1, []}]).
@@ -956,7 +956,7 @@ ns_update_next(S, _, [Height, Name, {_, Sender}, {_, NameAccount}, Tx] = Args) -
 ns_update_features(S, [_Height, _Name, _Sender, {_Tag, _NameAccount}, Tx] = Args, Res) ->
     Correct = ns_update_valid(S, Args),
     [{correct, if Correct -> ns_update; true -> false end},
-     {ns_update, Res}] ++ 
+     {ns_update, Res}] ++
         [{ns_update, double_pointer} || length(maps:get(pointers, Tx)) > 1 ].
 
 %% --- Operation: ns_revoke ---
@@ -1481,7 +1481,7 @@ update_claim_height(Name, Height, TTL, S) ->
 
 revoke_claim(Name, Height, S) ->
     on_claim(Name, fun(C) ->
-                        C#claim{ expires_by = Height - 1}  
+                        C#claim{ expires_by = Height - 1}
                            %% trick, after a revoke, the name cannot be used any more on that height or heigher
                     end, S).
 
@@ -1502,7 +1502,7 @@ is_valid_name(#{claims := Names}, Name, Height) ->
 is_valid_name_account(#{claims := Names} = S, Name, Height) ->
     case lists:keyfind(Name, #claim.name, Names) of
         false -> false;
-        _ -> 
+        _ ->
             is_valid_name(S, Name, Height)
             andalso maps:is_key(Name, maps:get(named_accounts, S, #{}))
     end.
