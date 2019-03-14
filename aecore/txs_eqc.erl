@@ -1198,7 +1198,7 @@ contract_create_features(S, [Height, {_, _Sender}, Name, CompilerVersion, Tx] = 
 
 %% --- Operation: call_contract ---
 contract_call_pre(S) ->
-    maps:is_key(accounts, S).
+    maps:is_key(accounts, S) andalso maps:get(contracts, S) /= [].
 
 
 %% Given https://github.com/aeternity/protocol/blame/44b459970144fb030df55e32b166a9d62a79b523/contracts/contract_vms.md#L23
