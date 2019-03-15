@@ -22,8 +22,8 @@
 -define(NAMEFRAGS, ["foo", "bar", "baz"]).
 
 -record(account, {key, amount, nonce, names_owned = []}).
--record(preclaim,{name, salt, height, claimer}).
--record(claim,{name, height, expires_by, protected_height,  claimer}).
+-record(preclaim,{name, salt, height, claimer, protocol}).
+-record(claim,{name, height, expires_by, protected_height,  claimer, protocol}).
 -record(query, {sender, id, fee, response_ttl, query_ttl}).
 -record(channel, {id, round = 1, amount = 0, reserve = 0}).
 -record(contract, {name, id, amount, deposit, vm, abi, compiler_version, protocol}).
@@ -807,7 +807,8 @@ ns_preclaim_next(#{height := Height} = S, _, [_Height, {_, Sender}, {Name, Salt}
             Preclaim = #preclaim{name    = Name,
                                  salt    = Salt,
                                  height  = Height,
-                                 claimer = Sender},
+                                 claimer = Sender,
+				 protocol = aec_hard_forks:protocol_effective_at_height(Height)},
             reserve_fee(Fee,
             bump_and_charge(Sender, Fee,
                 add(preclaims, Preclaim, S)))
@@ -879,17 +880,22 @@ ns_claim_next(#{height := Height} = S, _, [_Height, {_, Sender}, Tx] = Args) ->
             Claim = #claim{ name         = Name,
                             height       = Height,
                             expires_by   = Height + aec_governance:name_claim_max_expiration() + 1,
-                            claimer      = Sender },
+                            claimer      = Sender,
+			    protocol = aec_hard_forks:protocol_effective_at_height(Height) },
             remove_preclaim(Tx,
             reserve_fee(Fee,
             bump_and_charge(Sender, Fee + aec_governance:name_claim_locked_fee(),
                 add(claims, Claim, S))))
     end.
 
-ns_claim_features(S, [_Height, {_, _Sender}, _Tx] = Args, Res) ->
+ns_claim_features(S, [Height, {_, _Sender}, Tx] = Args, Res) ->
     Correct = ns_claim_valid(S, Args),
     [{correct, if Correct -> ns_claim; true -> false end},
-     {ns_claim, Res}].
+     {ns_claim, Res}]++ 
+  	[ {protocol, ns_claim, 
+ 	   aec_hard_forks:protocol_effective_at_height(Height) - 
+	       get_preclaim_protocol(Tx,S)} ||
+ 	    Correct].
 
 %% --- Operation: claim_update ---
 ns_update_pre(S) ->
@@ -1003,10 +1009,15 @@ ns_revoke_next(S, _Value, [Height, {_SenderTag, Sender}, Name, Tx] = Args) ->
                 revoke_claim(Name, Height, S))))
     end.
 
-ns_revoke_features(S, [_Height, _Sender, _Name, _Tx] = Args, Res) ->
+ns_revoke_features(S, [Height, {_SenderTag, Sender}, Name, _Tx] = Args, Res) ->
     Correct = ns_revoke_valid(S, Args),
     [{correct, if Correct -> ns_revoke; true -> false end},
-     {ns_revoke, Res}].
+     {ns_revoke, Res}] ++
+  	[ {protocol, ns_revoke, 
+ 	   aec_hard_forks:protocol_effective_at_height(Height) - 
+	       get_claim_protocol({Name, Sender},S)} ||
+ 	    Correct
+	].
 
 
 %% --- Operation: ns_transfer ---
@@ -1449,6 +1460,14 @@ remove_query(Id, S) ->
 remove_preclaim(#{name := Na, name_salt := Sa}, S = #{preclaims := Ps}) ->
     S#{preclaims := [ P || P = #preclaim{name = Na0, salt = Sa0} <- Ps,
                            Na0 /= Na orelse Sa0 /= Sa ]}.
+
+get_preclaim_protocol(#{name := Na, name_salt := Sa}, #{preclaims := Ps}) ->
+    hd([P#preclaim.protocol || P = #preclaim{name = Na0, salt = Sa0} <- Ps,
+	   Na0 == Na andalso Sa0 == Sa]).
+
+get_claim_protocol({Na, Sender}, #{claims := Cs}) ->
+    hd([C#claim.protocol || C = #claim{name = Na0, claimer = Sa0} <- Cs,
+	   Na0 == Na andalso Sa0 == Sender]).
 
 get(S, Tag, Key, I) ->
     lists:keyfind(Key, I, maps:get(Tag, S)).
