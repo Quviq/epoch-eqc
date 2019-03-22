@@ -441,7 +441,7 @@ response_oracle_args(#{accounts := Accounts, height := Height} = S) ->
            frequency([{99, ?LET(Query, elements(maps:get(queries, S)), Query#query.id)},
                       {1, {?Patron, 2, ?Patron}}]),
           [Height, {Sender, Nonce, Oracle},
-           #{oracle_id => aec_idcreate(oracle, Oracle),
+           #{oracle_id => aeser_id:create(oracle, Oracle),
              query_id => aeo_query:id(Sender, Nonce, Oracle),
              response => <<"yes, you can">>,
              response_ttl => gen_query_response_ttl(S, QueryId),
