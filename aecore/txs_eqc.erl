@@ -891,11 +891,11 @@ ns_claim_next(#{height := Height} = S, _, [_Height, {_, Sender}, Tx] = Args) ->
 ns_claim_features(S, [Height, {_, _Sender}, Tx] = Args, Res) ->
     Correct = ns_claim_valid(S, Args),
     [{correct, if Correct -> ns_claim; true -> false end},
-     {ns_claim, Res}]++ 
-  	[ {protocol, ns_claim, 
- 	   aec_hard_forks:protocol_effective_at_height(Height) - 
+     {ns_claim, Res}] ++
+  	[ {protocol, ns_claim,
+ 	   aec_hard_forks:protocol_effective_at_height(Height) -
 	       get_preclaim_protocol(Tx,S)} ||
- 	    Correct].
+ 	    Correct ].
 
 %% --- Operation: claim_update ---
 ns_update_pre(S) ->
@@ -1013,9 +1013,9 @@ ns_revoke_features(S, [Height, {_SenderTag, Sender}, Name, _Tx] = Args, Res) ->
     Correct = ns_revoke_valid(S, Args),
     [{correct, if Correct -> ns_revoke; true -> false end},
      {ns_revoke, Res}] ++
-  	[ {protocol, ns_revoke, 
- 	   aec_hard_forks:protocol_effective_at_height(Height) - 
-	       get_claim_protocol({Name, Sender},S)} ||
+  	[ {protocol, ns_revoke,
+ 	   aec_hard_forks:protocol_effective_at_height(Height) -
+	       get_claim_protocol({Name, Sender}, S)} ||
  	    Correct
 	].
 
@@ -1134,6 +1134,9 @@ contract_create_valid(S, [Height, {_, Sender}, Name, CompilerVersion, Tx]) ->
                     lists:member({maps:get(vm_version, Tx), maps:get(abi_version, Tx)},
                                  [{sophia_1, 1}, {sophia_1, 1}]);  %% second compiler could create VM1 code ?
                Protocol == 2 ->
+                    lists:member({maps:get(vm_version, Tx), maps:get(abi_version, Tx)},
+                                 [{sophia_2, 1}, {sophia_2, 1}]);
+               Protocol == 3 ->
                     lists:member({maps:get(vm_version, Tx), maps:get(abi_version, Tx)},
                                  [{sophia_2, 1}, {sophia_2, 1}])
             end
@@ -1365,7 +1368,7 @@ weight(_S, _) -> 0.
 prop_txs(Fork) ->
     application:load(aecore),
     application:set_env(aecore, hard_forks,
-                                   #{<<"1">> => 0, <<"2">> => Fork}),
+                                   #{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
     prop_txs().
 
 prop_txs() ->
