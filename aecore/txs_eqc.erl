@@ -21,13 +21,12 @@
 -define(PatronAmount, 100000000000001).  %% read from file
 -define(NAMEFRAGS, ["foo", "bar", "baz"]).
 
--record(account, {key, amount, nonce, names_owned = [], generalized = false}).
+-record(account, {key, amount, nonce, names_owned = []}).
 -record(preclaim,{name, salt, height, claimer, protocol}).
 -record(claim,{name, height, expires_by, protected_height,  claimer, protocol}).
 -record(query, {sender, id, fee, response_ttl, query_ttl}).
 -record(channel, {id, round = 1, amount = 0, reserve = 0}).
 -record(contract, {name, id, amount, deposit, vm, abi, compiler_version, protocol}).
--record(gaccount, {id, name, vm, abi, nonce, protocol}).
 
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
@@ -73,8 +72,7 @@ valid_common(ns_update, S, Args)            -> ns_update_valid(S, Args);
 valid_common(ns_revoke, S, Args)            -> ns_revoke_valid(S, Args);
 valid_common(ns_transfer, S, Args)          -> ns_transfer_valid(S, Args);
 valid_common(contract_create, S, Args)      -> contract_create_valid(S, Args);
-valid_common(contract_call, S, Args)        -> contract_call_valid(S, Args);
-valid_common(ga_attach, S, Args)            -> ga_attach_valid(S, Args).
+valid_common(contract_call, S, Args)        -> contract_call_valid(S, Args).
 
 
 
@@ -225,7 +223,7 @@ spend_pre(#{accounts := Accounts} = S, [Height, {_, Sender}, {RTag, Receiver}, T
     ReceiverOk andalso correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
 
 spend_valid(S, [Height, {_, Sender}, {ReceiverTag, Receiver}, Tx]) ->
-    is_account(S, Sender, normal)
+    is_account(S, Sender)
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(amount, Tx) + maps:get(fee, Tx))
     andalso valid_fee(Height, Tx)
@@ -284,7 +282,7 @@ register_oracle_pre(S, [Height, {_, Sender}, Tx]) ->
     correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
 
 register_oracle_valid(S, [Height, {_, Sender}, Tx]) ->
-    is_account(S, Sender, normal)
+    is_account(S, Sender)
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx))
     andalso valid_fee(Height, Tx)
@@ -335,7 +333,7 @@ extend_oracle_pre(S, [Height, Oracle, Tx]) ->
     correct_height(S, Height) andalso valid_nonce(S, Oracle, Tx).
 
 extend_oracle_valid(S, [Height, Oracle, Tx]) ->
-    is_account(S, Oracle, normal)
+    is_account(S, Oracle)
     andalso is_oracle(S, Oracle)
     andalso correct_nonce(S, Oracle, Tx)
     andalso check_balance(S, Oracle, maps:get(fee, Tx))
@@ -395,7 +393,7 @@ query_oracle_pre(S, [Height, {_, Sender}, _Oracle, Tx]) ->
 query_oracle_valid(S, [Height, {_SenderTag, Sender}, Oracle, Tx]) ->
     {delta, ResponseTTL} = maps:get(response_ttl, Tx),
     {delta, QueryTTL} = maps:get(query_ttl, Tx),
-    is_account(S, Sender, normal)
+    is_account(S, Sender)
     andalso is_oracle(S, Oracle)
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx) + maps:get(query_fee, Tx))
@@ -459,7 +457,7 @@ response_oracle_pre(S, [Height, {_, _, Q}, Tx]) ->
     correct_height(S, Height) andalso valid_nonce(S, Q, Tx).
 
 response_oracle_valid(S, [Height, {_, _, Oracle} = QueryId, Tx]) ->
-    is_account(S, Oracle, normal)
+    is_account(S, Oracle)
     andalso is_oracle(S, Oracle)
     andalso correct_nonce(S, Oracle, Tx)
     andalso check_balance(S, Oracle,  maps:get(fee, Tx))
@@ -519,7 +517,7 @@ channel_create_pre(S, [Height, Initiator, Responder, Tx]) ->
     andalso correct_height(S, Height) andalso valid_nonce(S, Initiator, Tx).
 
 channel_create_valid(S, [Height, Initiator, Responder, Tx]) ->
-    is_account(S, Initiator, normal)
+    is_account(S, Initiator)
     andalso is_account(S, Responder)
     andalso correct_nonce(S, Initiator, Tx)
     andalso check_balance(S, Initiator, maps:get(fee, Tx) + maps:get(initiator_amount, Tx))
@@ -590,7 +588,6 @@ channel_deposit_valid(S, [Height, {Initiator, _, Responder} = ChannelId, Party, 
     From = case Party of initiator -> Initiator; responder -> Responder end,
     is_account(S, Initiator)
     andalso is_account(S, Responder)
-    andalso is_account(S, From, normal)
     andalso is_channel(S, ChannelId)
     andalso correct_nonce(S, From, Tx)
     andalso check_balance(S, From, maps:get(fee, Tx) + maps:get(amount, Tx))
@@ -658,7 +655,6 @@ channel_withdraw_valid(S, [Height, {Initiator, _, Responder} = ChannelId, Party,
     From = case Party of initiator -> Initiator; responder -> Responder end,
     is_account(S, Initiator)
     andalso is_account(S, Responder)
-    andalso is_account(S, From, normal)
     andalso is_channel(S, ChannelId)
     andalso correct_nonce(S, From, Tx)
     andalso check_balance(S, From, maps:get(fee, Tx))
@@ -727,7 +723,6 @@ channel_close_mutual_valid(S, [Height, {Initiator, _, Responder} = ChannelId, Pa
     From = case Party of initiator -> Initiator; responder -> Responder end,
     is_account(S, Initiator)
     andalso is_account(S, Responder)
-    andalso is_account(S, From, normal)
     andalso is_channel(S, ChannelId)
     andalso correct_nonce(S, From, Tx)
     andalso valid_fee(Height, Tx)
@@ -783,7 +778,7 @@ ns_preclaim_args(#{accounts := Accounts, height := Height}) ->
              commitment_id =>
                  aeser_id:create(commitment,
                                aens_hash:commitment_hash(Name, Salt)),
-             nonce =>gen_nonce(Sender)}]).
+             nonce => gen_nonce(Sender)}]).
 
 ns_preclaim_pre(S, [Height, {_, Sender}, {Name, Salt}, Tx]) ->
     %% Let us not test the unlikely case that someone provides the same name with the same salt
@@ -792,7 +787,7 @@ ns_preclaim_pre(S, [Height, {_, Sender}, {Name, Salt}, Tx]) ->
         andalso correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
 
 ns_preclaim_valid(S, [Height, {_, Sender}, {_Name, _Salt}, Tx]) ->
-    is_account(S, Sender, normal)
+    is_account(S, Sender)
     andalso correct_nonce(S, Sender, Tx)
     andalso valid_fee(Height, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx)).
@@ -846,7 +841,7 @@ ns_claim_pre(S, [Height, {_STag, Sender}, Tx]) ->
     correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
 
 ns_claim_valid(S, [Height, {_, Sender}, Tx]) ->
-    is_account(S, Sender, normal)
+    is_account(S, Sender)
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx) + aec_governance:name_claim_locked_fee())
     andalso valid_fee(Height, Tx)
@@ -935,7 +930,7 @@ ns_update_pre(S, [Height, Name, {_, Sender}, _NameAccount, Tx]) ->
         andalso correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
 
 ns_update_valid(S, [Height, Name, {_, Sender}, _, Tx]) ->
-    is_account(S, Sender, normal)
+    is_account(S, Sender)
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx) + aec_governance:name_claim_locked_fee())
     andalso valid_fee(Height, Tx)
@@ -989,7 +984,7 @@ ns_revoke_pre(S, [Height, {_, Sender}, Name, Tx]) ->
         andalso correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
 
 ns_revoke_valid(S, [Height, {_SenderTag, Sender}, Name, Tx]) ->
-    is_account(S, Sender, normal)
+    is_account(S, Sender)
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx))
     andalso valid_fee(Height, Tx)
@@ -1059,7 +1054,7 @@ ns_transfer_pre(S, [Height, {STag, Sender}, Receiver, Name, Tx]) ->
         andalso valid_account(S, STag, Sender) andalso valid_account(S, Receiver).
 
 ns_transfer_valid(S, [Height, {_SenderTag, Sender}, {ReceiverTag, Receiver}, Name, Tx]) ->
-    is_account(S, Sender, normal)
+    is_account(S, Sender)
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx))
     andalso valid_fee(Height, Tx)
@@ -1114,7 +1109,8 @@ contract_create_args(#{height := Height, accounts := Accounts}) ->
                    [Height, {SenderTag, Sender#account.key}, Name,
                     frequency([{10, 1}, {30, 2}]),
                     #{owner_id => aeser_id:create(account, Sender#account.key),
-                      vm_version  => frequency([{1, elements([0,4])}, {max(10, Height), sophia_1}, {2, solidity}, {50, sophia_2}]),
+                      vm_version  => frequency([{1, elements([0,5])}, {max(10, Height), aevm_sophia_1},
+                                                {2, vm_solidity}, {50, aevm_sophia_2}]),
                       abi_version => weighted_default({49, 1}, {1, elements([0,3])}),
                       fee => gen_fee_above(Height, Fixed),
                       gas_price => frequency([{1,0}, {10, 1}, {89, minimum_gas_price(Height)}]),
@@ -1131,20 +1127,20 @@ contract_create_pre(S, [Height, {_, Sender}, _, _, Tx]) ->
 contract_create_valid(S, [Height, {_, Sender}, Name, CompilerVersion, Tx]) ->
     #{gasfun := GasFun, basefee := Fixed} = contract(Name),
     Protocol = aec_hard_forks:protocol_effective_at_height(Height),
-    is_account(S, Sender,  normal)
+    is_account(S, Sender)
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx) + GasFun(Height) * maps:get(gas_price, Tx) +
                               maps:get(amount, Tx) + maps:get(deposit, Tx))
     andalso valid_contract_fee(Height, Fixed, Tx)
     andalso if Protocol == 1 ->
                     lists:member({maps:get(vm_version, Tx), maps:get(abi_version, Tx)},
-                                 [{sophia_1, 1}, {sophia_1, 1}]);  %% second compiler could create VM1 code ?
+                                 [{aevm_sophia_1, 1}]);  %% second compiler could create VM1 code ?
                Protocol == 2 ->
                     lists:member({maps:get(vm_version, Tx), maps:get(abi_version, Tx)},
-                                 [{sophia_2, 1}, {sophia_2, 1}]);
+                                 [{aevm_sophia_2, 1}]);
                Protocol == 3 ->
                     lists:member({maps:get(vm_version, Tx), maps:get(abi_version, Tx)},
-                                 [{sophia_2, 1}, {sophia_2, 1}])
+                                 [{aevm_sophia_3, 1}, {aevm_sophia_2, 1}])
             end
     andalso lists:member(CompilerVersion, [1, 2]).
 
@@ -1163,10 +1159,10 @@ contract_create_tx(Name, CompilerVersion, Tx) ->
     {ok, Contract} = aect_test_utils:read_contract(File),
     {ok, Code}     = aect_test_utils:compile_contract(CompilerVersion, File),
     {ok, CallData} = aect_sophia:encode_call_data(Contract, <<"init">>, Args),
-    NTx = maps:update_with(vm_version, fun(sophia_1) -> 1;
-                                          (solidity) -> 2;
-                                          (sophia_2) -> 3;
-                                          (sophia_3) -> 3;   %% Fix this
+    NTx = maps:update_with(vm_version, fun(aevm_sophia_1) -> 1;
+                                          (vm_solidity) -> 2;
+                                          (aevm_sophia_2) -> 3;
+                                          (aevm_sophia_3) -> 4;
                                           (N) -> N
                                        end, Tx),
     NTx#{code => Code, call_data => CallData}.
@@ -1222,9 +1218,9 @@ contract_call_pre(S) ->
 contract_call_args(#{height := Height, accounts := Accounts, contracts := Contracts}) ->
      ?LET([{SenderTag, Sender}, {ContractTag, Contract}],
           [gen_account(1, 100, Accounts), gen_contract_id(1, 100, Contracts)],
-          ?LET({Func, As, UseGas},
+          ?LET({Func, As, UseGas, _},
                case ContractTag of
-                   invalid -> {<<"main">>, [], 1};
+                   invalid -> {<<"main">>, [], 1, <<>>};
                    _ -> oneof(maps:get(functions, contract(Contract#contract.name)))
                end,
                [Height, {SenderTag, Sender#account.key}, {ContractTag, Contract},
@@ -1237,7 +1233,8 @@ contract_call_args(#{height := Height, accounts := Accounts, contracts := Contra
                   abi_version => weighted_default({49, Contract#contract.abi}, {1, elements([0,3])}),
                   fee => gen_fee_above(Height, call_base_fee(As)),
                   gas_price => frequency([{1,0}, {10, 1}, {89, minimum_gas_price(Height)}]),
-                  gas => frequency([{7, UseGas}, %% {1, UseGas-1},
+                  gas => frequency([{7, UseGas},
+                                    %% {1, UseGas-1},
                                     {1, 2*UseGas}, {1, 1}]),
                   nonce => gen_nonce(Sender),
                   amount => nat(),
@@ -1254,7 +1251,7 @@ contract_call_pre(S, [Height, {_, Sender}, {ContractTag, Contract}, Tx]) ->
 
 contract_call_valid(S, [Height, {_, Sender}, {ContractTag, _Contract}, Tx]) ->
     #{call_data := {_, As, _}} = Tx,
-    is_account(S, Sender, normal)
+    is_account(S, Sender)
     andalso ContractTag == valid
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx) + maps:get(gas, Tx) * maps:get(gas_price, Tx))
@@ -1267,14 +1264,18 @@ contract_call_adapt(_, _) ->
     %% in case we don't even have a Height
     false.
 
-contract_call(Height, {_, _Sender}, {invalid, _Contract}, Tx) ->
-    apply_transaction(Height, aect_call_tx, Tx#{call_data => <<"Blubber">>});
-contract_call(Height, {_, _Sender}, {valid, Contract}, #{call_data := {Func, As, _}} = Tx) ->
+contract_call(Height, _, Contract, Tx) ->
+    NewTx = contract_call_tx(Contract, Tx),
+    apply_transaction(Height, aect_call_tx, NewTx).
+
+contract_call_tx({invalid, _Contract}, Tx) ->
+    Tx#{call_data => <<"Blubber">>};
+contract_call_tx({valid, Contract}, #{call_data := {Func, As, _}} = Tx) ->
     #{file := File} = contract(Contract#contract.name),
     BinaryAs = [ to_binary(A) || A <- As],
     {ok, ContractSrc} = aect_test_utils:read_contract(File),
     {ok, CallData} = aect_sophia:encode_call_data(ContractSrc, Func, BinaryAs),
-    apply_transaction(Height, aect_call_tx, Tx#{call_data => CallData}).
+    Tx#{call_data => CallData}.
 
 to_binary(B) when is_binary(B) ->
     B;
@@ -1308,183 +1309,12 @@ contract_call_next(S, _Value, [_Height, {_, Sender}, _Contract, Tx] = Args) ->
 
 contract_call_features(S, [Height, {_, _Sender}, {_ContractTag, Contract}, Tx] = Args, Res) ->
     Correct = contract_call_valid(S, Args),
+    #{gas := Gas, call_data := {Func, _As, UseGas}} = Tx,
     [{correct, if Correct -> contract_call; true -> false end}] ++
-     [{contract_call_fun, Contract#contract.name} || Correct] ++
+     [{contract_call_fun, Contract#contract.name} || Correct andalso Gas >= UseGas ] ++
      [{contract_call, Res}] ++
-        [ {protocol, contract_call, element(1, maps:get(call_data, Tx)), aec_hard_forks:protocol_effective_at_height(Height) - Contract#contract.protocol} ||
-            Correct ].
-
-%% --- Operation: ga_attach ---
-ga_attach_pre(S) ->
-    maps:is_key(accounts, S) andalso maps:get(height, S) > 0.
-
-
-ga_attach_args(#{height := Height, accounts := Accounts}) ->
-    Name = "authorize_nonce",
-    ?LET({SenderTag, Sender}, gen_account(1, 100, Accounts),
-         begin
-             #{gasfun := GasFun, basefee := Fixed} = contract(Name),
-             [Height, {SenderTag, Sender#account.key}, Name,
-              frequency([{10, 1}, {30, 2}]),
-              #{owner_id => aeser_id:create(account, Sender#account.key),
-                vm_version  => frequency([{1, elements([0,4])}, {1, sophia_1}, {1, sophia_2}, {50, sophia_3}]),
-                abi_version => weighted_default({49, 1}, {1, elements([0,3])}),
-                fee => gen_fee_above(Height, Fixed),
-                gas_price => frequency([{1,0}, {10, 1}, {89, minimum_gas_price(Height)}]),
-                gas => frequency([{7, GasFun(Height)}, {1, GasFun(Height) - 1}, {1, GasFun(Height) + 100}, {1, 10}]),
-                nonce => gen_nonce(Sender)
-               }]
-         end).
-
-ga_attach_pre(S, [Height, {_, Sender}, _, _, Tx]) ->
-    correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
-
-ga_attach_valid(S, [Height, {_, Sender}, Name, CompilerVersion, Tx]) ->
-    #{gasfun := GasFun, basefee := Fixed} = contract(Name),
-    Protocol = aec_hard_forks:protocol_effective_at_height(Height),
-    is_account(S, Sender, normal)
-    andalso correct_nonce(S, Sender, Tx)
-    andalso check_balance(S, Sender, maps:get(fee, Tx) + GasFun(Height) * maps:get(gas_price, Tx))
-    andalso valid_contract_fee(Height, Fixed, Tx)
-    andalso  Protocol == 3
-    andalso lists:member({maps:get(vm_version, Tx), maps:get(abi_version, Tx)},
-                     [{sophia_3, 1}, {sophia_3, 1}])
-    andalso lists:member(CompilerVersion, [1, 2]).
-
-ga_attach_adapt(#{height := Height} = S, [_, {STag, Sender}, Contract, CompilerVersion, Tx]) ->
-    [Height, {STag, Sender}, Contract, CompilerVersion, adapt_nonce(S, Sender, Tx)];
-ga_attach_adapt(_, _) ->
-    %% in case we don't even have a Height
-    false.
-
-ga_attach(Height, _Sender, Name, CompilerVersion, Tx) ->
-    NewTx = ga_attach_tx(Name, CompilerVersion, Tx),
-    apply_transaction(Height, aega_attach_tx, NewTx).
-
-ga_attach_tx(Name, CompilerVersion, Tx) ->
-    #{file := File, args := Args} = contract(Name),
-    {ok, Contract} = aect_test_utils:read_contract(File),
-    {ok, Code}     = aect_test_utils:compile_contract(CompilerVersion, File),
-    {ok, CallData} = aect_sophia:encode_call_data(Contract, <<"init">>, Args),
-    NTx = maps:update_with(vm_version, fun(sophia_1) -> 1;
-                                          (solidity) -> 2;
-                                          (sophia_2) -> 1;  %% 3
-                                          (sophia_3) -> 3;  %% 4 FIX THIS
-                                          (N) -> N
-                                       end, Tx),
-    NTx#{code => Code,
-         call_data => CallData,
-         auth_fun => <<175,167,108,196,77,122,134,90,197,152,206,179,38,153,
-                       232,187,88,41,45,167,79,246,181,13,185,101,189,45,109,
-                       228,184,223>>}.
-
-
-ga_attach_next(S, _Value, [Height, {_, Sender}, Name,
-                                 _CompilerVersion, Tx] = Args) ->
-    case ga_attach_valid(S, Args) of
-        false -> S;
-        true  ->
-            #{gasfun := GasFun} = contract(Name),
-            #{ fee := Fee, gas_price := GasPrice,
-               gas := Gas, vm_version := Vm, abi_version := Abi} = Tx,
-            case Gas >= GasFun(Height) of
-                true ->
-                    reserve_fee(Fee + GasFun(Height) * GasPrice,
-                                generalize(Sender,
-                                bump_and_charge(Sender,
-                                                Fee + GasFun(Height) * GasPrice,
-                                                add(gaccounts,
-                                                    #gaccount{id = aeser_id:create(account, Sender),
-                                                              name = Name,
-                                                              vm = Vm,
-                                                              abi = Abi,
-                                                              protocol = aec_hard_forks:protocol_effective_at_height(Height)}, S))));
-                false ->
-                    %% out of gas
-                    reserve_fee(Fee + Gas * GasPrice,
-                                bump_and_charge(Sender,
-                                                Fee + Gas * GasPrice,
-                                                S))
-            end
-    end.
-
-ga_attach_features(S, [Height, {_, _Sender}, Name, _CompilerVersion, Tx] = Args, Res) ->
-    #{gasfun := GasFun} = contract(Name),
-    Correct = ga_attach_valid(S, Args) andalso maps:get(gas, Tx) >= GasFun(Height),
-    [{correct, if Correct -> ga_attach; true -> false end},
-     {ga_attach, Res}].
-
-%% ---------------
-
-%% --- Operation: ga_meta ---
-%% ga_meta_pre(S) ->
-%%     maps:is_key(accounts, S) andalso maps:get(gaccounts, S) =/= [].
-
-
-%% ga_meta_args(#{height := Height, gaccounts := GAccounts}) ->
-%%     ?LET(GAccount, elements(GAccounts),
-%%          begin
-%%              Name = GAccount#gaccount.name,
-%%              #{gasfun := GasFun, basefee := Fixed} = contract(Name),
-%%              [Height, GAccount#gaccount.id,
-%%               frequency([{10, 1}, {30, 2}]),
-%%               #{ga_id => aeser_id:create(account, GAccount#gaccount.id),
-%%                 abi_version => weighted_default({49, 1}, {1, elements([0,3])}),
-%%                 fee => gen_fee_above(Height, Fixed),
-%%                 gas_price => frequency([{1,0}, {10, 1}, {89, minimum_gas_price(Height)}]),
-%%                 gas => frequency([{7, GasFun(Height)}, {1, GasFun(Height) - 1}, {1, GasFun(Height) + 100}, {1, 10}]),
-%%                 tx => #{} %% Interesting
-%%                }]
-%%          end).
-
-%% ga_meta_pre(S, [Height, Id, _, Tx]) ->
-%%     correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
-
-%% ga_meta_valid(S, [Height, {_, Sender}, Name, CompilerVersion, Tx]) ->
-%%     #{gasfun := GasFun, basefee := Fixed} = contract(Name),
-%%     Protocol = aec_hard_forks:protocol_effective_at_height(Height),
-%%     is_account(S, Sender, normal)
-%%     andalso correct_nonce(S, Sender, Tx)
-%%     andalso check_balance(S, Sender, maps:get(fee, Tx) + GasFun(Height) * maps:get(gas_price, Tx))
-%%     andalso valid_contract_fee(Height, Fixed, Tx)
-%%     andalso  Protocol == 3
-%%     andalso lists:member({maps:get(vm_version, Tx), maps:get(abi_version, Tx)},
-%%                      [{sophia_3, 1}, {sophia_3, 1}])
-%%     andalso lists:member(CompilerVersion, [1, 2]).
-
-%% ga_meta_adapt(#{height := Height} = S, [_, {STag, Sender}, Contract, CompilerVersion, Tx]) ->
-%%     [Height, {STag, Sender}, Contract, CompilerVersion, adapt_nonce(S, Sender, Tx)];
-%% ga_meta_adapt(_, _) ->
-%%     %% in case we don't even have a Height
-%%     false.
-
-%% ga_meta(Height, {_, _Sender}, Name, CompilerVersion, Tx) ->
-%%     #{file := File, args := Args} = contract(Name),
-%%     {ok, Contract} = aect_test_utils:read_contract(File),
-%%     {ok, Code}     = aect_test_utils:compile_contract(CompilerVersion, File),
-%%     {ok, CallData} = aect_sophia:encode_call_data(Contract, <<"init">>, Args),
-%%     NTx = maps:update_with(vm_version, fun(sophia_1) -> 1;
-%%                                           (solidity) -> 2;
-%%                                           (sophia_2) -> 1;  %% 3
-%%                                           (sophia_3) -> 3;  %% 4 FIX THIS
-%%                                           (N) -> N
-%%                                        end, Tx),
-%%     apply_transaction(Height, aega_attach_tx,
-%%                       NTx#{code => Code,
-%%                            call_data => CallData,
-%%                            auth_fun => <<175,167,108,196,77,122,134,90,197,152,206,179,38,153,
-%%                                          232,187,88,41,45,167,79,246,181,13,185,101,189,45,109,
-%%                                          228,184,223>>}).
-
-%% ga_meta_next(S, _Value, [Height, {_, Sender}, Name,
-%%                                  CompilerVersion, Tx] = Args) ->
-%%     S.
-
-%% ga_meta_features(S, [Height, {_, _Sender}, Name, CompilerVersion, Tx] = Args, Res) ->
-%%     #{gasfun := GasFun} = contract(Name),
-%%     Correct = ga_attach_valid(S, Args) andalso maps:get(gas, Tx) >= GasFun(Height),
-%%     [{correct, if Correct -> ga_attach; true -> false end},
-%%      {ga_attach, Res}].
+        [ {protocol, contract_call, Func, aec_hard_forks:protocol_effective_at_height(Height) - Contract#contract.protocol} ||
+            Correct andalso Gas >= UseGas ].
 
 
 
@@ -1548,19 +1378,17 @@ weight(S, channel_close_mutual) ->
         _  -> 4 end;
 weight(_S, contract_create) ->
     10;
-weight(_S, ga_attach) ->
-    10;
 weight(_S, contract_call) ->
     4;
 weight(_S, _) -> 0.
+
+prop_txs() ->
+    prop_txs(3).
 
 prop_txs(Fork) ->
     application:load(aecore),
     application:set_env(aecore, hard_forks,
                                    #{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
-    prop_txs().
-
-prop_txs() ->
     application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
     eqc:dont_print_counterexample(
     in_parallel(
@@ -1614,6 +1442,9 @@ resolve_account(S, {name, Name})    -> lookup_name(S, Name);
 resolve_account(_, {new, Key})      -> Key;
 resolve_account(_, {existing, Key}) -> Key.
 
+account_key(#account{key = Key}) ->
+    Key.
+
 on_account(Key, Fun, S = #{accounts := Accounts}) ->
     Upd = fun(Acc = #account{ key = Key1 }) when Key1 == Key -> Fun(Acc);
              (Acc) -> Acc end,
@@ -1638,20 +1469,31 @@ reserve_fee(Fee, S = #{fees := Fees, height := H}) ->
 bump_and_charge(Key, Fee, S) ->
     bump_nonce(Key, charge(Key, Fee, S)).
 
-generalize(Key, S) ->
-     on_account(Key, fun(Acc) -> Acc#account{ generalized = true } end, S).
-
-degeneralize(Key, S) ->
-     on_account(Key, fun(Acc) -> Acc#account{ generalized = false } end, S).
-
 add(Tag, X, S) ->
     S#{ Tag => maps:get(Tag, S, []) ++ [X] }.
+
+update_contract_id(OldId, NewId, S) ->
+    Fun = fun(C) -> C#contract{id = NewId} end,
+    on_contract(OldId, Fun, S).
+
+on_contract(Id, Fun, S = #{contracts := Contracts}) ->
+    Upd = fun(C = #contract{ id = I }) when I == Id -> Fun(C);
+             (C) -> C end,
+    S#{ contracts => lists:map(Upd, Contracts) }.
 
 oracle_ext(Id, Delta, S) ->
     {Id, QFee, TTL} = oracle(S, Id),
     add(oracles, {Id, QFee, TTL + Delta}, remove(oracles, Id, 1, S)).
 remove(Tag, X, I, S) ->
     S#{ Tag := lists:keydelete(X, I, maps:get(Tag, S)) }.
+
+update_oracle_id(OldId, NewId, S) ->
+    on_oracle(OldId, fun({_, Fee, TTL}) -> {NewId, Fee, TTL} end, S).
+
+on_oracle(Id, Fun, S = #{ oracles := Oracles }) ->
+    Upd = fun(C = {I, _, _}) when I == Id -> Fun(C);
+             (C) -> C end,
+    S#{ oracles => lists:map(Upd, Oracles) }.
 
 remove_query(Id, S) ->
     remove(queries, Id, #query.id, S).
@@ -1674,10 +1516,22 @@ get(S, Tag, Key, I) ->
 get_query(S, Id) ->
     get(S, queries, Id, #query.id).
 
+update_query_id(OldId, NewId, S) ->
+    on_query(OldId, fun(Q) -> Q#query{ id = NewId } end, S).
+
+on_query(Id, Fun, S = #{ queries := Queries }) ->
+    Upd = fun(C = #query{ id = I }) when I == Id -> Fun(C);
+             (C) -> C end,
+    S#{ queries => lists:map(Upd, Queries) }.
+
 on_channel(Id, Fun, S = #{ channels := Channels }) ->
     Upd = fun(C = #channel{ id = I }) when I == Id -> Fun(C);
              (C) -> C end,
     S#{ channels => lists:map(Upd, Channels) }.
+
+update_channel_id(OldId, NewId, S) ->
+    Fun = fun(C) -> C#channel{id = NewId} end,
+    on_channel(OldId, Fun, S).
 
 credit_channel(Id, Round, Amount, S) ->
     on_channel(Id, fun(C) -> C#channel{ amount = C#channel.amount + Amount,
@@ -1739,14 +1593,6 @@ correct_name_id(Name, NameId) ->
 is_account(#{accounts := Accounts}, Key) ->
     lists:keymember(Key, #account.key, Accounts).
 
-is_account(#{accounts := Accounts}, Key, normal) ->
-    case lists:keyfind(Key, #account.key, Accounts) of
-        false -> false;
-        Account ->
-            not Account#account.generalized
-    end.
-
-
 valid_account(S, Tag, Key) -> valid_account(S, {Tag, Key}).
 valid_account(_S, {name, _}) -> true;
 valid_account(S, {Tag, Key}) ->
@@ -1806,6 +1652,7 @@ adapt_nonce(_S, _A, Tx) ->
     Tx. %% Don't fix bad nonces...
 
 
+
 check_balance(S, Key, Amount) ->
      (account(S, Key))#account.amount >= Amount.
 
@@ -1851,11 +1698,10 @@ hash_equal(X, Y) ->
      end.
 
 
-apply_transaction(Height, TxMod, TxArgs0) ->
+apply_transaction(Height, TxMod, TxArgs) ->
     Env      = aetx_env:tx_env(Height),
     Trees    = get(trees),
-    TxArgs   = untag_nonce(TxArgs0),
-    {ok, Tx} = apply(TxMod, new, [TxArgs]),
+    Tx       = create_aetx(TxMod, TxArgs),
 
     case aetx:process(Tx, Trees, Env) of
         {ok, NewTrees, _NewEnv} ->
@@ -1864,6 +1710,10 @@ apply_transaction(Height, TxMod, TxArgs0) ->
         Other ->
             Other
     end.
+
+create_aetx(TxMod, TxArgs) ->
+    {ok, AeTx} = apply(TxMod, new, [untag_nonce(TxArgs)]),
+    AeTx.
 
 untag_nonce(M = #{nonce := {_Tag, N}}) -> M#{nonce := N};
 untag_nonce(M)                         -> M.
@@ -2034,14 +1884,17 @@ contracts() ->
        args => [],
        gasfun => fun(_) -> 193 end,
        basefee => 75000 + 24000,
-       functions => [{<<"main">>, [nat()], 192}]
+       functions => [{<<"main">>, [nat()], 192, <<>>}]
       },
      #{name => "authorize_nonce",
        file => "contracts/authorize_nonce",
        args => [],
        gasfun => fun(_) -> 275 end,
        basefee => 75000 + 30000,
-       functions => [{<<"nonce_correct">>, [nat()], 314}]
+       auth_fun => <<"nonce_correct">>,
+       functions => [{<<"nonce_correct">>, [nat()], 314, <<175,167,108,196,77,122,134,90,197,152,206,179,38,153,
+                         232,187,88,41,45,167,79,246,181,13,185,101,189,45,109,
+                         228,184,223>> }]
       }
     ].
 
