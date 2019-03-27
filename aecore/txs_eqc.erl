@@ -1314,8 +1314,178 @@ contract_call_features(S, [Height, {_, _Sender}, {_ContractTag, Contract}, Tx] =
         [ {protocol, contract_call, element(1, maps:get(call_data, Tx)), aec_hard_forks:protocol_effective_at_height(Height) - Contract#contract.protocol} ||
             Correct ].
 
+%% --- Operation: ga_attach ---
+ga_attach_pre(S) ->
+    maps:is_key(accounts, S) andalso maps:get(height, S) > 0.
+
+
+ga_attach_args(#{height := Height, accounts := Accounts}) ->
+    Name = "authorize_nonce",
+    ?LET({SenderTag, Sender}, gen_account(1, 100, Accounts),
+         begin
+             #{gasfun := GasFun, basefee := Fixed} = contract(Name),
+             [Height, {SenderTag, Sender#account.key}, Name,
+              frequency([{10, 1}, {30, 2}]),
+              #{owner_id => aeser_id:create(account, Sender#account.key),
+                vm_version  => frequency([{1, elements([0,4])}, {1, sophia_1}, {1, sophia_2}, {50, sophia_3}]),
+                abi_version => weighted_default({49, 1}, {1, elements([0,3])}),
+                fee => gen_fee_above(Height, Fixed),
+                gas_price => frequency([{1,0}, {10, 1}, {89, minimum_gas_price(Height)}]),
+                gas => frequency([{7, GasFun(Height)}, {1, GasFun(Height) - 1}, {1, GasFun(Height) + 100}, {1, 10}]),
+                nonce => gen_nonce(Sender)
+               }]
+         end).
+
+ga_attach_pre(S, [Height, {_, Sender}, _, _, Tx]) ->
+    correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
+
+ga_attach_valid(S, [Height, {_, Sender}, Name, CompilerVersion, Tx]) ->
+    #{gasfun := GasFun, basefee := Fixed} = contract(Name),
+    Protocol = aec_hard_forks:protocol_effective_at_height(Height),
+    is_account(S, Sender, normal)
+    andalso correct_nonce(S, Sender, Tx)
+    andalso check_balance(S, Sender, maps:get(fee, Tx) + GasFun(Height) * maps:get(gas_price, Tx))
+    andalso valid_contract_fee(Height, Fixed, Tx)
+    andalso  Protocol == 3
+    andalso lists:member({maps:get(vm_version, Tx), maps:get(abi_version, Tx)},
+                     [{sophia_3, 1}, {sophia_3, 1}])
+    andalso lists:member(CompilerVersion, [1, 2]).
+
+ga_attach_adapt(#{height := Height} = S, [_, {STag, Sender}, Contract, CompilerVersion, Tx]) ->
+    [Height, {STag, Sender}, Contract, CompilerVersion, adapt_nonce(S, Sender, Tx)];
+ga_attach_adapt(_, _) ->
+    %% in case we don't even have a Height
+    false.
+
+ga_attach(Height, _Sender, Name, CompilerVersion, Tx) ->
+    NewTx = ga_attach_tx(Name, CompilerVersion, Tx),
+    apply_transaction(Height, aega_attach_tx, NewTx).
+
+ga_attach_tx(Name, CompilerVersion, Tx) ->
+    #{file := File, args := Args} = contract(Name),
+    {ok, Contract} = aect_test_utils:read_contract(File),
+    {ok, Code}     = aect_test_utils:compile_contract(CompilerVersion, File),
+    {ok, CallData} = aect_sophia:encode_call_data(Contract, <<"init">>, Args),
+    NTx = maps:update_with(vm_version, fun(sophia_1) -> 1;
+                                          (solidity) -> 2;
+                                          (sophia_2) -> 1;  %% 3
+                                          (sophia_3) -> 3;  %% 4 FIX THIS
+                                          (N) -> N
+                                       end, Tx),
+    NTx#{code => Code,
+         call_data => CallData,
+         auth_fun => <<175,167,108,196,77,122,134,90,197,152,206,179,38,153,
+                       232,187,88,41,45,167,79,246,181,13,185,101,189,45,109,
+                       228,184,223>>}.
+
+
+ga_attach_next(S, _Value, [Height, {_, Sender}, Name,
+                                 _CompilerVersion, Tx] = Args) ->
+    case ga_attach_valid(S, Args) of
+        false -> S;
+        true  ->
+            #{gasfun := GasFun} = contract(Name),
+            #{ fee := Fee, gas_price := GasPrice,
+               gas := Gas, vm_version := Vm, abi_version := Abi} = Tx,
+            case Gas >= GasFun(Height) of
+                true ->
+                    reserve_fee(Fee + GasFun(Height) * GasPrice,
+                                generalize(Sender,
+                                bump_and_charge(Sender,
+                                                Fee + GasFun(Height) * GasPrice,
+                                                add(gaccounts,
+                                                    #gaccount{id = aeser_id:create(account, Sender),
+                                                              name = Name,
+                                                              vm = Vm,
+                                                              abi = Abi,
+                                                              protocol = aec_hard_forks:protocol_effective_at_height(Height)}, S))));
+                false ->
+                    %% out of gas
+                    reserve_fee(Fee + Gas * GasPrice,
+                                bump_and_charge(Sender,
+                                                Fee + Gas * GasPrice,
+                                                S))
+            end
+    end.
+
+ga_attach_features(S, [Height, {_, _Sender}, Name, _CompilerVersion, Tx] = Args, Res) ->
+    #{gasfun := GasFun} = contract(Name),
+    Correct = ga_attach_valid(S, Args) andalso maps:get(gas, Tx) >= GasFun(Height),
+    [{correct, if Correct -> ga_attach; true -> false end},
+     {ga_attach, Res}].
 
 %% ---------------
+
+%% --- Operation: ga_meta ---
+%% ga_meta_pre(S) ->
+%%     maps:is_key(accounts, S) andalso maps:get(gaccounts, S) =/= [].
+
+
+%% ga_meta_args(#{height := Height, gaccounts := GAccounts}) ->
+%%     ?LET(GAccount, elements(GAccounts),
+%%          begin
+%%              Name = GAccount#gaccount.name,
+%%              #{gasfun := GasFun, basefee := Fixed} = contract(Name),
+%%              [Height, GAccount#gaccount.id,
+%%               frequency([{10, 1}, {30, 2}]),
+%%               #{ga_id => aeser_id:create(account, GAccount#gaccount.id),
+%%                 abi_version => weighted_default({49, 1}, {1, elements([0,3])}),
+%%                 fee => gen_fee_above(Height, Fixed),
+%%                 gas_price => frequency([{1,0}, {10, 1}, {89, minimum_gas_price(Height)}]),
+%%                 gas => frequency([{7, GasFun(Height)}, {1, GasFun(Height) - 1}, {1, GasFun(Height) + 100}, {1, 10}]),
+%%                 tx => #{} %% Interesting
+%%                }]
+%%          end).
+
+%% ga_meta_pre(S, [Height, Id, _, Tx]) ->
+%%     correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
+
+%% ga_meta_valid(S, [Height, {_, Sender}, Name, CompilerVersion, Tx]) ->
+%%     #{gasfun := GasFun, basefee := Fixed} = contract(Name),
+%%     Protocol = aec_hard_forks:protocol_effective_at_height(Height),
+%%     is_account(S, Sender, normal)
+%%     andalso correct_nonce(S, Sender, Tx)
+%%     andalso check_balance(S, Sender, maps:get(fee, Tx) + GasFun(Height) * maps:get(gas_price, Tx))
+%%     andalso valid_contract_fee(Height, Fixed, Tx)
+%%     andalso  Protocol == 3
+%%     andalso lists:member({maps:get(vm_version, Tx), maps:get(abi_version, Tx)},
+%%                      [{sophia_3, 1}, {sophia_3, 1}])
+%%     andalso lists:member(CompilerVersion, [1, 2]).
+
+%% ga_meta_adapt(#{height := Height} = S, [_, {STag, Sender}, Contract, CompilerVersion, Tx]) ->
+%%     [Height, {STag, Sender}, Contract, CompilerVersion, adapt_nonce(S, Sender, Tx)];
+%% ga_meta_adapt(_, _) ->
+%%     %% in case we don't even have a Height
+%%     false.
+
+%% ga_meta(Height, {_, _Sender}, Name, CompilerVersion, Tx) ->
+%%     #{file := File, args := Args} = contract(Name),
+%%     {ok, Contract} = aect_test_utils:read_contract(File),
+%%     {ok, Code}     = aect_test_utils:compile_contract(CompilerVersion, File),
+%%     {ok, CallData} = aect_sophia:encode_call_data(Contract, <<"init">>, Args),
+%%     NTx = maps:update_with(vm_version, fun(sophia_1) -> 1;
+%%                                           (solidity) -> 2;
+%%                                           (sophia_2) -> 1;  %% 3
+%%                                           (sophia_3) -> 3;  %% 4 FIX THIS
+%%                                           (N) -> N
+%%                                        end, Tx),
+%%     apply_transaction(Height, aega_attach_tx,
+%%                       NTx#{code => Code,
+%%                            call_data => CallData,
+%%                            auth_fun => <<175,167,108,196,77,122,134,90,197,152,206,179,38,153,
+%%                                          232,187,88,41,45,167,79,246,181,13,185,101,189,45,109,
+%%                                          228,184,223>>}).
+
+%% ga_meta_next(S, _Value, [Height, {_, Sender}, Name,
+%%                                  CompilerVersion, Tx] = Args) ->
+%%     S.
+
+%% ga_meta_features(S, [Height, {_, _Sender}, Name, CompilerVersion, Tx] = Args, Res) ->
+%%     #{gasfun := GasFun} = contract(Name),
+%%     Correct = ga_attach_valid(S, Args) andalso maps:get(gas, Tx) >= GasFun(Height),
+%%     [{correct, if Correct -> ga_attach; true -> false end},
+%%      {ga_attach, Res}].
+
 
 
 
@@ -1377,6 +1547,8 @@ weight(S, channel_close_mutual) ->
         [] -> 0;
         _  -> 4 end;
 weight(_S, contract_create) ->
+    10;
+weight(_S, ga_attach) ->
     10;
 weight(_S, contract_call) ->
     4;
