@@ -193,7 +193,7 @@ call_features(S, {call, ?MODULE, F, [AsMeta | Args]}, Res) ->
 
 
 all_command_names() ->
-    [ga_meta | txs_eqc:all_command_names()].
+    [ga_attach | txs_eqc:all_command_names()].
 
 %% -- Operations -------------------------------------------------------------
 
@@ -378,7 +378,7 @@ prop_txs(Fork) ->
             measure(length, commands_length(Cmds),
             measure(height, Height,
             features(call_features(H),
-            txs_eqc:aggregate_feats([atoms, correct, protocol, contract_call_fun | all_command_names()], call_features(H),
+            txs_eqc:aggregate_feats([atoms, correct, protocol, contract_call_fun, ga_meta | all_command_names()], call_features(H),
                 ?WHENFAIL(eqc:format("Total = ~p~nFeeTotal = ~p~n", [TreesTotal, FeeTotal]),
                           pretty_commands(?MODULE, Cmds, {H, S, Res},
                               conjunction([{result, Res == ok},
