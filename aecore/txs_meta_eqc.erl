@@ -60,6 +60,11 @@ precondition(S, {call, ?MODULE, ga_attach, [AsMeta, Height, {_, Sender}, _, _, T
     maps:get(height, S, 0) > 0 andalso maps:get(accounts, S, []) =/= [] andalso
     (AsMeta == false orelse lists:member(AsMeta, maps:get(gaccounts, S))) andalso
         txs_eqc:correct_height(S, Height) andalso txs_eqc:valid_nonce(S, Sender, Tx);
+precondition(S, {call, ?MODULE, F, [AsMeta | Args]}) when
+      F == register_oracle; F == channel_create; F == query_oracle ->
+    %% BUG precondition
+    AsMeta == false andalso
+        txs_eqc:precondition(S, {call, txs_eqc, F, Args});
 precondition(S, {call, ?MODULE, F, [AsMeta | Args]}) ->
     (AsMeta == false orelse lists:member(AsMeta, maps:get(gaccounts, S))) andalso
         txs_eqc:precondition(S, {call, txs_eqc, F, Args}).
@@ -137,6 +142,12 @@ next_state(S, V, {call, ?MODULE, F, [GAccount | Args]}) ->
                             AuthNonce = aega_meta_tx:auth_id(GAccount#gaccount.id, AuthData),
                             NewId =  aect_contracts:compute_contract_pubkey(GAccount#gaccount.id, AuthNonce),
                             txs_eqc:update_contract_id(OldId, NewId, NewS);
+                        register_oracle ->
+                            NewS;
+                        channel_create ->
+                            NewS;
+                        query_oracle ->
+                            NewS;
                         _ ->
                             NewS
                     end
