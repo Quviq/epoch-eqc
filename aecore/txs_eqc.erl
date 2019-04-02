@@ -443,7 +443,7 @@ response_oracle_args(#{accounts := Accounts, height := Height} = S) ->
                       {1, {?Patron, 2, ?Patron}}]),
           [Height, {Sender, Nonce, Oracle},
            #{oracle_id => aeser_id:create(oracle, Oracle),
-             query_id => aeo_query:id(Sender, Nonce, Oracle),
+             query_id => query_id(Sender, Nonce, Oracle),
              response => <<"yes, you can">>,
              response_ttl => gen_query_response_ttl(S, QueryId),
              fee => gen_fee(Height),
@@ -452,6 +452,11 @@ response_oracle_args(#{accounts := Accounts, height := Height} = S) ->
                           Account -> {good, Account#account.nonce}
                       end
             }]).
+
+query_id(Sender, Nonce, Oracle) when is_integer(Nonce) ->
+    aeo_query:id(Sender, Nonce, Oracle);
+query_id(_Sender, AuthId, Oracle) ->
+    aeo_query:ga_id(AuthId, Oracle).
 
 response_oracle_pre(S, [Height, {_, _, Q}, Tx]) ->
     correct_height(S, Height) andalso valid_nonce(S, Q, Tx).
@@ -1531,7 +1536,8 @@ on_query(Id, Fun, S = #{ queries := Queries }) ->
              (C) -> C end,
     S#{ queries => lists:map(Upd, Queries) }.
 
-on_channel(Id, Fun, S = #{ channels := Channels }) ->
+on_channel(Id, Fun, S) ->
+    Channels = maps:get(channels, S, []),
     Upd = fun(C = #channel{ id = I }) when I == Id -> Fun(C);
              (C) -> C end,
     S#{ channels => lists:map(Upd, Channels) }.

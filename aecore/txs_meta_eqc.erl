@@ -60,11 +60,10 @@ precondition(S, {call, ?MODULE, ga_attach, [AsMeta, Height, {_, Sender}, _, _, T
     maps:get(height, S, 0) > 0 andalso maps:get(accounts, S, []) =/= [] andalso
     (AsMeta == false orelse lists:member(AsMeta, maps:get(gaccounts, S))) andalso
         txs_eqc:correct_height(S, Height) andalso txs_eqc:valid_nonce(S, Sender, Tx);
-precondition(S, {call, ?MODULE, F, [AsMeta | Args]}) when
-      F == register_oracle; F == channel_create; F == query_oracle ->
-    %% BUG precondition
-    AsMeta == false andalso
-        txs_eqc:precondition(S, {call, txs_eqc, F, Args});
+%% precondition(S, {call, ?MODULE, F, [AsMeta | Args]}) when F == channel_create ->
+%%     %% BUG precondition
+%%     AsMeta == false andalso
+%%         txs_eqc:precondition(S, {call, txs_eqc, F, Args});
 precondition(S, {call, ?MODULE, F, [AsMeta | Args]}) ->
     (AsMeta == false orelse lists:member(AsMeta, maps:get(gaccounts, S))) andalso
         txs_eqc:precondition(S, {call, txs_eqc, F, Args}).
@@ -135,22 +134,34 @@ next_state(S, V, {call, ?MODULE, F, [GAccount | Args]}) ->
                     AuthS;
                 true ->
                     NewS = txs_eqc:next_state(AuthS, V, {call, txs_eqc, F, Args}),
+                    case AuthS == NewS of
+                        true -> NewS;
+                        false ->
+                            Nonce = maps:get(nonce, txs_eqc:untag_nonce(lists:last(Args))),
+                            AuthNonce = aega_meta_tx:auth_id(GAccount#gaccount.id, AuthData),
                     case F of
                         contract_create ->
-                            OldId = aect_contracts:compute_contract_pubkey(GAccount#gaccount.id,
-                                                                           maps:get(nonce, txs_eqc:untag_nonce(lists:last(Args)))),
-                            AuthNonce = aega_meta_tx:auth_id(GAccount#gaccount.id, AuthData),
+                                    OldId = aect_contracts:compute_contract_pubkey(GAccount#gaccount.id, Nonce),
                             NewId =  aect_contracts:compute_contract_pubkey(GAccount#gaccount.id, AuthNonce),
                             txs_eqc:update_contract_id(OldId, NewId, NewS);
                         register_oracle ->
                             NewS;
                         channel_create ->
-                            NewS;
+                                    {_, RespPK} = aeser_id:specialize(maps:get(responder_id, lists:last(Args))),
+                                    OldId = {GAccount#gaccount.id, Nonce, RespPK},
+                                    NewId =  {GAccount#gaccount.id, AuthNonce, RespPK},
+                                    %% io:format("Change ~p\nInto ~p\nIn: ~p\n", [OldId, NewId, maps:get(channels, NewS)]),
+                                    txs_eqc:update_channel_id(OldId, NewId, NewS);
                         query_oracle ->
-                            NewS;
+                                    {_, OraclePK} = aeser_id:specialize(maps:get(oracle_id, lists:last(Args))),
+                                    OldId = {GAccount#gaccount.id, Nonce, OraclePK},
+                                    NewId = {GAccount#gaccount.id, AuthNonce, OraclePK},
+                                    %% io:format("Change ~p\nInto ~p\nIn: ~p\n", [OldId, NewId, maps:get(queries, NewS)]),
+                                    txs_eqc:update_query_id(OldId, NewId, NewS);
                         _ ->
                             NewS
                     end
+            end
             end
     end.
 
