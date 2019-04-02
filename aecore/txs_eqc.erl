@@ -1390,6 +1390,13 @@ prop_txs(Fork) ->
     application:set_env(aecore, hard_forks,
                                    #{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
     application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
+    ?SETUP(
+    fun() ->
+        meck:new(aec_fork_block_settings, [passthrough]),
+        meck:expect(aec_fork_block_settings, file_name,
+                        fun(R) -> "../../" ++ meck:passthrough([R]) end),
+        fun() -> meck:unload(aec_fork_block_settings) end
+    end,
     eqc:dont_print_counterexample(
     in_parallel(
     ?FORALL(Cmds, commands(?MODULE),
@@ -1413,7 +1420,7 @@ prop_txs(Fork) ->
                           pretty_commands(?MODULE, Cmds, {H, S, Res},
                               conjunction([{result, Res == ok},
                                            {total, Total == 0 orelse equals(Total, ?PatronAmount - FeeTotal)}]))))))))
-    end))).
+    end)))).
 
 aggregate_feats([], [], Prop) -> Prop;
 aggregate_feats([atoms | Kinds], Features, Prop) ->
