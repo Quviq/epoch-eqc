@@ -1219,7 +1219,6 @@ contract_create_features(S, [Height, {_, _Sender}, Name, CompilerVersion, Tx] = 
 contract_call_pre(S) ->
     maps:is_key(accounts, S) andalso maps:get(contracts, S) /= [].
 
-
 %% Given https://github.com/aeternity/protocol/blame/44b459970144fb030df55e32b166a9d62a79b523/contracts/contract_vms.md#L23
 %% I would expect vm_version to be present either in ct_version form or as separate key
 %% But not so in aect_call_tx
@@ -1256,7 +1255,7 @@ call_base_fee(As) ->
 
 contract_call_pre(S, [Height, {_, Sender}, {ContractTag, Contract}, Tx]) ->
     correct_height(S, Height) andalso valid_nonce(S, Sender, Tx) andalso
-        (ContractTag == invalid  orelse lists:member(Contract, maps:get(contracts, S))).
+        (ContractTag == invalid  orelse lists:member(Contract#contract.id, [ C#contract.id || C <- maps:get(contracts, S) ])).
 
 contract_call_valid(S, [Height, {_, Sender}, {ContractTag, _Contract}, Tx]) ->
     #{call_data := {_, As, _}} = Tx,
@@ -1386,8 +1385,10 @@ weight(S, channel_close_mutual) ->
         _  -> 4 end;
 weight(_S, contract_create) ->
     10;
-weight(_S, contract_call) ->
-    4;
+weight(S, contract_call) ->
+    case maps:get(contracts, S, []) of
+        [] -> 0;
+        _  -> 10 end;
 weight(_S, _) -> 0.
 
 prop_txs() ->
@@ -1404,6 +1405,7 @@ prop_txs(Fork) ->
     [ ets:insert(contracts, {maps:get(name, C), C}) || C <- contracts() ],
     ?SETUP(
     fun() ->
+        %% make sure we can run in eqc/aecore
         meck:new(aec_fork_block_settings, [passthrough]),
         meck:expect(aec_fork_block_settings, file_name,
                         fun(R) -> "../../" ++ meck:passthrough([R]) end),
@@ -1934,7 +1936,6 @@ gen_contract_id(_, _, []) ->
 gen_contract_id(Invalid, Valid, Contracts) ->
     weighted_default({Valid,
                       ?LET(Contract, elements(Contracts),
-                           %% Possibly lookup a name
                            {valid, Contract})
                      },
                      {Invalid, {invalid, fake_contract_id()}}).
