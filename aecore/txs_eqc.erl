@@ -26,11 +26,14 @@
 -record(claim,{name, height, expires_by, protected_height,  claimer, protocol}).
 -record(query, {sender, id, fee, response_ttl, query_ttl}).
 -record(channel, {id, round = 1, amount = 0, reserve = 0}).
--record(contract, {name, id, amount, deposit, vm, abi, compiler_version, protocol}).
+-record(contract, {name, id, amount, deposit, vm, abi, compiler_version, protocol, src, functions}).
 
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
     #{claims => [], preclaims => [], oracles => [], fees => [], contracts => [], gaccounts => []}.
+
+initial_state(Contracts) ->
+    maps:put(compiled_contracts, Contracts, initial_state()).
 
 patron() ->
     {?Patron, ?PatronAmount}.
@@ -1160,10 +1163,9 @@ contract_create(Height, {_, _Sender}, Name, CompilerVersion, Tx) ->
     apply_transaction(Height, aect_create_tx, NewTx).
 
 contract_create_tx(Name, CompilerVersion, Tx) ->
-    #{file := File, args := Args} = contract(Name),
-    {ok, Contract} = aect_test_utils:read_contract(File),
-    {ok, Code}     = aect_test_utils:compile_contract(CompilerVersion, File),
+    #{src := Contract, args := Args} = CompiledContract = contract(Name),
     {ok, CallData} = aect_sophia:encode_call_data(Contract, <<"init">>, Args),
+    Code = maps:get({code, CompilerVersion}, CompiledContract),
     NTx = maps:update_with(vm_version, fun(aevm_sophia_1) -> 1;
                                           (vm_solidity) -> 2;
                                           (aevm_sophia_2) -> 3;
@@ -1177,7 +1179,7 @@ contract_create_next(S, _Value, [Height, {_, Sender}, Name,
     case contract_create_valid(S, Args) of
         false -> S;
         true  ->
-            #{gasfun := GasFun} = contract(Name),
+            #{gasfun := GasFun, src := Source, functions := Funs} = contract(Name),
             #{ fee := Fee, gas_price := GasPrice, amount := Amount,
                deposit := Deposit, gas := Gas, vm_version := Vm, abi_version := Abi} = Tx,
             case Gas >= GasFun(Height) of
@@ -1194,6 +1196,8 @@ contract_create_next(S, _Value, [Height, {_, Sender}, Name,
                                                               vm = Vm,
                                                               abi = Abi,
                                                               compiler_version = CompilerVersion,
+                                                              src = Source,
+                                                              functions = Funs,
                                                               protocol = aec_hard_forks:protocol_effective_at_height(Height)}, S)));
                 false ->
                     %% out of gas
@@ -1226,7 +1230,7 @@ contract_call_args(#{height := Height, accounts := Accounts, contracts := Contra
           ?LET({Func, As, UseGas, _},
                case ContractTag of
                    invalid -> {<<"main">>, [], 1, <<>>};
-                   _ -> oneof(maps:get(functions, contract(Contract#contract.name)))
+                   _ -> oneof(Contract#contract.functions)
                end,
                [Height, {SenderTag, Sender#account.key}, {ContractTag, Contract},
                 #{caller_id => aeser_id:create(account, Sender#account.key),   %% could also be a contract!
@@ -1276,9 +1280,8 @@ contract_call(Height, _, Contract, Tx) ->
 contract_call_tx({invalid, _Contract}, Tx) ->
     Tx#{call_data => <<"Blubber">>};
 contract_call_tx({valid, Contract}, #{call_data := {Func, As, _}} = Tx) ->
-    #{file := File} = contract(Contract#contract.name),
+    ContractSrc = Contract#contract.src,
     BinaryAs = [ to_binary(A) || A <- As],
-    {ok, ContractSrc} = aect_test_utils:read_contract(File),
     {ok, CallData} = aect_sophia:encode_call_data(ContractSrc, Func, BinaryAs),
     Tx#{call_data => CallData}.
 
@@ -1395,6 +1398,10 @@ prop_txs(Fork) ->
     application:set_env(aecore, hard_forks,
                                    #{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
     application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
+    %% read and compile contracts once (and use them in parallel
+    catch ets:delete(contracts),
+    ets:new(contracts, [{read_concurrency, true}, named_table]),
+    [ ets:insert(contracts, {maps:get(name, C), C}) || C <- contracts() ],
     ?SETUP(
     fun() ->
         meck:new(aec_fork_block_settings, [passthrough]),
@@ -1889,27 +1896,38 @@ gen_contract() ->
     elements(["identity", "authorize_nonce"]).
 
 contract(Name) ->
-    hd([ Map || Map <- contracts(), maps:get(name, Map) == Name ]).
+    [{_, Map}] = ets:lookup(contracts, Name),
+    Map.
 
+%% Add srcs dynamically for the compilers available
 contracts() ->
-    [#{name => "identity",
-       file => "contracts/identity",
-       args => [],
-       gasfun => fun(_) -> 193 end,
-       basefee => 75000 + 24000,
-       functions => [{<<"main">>, [nat()], 192, <<>>}]
-      },
-     #{name => "authorize_nonce",
-       file => "contracts/authorize_nonce",
-       args => [],
-       gasfun => fun(_) -> 275 end,
-       basefee => 75000 + 30000,
-       auth_fun => <<"nonce_correct">>,
-       functions => [{<<"nonce_correct">>, [nat()], 314, <<175,167,108,196,77,122,134,90,197,152,206,179,38,153,
-                         232,187,88,41,45,167,79,246,181,13,185,101,189,45,109,
-                         228,184,223>> }]
-      }
-    ].
+    Static =
+        [#{name => "identity",
+           args => [],
+           gasfun => fun(_) -> 193 end,
+           basefee => 75000 + 24000,
+           functions => [{<<"main">>, [nat()], 192, <<>>}]
+          },
+         #{name => "authorize_nonce",
+           args => [],
+           gasfun => fun(_) -> 275 end,
+           basefee => 75000 + 30000,
+           auth_fun => <<"nonce_correct">>,
+           functions => [{<<"nonce_correct">>, [nat()], 314, <<175,167,108,196,77,122,134,90,197,152,206,179,38,153,
+                                                               232,187,88,41,45,167,79,246,181,13,185,101,189,45,109,
+                                                               228,184,223>> }]
+          }
+        ],
+    [ begin
+          File = filename:join("contracts", maps:get(name, C)),
+          {ok, ContractSrc} = aect_test_utils:read_contract(File),
+          CompiledCode =
+              [ begin
+                    {ok, Code} = aect_test_utils:compile_contract(CompilerVersion, File),
+                    {{code, CompilerVersion}, Code}
+                end || CompilerVersion <- [1, 2] ],
+          maps:merge(C#{src => ContractSrc}, maps:from_list(CompiledCode))
+      end || C <- Static ].
 
 gen_contract_id(_, _, []) ->
     {invalid, fake_contract_id()};
