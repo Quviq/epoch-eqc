@@ -60,10 +60,6 @@ precondition(S, {call, ?MODULE, ga_attach, [AsMeta, Height, {_, Sender}, _, _, T
     maps:get(height, S, 0) > 0 andalso maps:get(accounts, S, []) =/= [] andalso
     (AsMeta == false orelse lists:member(AsMeta, maps:get(gaccounts, S))) andalso
         txs_eqc:correct_height(S, Height) andalso txs_eqc:valid_nonce(S, Sender, Tx);
-%% precondition(S, {call, ?MODULE, F, [AsMeta | Args]}) when F == channel_create ->
-%%     %% BUG precondition
-%%     AsMeta == false andalso
-%%         txs_eqc:precondition(S, {call, txs_eqc, F, Args});
 precondition(S, {call, ?MODULE, F, [AsMeta | Args]}) ->
     (AsMeta == false orelse lists:member(AsMeta, maps:get(gaccounts, S))) andalso
         txs_eqc:precondition(S, {call, txs_eqc, F, Args}).
@@ -235,16 +231,29 @@ response_oracle(AsMeta, Height, _QueryId, Tx) ->
     apply_transaction(AsMeta, Height, aeo_response_tx, Tx).
 
 channel_create(AsMeta, Height, _Initiator, _Responder, Tx) ->
-    apply_transaction(AsMeta, Height, aesc_create_tx, Tx).
+    NewTx = txs_eqc:channel_create_tx(Tx),
+    apply_transaction(AsMeta, Height, aesc_create_tx, NewTx).
 
-channel_deposit(AsMeta, Height, _Channeld, _Party, Tx) ->
-    apply_transaction(AsMeta, Height, aesc_deposit_tx, Tx).
+channel_deposit(AsMeta, Height, ChannelId, _Party, Tx) ->
+    NewTx = channel_add_id(AsMeta, ChannelId, Tx),
+    apply_transaction(AsMeta, Height, aesc_deposit_tx, NewTx).
 
-channel_withdraw(AsMeta, Height, _Channeld, _Party, Tx) ->
-    apply_transaction(AsMeta, Height, aesc_withdraw_tx, Tx).
+channel_withdraw(AsMeta, Height, ChannelId, _Party, Tx) ->
+    NewTx = channel_add_id(AsMeta, ChannelId, Tx),
+    apply_transaction(AsMeta, Height, aesc_withdraw_tx, NewTx).
 
-channel_close_mutual(AsMeta, Height, _Channeld, _Party, Tx) ->
-    apply_transaction(AsMeta, Height, aesc_close_mutual_tx, Tx).
+channel_close_mutual(AsMeta, Height, ChannelId, _Party, Tx) ->
+    NewTx = channel_add_id(AsMeta, ChannelId, Tx),
+    apply_transaction(AsMeta, Height, aesc_close_mutual_tx, NewTx).
+
+channel_close_solo(AsMeta, Height, ChannelId, _Party, Tx) ->
+    NewTx = channel_add_id(AsMeta, ChannelId, Tx),
+    apply_transaction(AsMeta, Height, aesc_close_solo_tx, NewTx).
+
+channel_add_id(_AsMeta, {Initiator, N, Responder}, Tx) ->
+     Tx#{channel_id =>
+            aeser_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder))}.
+
 
 ns_preclaim(AsMeta, Height, _Sender, {_Name,_Salt}, Tx) ->
     apply_transaction(AsMeta, Height, aens_preclaim_tx, Tx).
@@ -345,7 +354,8 @@ origin(F, Args) when F == extend_oracle; F == channel_create ->
 origin(response_oracle, Args) ->
     {_Sender, _Nonce, Oracle} = lists:nth(2, Args),
     Oracle;
-origin(F, Args) when F == channel_deposit; F == channel_withdraw; F == channel_close_mutual ->
+origin(F, Args) when F == channel_deposit; F == channel_withdraw;
+                     F == channel_close_mutual; F == channel_close_solo ->
     Party = lists:nth(3, Args),
     {Initiator, _, Responder} = lists:nth(2, Args),
     case Party of initiator -> Initiator; responder -> Responder end;
@@ -382,6 +392,7 @@ prop_txs(Fork) ->
     application:set_env(aecore, hard_forks,
                                    #{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
     application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
+    txs_eqc:compile_contracts(),
     ?SETUP(
     fun() ->
         meck:new(aec_fork_block_settings, [passthrough]),
@@ -429,8 +440,7 @@ auth_fee(Name) ->
     500000 * 1000000 + Gas * 1000000.
 
 auth_data(Name, Nonce) ->
-    #{file := File, auth_fun := AuthFun} = txs_eqc:contract(Name),
-    {ok, Contract} = aect_test_utils:read_contract(File),
+    #{src := Contract, auth_fun := AuthFun} = txs_eqc:contract(Name),
     {ok, CallData, _, _} = aeso_compiler:create_calldata(binary_to_list(Contract),
                                                          binary_to_list(AuthFun),
                                                          [integer_to_list(Nonce)]),

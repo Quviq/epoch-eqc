@@ -91,7 +91,6 @@ init_args(_S) ->
 
 init(_Height) ->
     put(trees, initial_trees()),
-    put(trees_at_tx, []),
     ok.
 
 initial_trees() ->
@@ -816,6 +815,85 @@ channel_close_mutual_features(S, [_Height, _Channeld, _Party, _Tx] = Args, Res) 
      {channel_close_mutual, Res}].
 
 
+%% --- Operation: channel_close_solo ---
+channel_close_solo_pre(S) ->
+    maps:is_key(channels, S).
+
+channel_close_solo_args(#{height := Height} = S) ->
+    ?LET({CId = {Initiator, _, Responder}, Party},
+         {gen_state_channel_id(S), gen_party()},
+         begin
+             From = case Party of initiator -> Initiator; responder -> Responder end,
+             Channel = channel(S, CId),
+             [Height, CId, Party,
+              #{from_id => aeser_id:create(account, From),
+                payload => <<>>,
+                poi => frequency([{1, aec_trees:new_poi(initial_trees())},
+                                  {case Channel of
+                                       false -> 0;
+                                       _ -> 99
+                                   end, ?LAZY(aec_trees:new_poi(Channel#channel.trees))}]),
+                fee => gen_fee(Height),
+                nonce => gen_nonce(account(S, From))
+               }]
+         end).
+
+channel_close_solo_pre(S, [Height, {I, _, R}, Party, Tx]) ->
+    From = case Party of initiator -> I; responder -> R end,
+    correct_height(S, Height) andalso valid_nonce(S, From, Tx).
+
+channel_close_solo_valid(S, [Height, {Initiator, _, Responder} = ChannelId, Party, Tx]) ->
+    From = case Party of initiator -> Initiator; responder -> Responder end,
+    is_account(S, From)
+    andalso is_channel(S, ChannelId)
+    andalso correct_nonce(S, From, Tx)
+    andalso valid_fee(Height, Tx)
+    andalso valid_channelpeers(Initiator, Responder, Tx)
+    andalso maps:get(poi, Tx) /= <<1:256>>
+    andalso (channel(S, ChannelId))#channel.amount >= maps:get(fee, Tx).
+
+valid_channelpeers(_, _, _) ->
+    false.
+
+channel_close_solo_adapt(#{height := Height} = S, [_, _ChannelId = {I, _ ,R}, Party, Tx]) ->
+    From = case Party of initiator -> I; responder -> R end,
+    CIds = [ C#channel.id || C <- maps:get(channels, S, []), element(1, C#channel.id) == I,
+                             element(3, C#channel.id) == R],
+    case CIds of
+        [] -> false;
+        _ ->
+            [Height, elements(CIds), Party, adapt_nonce(S, From, Tx)]
+    end;
+channel_close_solo_adapt(_, _) ->
+    %% in case we don't even have a Height
+    false.
+
+channel_close_solo(Height, Channeld, Party, Tx) ->
+    NewTx = channel_close_solo_tx(Channeld, Party, Tx),
+    apply_transaction(Height, aesc_close_solo_tx, NewTx).
+
+channel_close_solo_tx({Initiator, N, Responder}, _Party, Tx) ->
+    Tx#{channel_id =>
+            aeser_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder))}.
+
+channel_close_solo_next(S, _Value, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx] = Args) ->
+    case channel_close_solo_valid(S, Args) of
+        false -> S;
+        true  ->
+            From = case Party of initiator -> Initiator; responder -> Responder end,
+            Amount = (channel(S, ChannelId))#channel.amount + (channel(S, ChannelId))#channel.reserve,
+            #{fee := Fee} = Tx,
+            reserve_fee(Fee,
+            bump_and_charge(From, -Fee,
+                charge(From, -Amount, solo_close_channel(ChannelId, S))))
+    end.
+
+channel_close_solo_features(S, [_Height, _Channeld, _Party, _Tx] = Args, Res) ->
+    Correct = channel_close_solo_valid(S, Args),
+    [{correct, if Correct -> channel_close_solo; true -> false end},
+     {channel_close_solo, Res}].
+
+
 %% --- Operation: ns_preclaim ---
 
 ns_preclaim_pre(S) ->
@@ -1427,6 +1505,10 @@ weight(S, channel_close_mutual) ->
     case maps:get(channels, S, []) of
         [] -> 0;
         _  -> 4 end;
+weight(S, channel_close_solo) ->
+    case maps:get(channels, S, []) of
+        [] -> 0;
+        _  -> 4 end;
 weight(_S, contract_create) ->
     10;
 weight(S, contract_call) ->
@@ -1434,6 +1516,14 @@ weight(S, contract_call) ->
         [] -> 0;
         _  -> 10 end;
 weight(_S, _) -> 0.
+
+
+compile_contracts() ->
+    %% read and compile contracts once (and use them in parallel
+    catch ets:delete(contracts),
+    ets:new(contracts, [{read_concurrency, true}, named_table]),
+    [ ets:insert(contracts, {maps:get(name, C), C}) || C <- contracts() ].
+
 
 prop_txs() ->
     prop_txs(3).
@@ -1443,10 +1533,7 @@ prop_txs(Fork) ->
     application:set_env(aecore, hard_forks,
                                    #{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
     application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
-    %% read and compile contracts once (and use them in parallel
-    catch ets:delete(contracts),
-    ets:new(contracts, [{read_concurrency, true}, named_table]),
-    [ ets:insert(contracts, {maps:get(name, C), C}) || C <- contracts() ],
+    compile_contracts(),
     ?SETUP(
     fun() ->
         %% make sure we can run in eqc/aecore
@@ -1603,8 +1690,15 @@ credit_channel(Id, Round, Amount, S) ->
     on_channel(Id, fun(C) -> C#channel{ amount = C#channel.amount + Amount,
                                         round = Round }
                    end, S).
+
 delete_channel(CId, S = #{ channels := Channels }) ->
     S#{ channels := lists:keydelete(CId, #channel.id, Channels) }.
+
+
+solo_close_channel(Id, S) ->
+    on_channel(Id, fun(C) -> C#channel{ amount = 0,
+                                        reserve = 0 }
+                   end, S).
 
 transfer_name(NewOwner, Name, S) ->
     on_claim(Name, fun(C) -> C#claim{ claimer = NewOwner } end, S).
