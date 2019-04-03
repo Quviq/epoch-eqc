@@ -588,8 +588,7 @@ channel_deposit_args(#{height := Height} = S) ->
      begin
           From = case Party of initiator -> Initiator; responder -> Responder end,
           [Height, {Initiator, N, Responder}, Party,
-                #{channel_id => aeser_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder)),
-                  from_id => aeser_id:create(account, From),
+                #{from_id => aeser_id:create(account, From),
                   amount => gen_channel_amount(Height),
                   round => gen_channel_round(S, CId),
                   fee => gen_fee(Height),
@@ -612,16 +611,27 @@ channel_deposit_valid(S, [Height, {Initiator, _, Responder} = ChannelId, Party, 
     andalso valid_fee(Height, Tx)
     andalso correct_round(S, ChannelId, Tx).
 
-channel_deposit_adapt(#{height := Height} = S, [_, ChannelId = {I, _, R}, Party, Tx]) ->
+channel_deposit_adapt(#{height := Height} = S, [_, {I, _, R}, Party, Tx]) ->
     From = case Party of initiator -> I; responder -> R end,
-    [Height, ChannelId, Party, adapt_nonce(S, From, Tx)];
+    CIds = [ C#channel.id || C <- maps:get(channels, S, []),
+                             element(1, C#channel.id) == I,
+                             element(3, C#channel.id) == R],
+    case CIds of
+        [] -> false;
+        _ ->
+            [Height, elements(CIds), Party, adapt_nonce(S, From, Tx)]
+    end;
 channel_deposit_adapt(_, _) ->
     %% in case we don't even have a Height
     false.
 
+channel_deposit(Height, ChannelId, Party, Tx) ->
+    NewTx = channel_deposit_tx(ChannelId, Party, Tx),
+    apply_transaction(Height, aesc_deposit_tx, NewTx).
 
-channel_deposit(Height, _Channeld, _Party, Tx) ->
-    apply_transaction(Height, aesc_deposit_tx, Tx).
+channel_deposit_tx({Initiator, N, Responder}, _Party, Tx) ->
+    Tx#{channel_id =>
+            aeser_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder))}.
 
 channel_deposit_next(S, _Value, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx] = Args) ->
     case channel_deposit_valid(S, Args) of
@@ -655,8 +665,7 @@ channel_withdraw_args(#{height := Height} = S) ->
     begin
          From = case Party of initiator -> Initiator; responder -> Responder end,
          [Height, {Initiator, N, Responder}, Party,
-               #{channel_id => aeser_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder)),
-                 to_id => aeser_id:create(account, From),
+               #{to_id => aeser_id:create(account, From),
                  amount => gen_channel_amount(Height),
                  round => gen_channel_round(S, CId),
                  fee => gen_fee(Height),
@@ -681,15 +690,28 @@ channel_withdraw_valid(S, [Height, {Initiator, _, Responder} = ChannelId, Party,
     andalso (channel(S, ChannelId))#channel.amount >= maps:get(amount, Tx)
     andalso (channel(S, ChannelId))#channel.amount - maps:get(amount, Tx) >= (channel(S, ChannelId))#channel.reserve*2.
 
-channel_withdraw_adapt(#{height := Height} = S, [_, ChannelId = {I, _ ,R}, Party, Tx]) ->
+channel_withdraw_adapt(#{height := Height} = S, [_, {I, _ ,R}, Party, Tx]) ->
     From = case Party of initiator -> I; responder -> R end,
-    [Height, ChannelId, Party, adapt_nonce(S, From, Tx)];
+    CIds = [ C#channel.id || C <- maps:get(channels, S, []),
+                             element(1, C#channel.id) == I,
+                             element(3, C#channel.id) == R],
+    case CIds of
+        [] -> false;
+        _ ->
+            [Height, elements(CIds), Party, adapt_nonce(S, From, Tx)]
+    end;
 channel_withdraw_adapt(_, _) ->
     %% in case we don't even have a Height
     false.
 
-channel_withdraw(Height, _Channeld, _Party, Tx) ->
-    apply_transaction(Height, aesc_withdraw_tx, Tx).
+channel_withdraw(Height, ChannelId, Party, Tx) ->
+    NewTx = channel_withdraw_tx(ChannelId, Party, Tx),
+    apply_transaction(Height, aesc_withdraw_tx, NewTx).
+
+channel_withdraw_tx({Initiator, N, Responder}, _Party, Tx) ->
+    Tx#{channel_id =>
+            aeser_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder))}.
+
 
 channel_withdraw_next(S, _Value, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx] = Args) ->
     case channel_withdraw_valid(S, Args) of
@@ -723,8 +745,7 @@ channel_close_mutual_args(#{height := Height} = S) ->
     begin
          From = case Party of initiator -> Initiator; responder -> Responder end,
          [Height, {Initiator, N, Responder}, Party,
-               #{channel_id => aeser_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder)),
-                 from_id => aeser_id:create(account, From),
+               #{from_id => aeser_id:create(account, From),
                  initiator_amount_final => IFinal,
                  responder_amount_final => RFinal,
                  %% round => gen_channel_round(S, CId),
@@ -749,15 +770,28 @@ channel_close_mutual_valid(S, [Height, {Initiator, _, Responder} = ChannelId, Pa
     andalso (channel(S, ChannelId))#channel.amount >=
                 maps:get(initiator_amount_final, Tx) + maps:get(responder_amount_final, Tx) + maps:get(fee, Tx).
 
-channel_close_mutual_adapt(#{height := Height} = S, [_, ChannelId = {I, _ ,R}, Party, Tx]) ->
+channel_close_mutual_adapt(#{height := Height} = S, [_, _ChannelId = {I, _ ,R}, Party, Tx]) ->
     From = case Party of initiator -> I; responder -> R end,
-    [Height, ChannelId, Party, adapt_nonce(S, From, Tx)];
+    CIds = [ C#channel.id || C <- maps:get(channels, S, []), element(1, C#channel.id) == I,
+                             element(3, C#channel.id) == R],
+    case CIds of
+        [] -> false;
+        _ ->
+            [Height, elements(CIds), Party, adapt_nonce(S, From, Tx)]
+    end;
 channel_close_mutual_adapt(_, _) ->
     %% in case we don't even have a Height
     false.
 
-channel_close_mutual(Height, _Channeld, _Party, Tx) ->
-    apply_transaction(Height, aesc_close_mutual_tx, Tx).
+channel_close_mutual(Height, Channeld, Party, Tx) ->
+    NewTx = channel_close_mutual_tx(Channeld, Party, Tx),
+    apply_transaction(Height, aesc_close_mutual_tx, NewTx).
+
+channel_close_mutual_tx({Initiator, N, Responder}, _Party, Tx) ->
+    Tx#{channel_id =>
+            aeser_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder))}.
+
+
 
 channel_close_mutual_next(S, _Value, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx] = Args) ->
     case channel_close_mutual_valid(S, Args) of
