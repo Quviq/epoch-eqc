@@ -25,7 +25,7 @@
 -record(preclaim,{name, salt, height, claimer, protocol}).
 -record(claim,{name, height, expires_by, protected_height,  claimer, protocol}).
 -record(query, {sender, id, fee, response_ttl, query_ttl}).
--record(channel, {id, round = 1, amount = 0, reserve = 0}).
+-record(channel, {id, round = 1, amount = 0, reserve = 0, trees}).
 -record(contract, {name, id, amount, deposit, vm, abi, compiler_version, protocol, src, functions}).
 
 %% -- State and state functions ----------------------------------------------
@@ -69,6 +69,7 @@ valid_common(channel_create, S, Args)       -> channel_create_valid(S, Args);
 valid_common(channel_deposit, S, Args)      -> channel_deposit_valid(S, Args);
 valid_common(channel_withdraw, S, Args)     -> channel_withdraw_valid(S, Args);
 valid_common(channel_close_mutual, S, Args) -> channel_close_mutual_valid(S, Args);
+valid_common(channel_close_solo, S, Args)   -> channel_close_solo_valid(S, Args);
 valid_common(ns_preclaim, S, Args)          -> ns_preclaim_valid(S, Args);
 valid_common(ns_claim, S, Args)             -> ns_claim_valid(S, Args);
 valid_common(ns_update, S, Args)            -> ns_update_valid(S, Args);
@@ -89,14 +90,17 @@ init_args(_S) ->
     [0].
 
 init(_Height) ->
+    put(trees, initial_trees()),
+    put(trees_at_tx, []),
+    ok.
+
+initial_trees() ->
     {PA, PAmount} = patron(),
     Trees         = aec_trees:new_without_backend(),
     AccountTrees  = aec_trees:accounts(Trees),
     PatronAccount = aec_accounts:new(PA, PAmount),
     AccountTrees1 = aec_accounts_trees:enter(PatronAccount, AccountTrees),
-    Trees1        = aec_trees:set_accounts(Trees, AccountTrees1),
-    put(trees, Trees1),
-    ok.
+    aec_trees:set_accounts(Trees, AccountTrees1).
 
 init_next(S, _Value, [Height]) ->
     {PA, PAmount} = patron(),
@@ -512,7 +516,7 @@ channel_create_args(#{accounts := Accounts, height := Height}) ->
           [Height, Initiator#account.key, Responder#account.key,
                 #{initiator_id => aeser_id:create(account, Initiator#account.key),
                   responder_id => aeser_id:create(account, Responder#account.key),
-                  state_hash => <<1:256>>,
+                  state_hash => aec_trees:new_without_backend(),
                   initiator_amount => IAmount,
                   responder_amount => RAmount,
                   lock_period => choose(0,2),
@@ -542,7 +546,11 @@ channel_create_adapt(_, _) ->
 
 
 channel_create(Height, _Initiator, _Responder, Tx) ->
-    apply_transaction(Height, aesc_create_tx, Tx).
+    NewTx = channel_create_tx(Tx),
+    apply_transaction(Height, aesc_create_tx, NewTx).
+
+channel_create_tx(#{state_hash := Trees} = Tx) ->
+    Tx#{state_hash => aec_trees:hash(Trees)}.
 
 channel_create_next(S, _Value, [_Height, Initiator, Responder, Tx] = Args) ->
     case channel_create_valid(S, Args) of
@@ -552,10 +560,12 @@ channel_create_next(S, _Value, [_Height, Initiator, Responder, Tx] = Args) ->
                nonce            := {_, Nonce},
                initiator_amount := IAmount,
                responder_amount := RAmount,
-               channel_reserve  := Reserve } = Tx,
+               channel_reserve  := Reserve,
+               state_hash       := Trees } = Tx,
             Channel = #channel{ id = {Initiator, Nonce, Responder},
                                 amount = IAmount + RAmount,
-                                reserve = Reserve },
+                                reserve = Reserve,
+                                trees = Trees},
             reserve_fee(Fee,
             bump_and_charge(Initiator, Fee + IAmount,
                 charge(Responder, RAmount,
