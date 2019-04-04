@@ -198,10 +198,11 @@ postcondition(S, {call, ?MODULE, F, [AsMeta | Args]}, Res) ->
 
 call_features(S, {call, txs_eqc, F, Args}, Res) ->
     txs_eqc:call_features(S, {call, txs_eqc, F, Args}, Res);
-call_features(S, {call, ?MODULE, ga_attach, [AsMeta, Height, _, Name, _CompilerVersion, Tx] = Args}, _Res) ->
+call_features(S, {call, ?MODULE, ga_attach, [AsMeta, Height, _, Name, _CompilerVersion, Tx] = Args}, Res) ->
     #{gasfun := GasFun} = txs_eqc:contract(Name),
     Correct = ga_attach_valid(S, Args) andalso maps:get(gas, Tx) >= GasFun(Height),
     [{correct,  if Correct -> ga_attach; true -> false end} ] ++
+        [ {ga_attach, Res} ] ++
         [ {ga_meta, ga_attach} || AsMeta =/= false ];
 call_features(S, {call, ?MODULE, F, [AsMeta | Args]}, Res) ->
     Correct = (AsMeta =/= false andalso is_meta_valid(S, AsMeta, F, Args)),
@@ -288,25 +289,6 @@ ga_attach_tx(Name, CompilerVersion, Tx) ->
     {_, _, _, AuthHash} = lists:keyfind(AuthFun, 1, Funs),
     NewTx#{auth_fun => AuthHash}.
 
-name_to_mod() ->
-    #{spend => aec_spend_tx,
-      register_oracle => aeo_register_tx,
-      extend_oracle => aeo_extend_tx,
-      query_oracle => aeo_query_tx,
-      response_oracle => aeo_response_tx,
-      channel_create => aesc_create_tx,
-      channel_deposit => aesc_deposit_tx,
-      channel_withdraw => aesc_withdraw_tx,
-      channel_close_mutual => aesc_close_mutual_tx,
-      ns_preclaim => aens_preclaim_tx,
-      ns_claim => aens_claim_tx,
-      ns_update => aens_update_tx,
-      ns_transfer => aens_transfer_tx,
-      ns_revoke => aens_revoke_tx,
-      contract_create => aect_create_tx,
-      contract_call => aect_call_tx,
-      ga_attach => aega_attach_tx}.
-
 %% ---------------------------------------------------------------------------
 
 ga_attach_valid(S, [AsMeta, Height, {_, Sender}, Name, CompilerVersion, Tx]) ->
@@ -385,7 +367,7 @@ authorizes_meta(S, GAccount, _F, _Args) ->
 %% weight for adding a new command should be organized in frequency in command generator
 
 prop_txs() ->
-    prop_txs(2).
+    prop_txs(3).
 
 prop_txs(Fork) ->
     application:load(aecore),
