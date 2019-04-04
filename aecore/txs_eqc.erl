@@ -25,7 +25,7 @@
 -record(preclaim,{name, salt, height, claimer, protocol}).
 -record(claim,{name, height, expires_by, protected_height,  claimer, protocol}).
 -record(query, {sender, id, fee, response_ttl, query_ttl}).
--record(channel, {id, round = 1, amount = 0, reserve = 0, trees, closed = false}).
+-record(channel, {id, round = 1, amount = 0, reserve = 0, trees, closed = false, lock_period}).
 -record(contract, {name, id, amount, deposit, vm, abi, compiler_version, protocol, src, functions}).
 
 %% -- State and state functions ----------------------------------------------
@@ -507,6 +507,7 @@ response_oracle_features(S, [_Height, _, _Tx] = Args, Res) ->
 
 %% --- Operation: channel_create ---
 channel_create_pre(S) ->
+    maps:get(height, S, 0) >= 1 andalso
     length(maps:get(accounts, S, [])) > 1.
 
 channel_create_args(#{accounts := Accounts, height := Height}) ->
@@ -519,7 +520,7 @@ channel_create_args(#{accounts := Accounts, height := Height}) ->
                   state_hash => gen_state_hash([{account, Initiator, IAmount}, {account, Responder, RAmount}]),
                   initiator_amount => IAmount,
                   responder_amount => RAmount,
-                  lock_period => choose(0,2),
+                  lock_period => choose(0,3),
                   channel_reserve => ChannelReserve,
                   fee => gen_fee(Height),
                   nonce => gen_nonce(Initiator)}])).
@@ -538,17 +539,17 @@ channel_create_valid(S, [Height, Initiator, Responder, Tx]) ->
     andalso maps:get(initiator_amount, Tx) >= maps:get(channel_reserve, Tx)
     andalso maps:get(responder_amount, Tx) >= maps:get(channel_reserve, Tx).
 
-channel_create_adapt(#{height := Height} = S, [_, Initiator, Responder, #{state_hash := {Tag, ChannelTrees}} = Tx]) ->
-    NewChannelTrees =
+channel_create_adapt(#{height := Height} = S, [_, Initiator, Responder, #{state_hash := {Tag, Accounts}} = Tx]) ->
+    NewAccounts =
         case Tag of
             valid ->
-                [{acount, Initiator, maps:get(initiator_amount, Tx)},
-                 {acount, Responder, maps:get(responder_amount, Tx)}];
+                [{account, Initiator, maps:get(initiator_amount, Tx)},
+                 {account, Responder, maps:get(responder_amount, Tx)}];
             invalid ->
                 %% invalid stays invalid
-                ChannelTrees
+                Accounts
         end,
-    [Height, Initiator, Responder, adapt_nonce(S, Initiator, Tx#{state_hash => {Tag, NewChannelTrees}})];
+    [Height, Initiator, Responder, adapt_nonce(S, Initiator, Tx#{state_hash => {Tag, NewAccounts}})];
 channel_create_adapt(_, _) ->
     %% in case we don't even have a Height
     false.
@@ -558,8 +559,8 @@ channel_create(Height, _Initiator, _Responder, Tx) ->
     NewTx = channel_create_tx(Tx),
     apply_transaction(Height, aesc_create_tx, NewTx).
 
-channel_create_tx(#{state_hash := {_, ChannelTrees}} = Tx) ->
-    Tx#{state_hash => aec_trees:hash(trees_with_accounts(ChannelTrees))}.
+channel_create_tx(#{state_hash := {_, Accounts}} = Tx) ->
+    Tx#{state_hash => aec_trees:hash(trees_with_accounts(Accounts))}.
 
 channel_create_next(S, _Value, [_Height, Initiator, Responder, Tx] = Args) ->
     case channel_create_valid(S, Args) of
@@ -570,10 +571,12 @@ channel_create_next(S, _Value, [_Height, Initiator, Responder, Tx] = Args) ->
                initiator_amount := IAmount,
                responder_amount := RAmount,
                channel_reserve  := Reserve,
+               lock_period      := LockPeriod,
                state_hash       := ChannelTrees } = Tx,
             Channel = #channel{ id = {Initiator, Nonce, Responder},
                                 amount = IAmount + RAmount,
                                 reserve = Reserve,
+                                lock_period = LockPeriod,
                                 trees = ChannelTrees},
             reserve_fee(Fee,
             bump_and_charge(Initiator, Fee + IAmount,
@@ -601,7 +604,13 @@ channel_deposit_args(#{height := Height} = S) ->
                   amount => gen_channel_amount(Height),
                   round => gen_channel_round(S, CId),
                   fee => gen_fee(Height),
-                  state_hash => <<0:256>>,
+                  state_hash => case channel(S, CId) of
+                                    false ->
+                                        {invalid, []};
+                                    Channel ->
+                                        %% Here we can change the state!
+                                        Channel#channel.trees
+                                end,
                   nonce => gen_nonce(account(S, From))
                  }]
      end).
@@ -638,9 +647,10 @@ channel_deposit(Height, ChannelId, Party, Tx) ->
     NewTx = channel_deposit_tx(ChannelId, Party, Tx),
     apply_transaction(Height, aesc_deposit_tx, NewTx).
 
-channel_deposit_tx({Initiator, N, Responder}, _Party, Tx) ->
+channel_deposit_tx({Initiator, N, Responder}, _Party, #{state_hash := {_, Accounts}} = Tx) ->
     Tx#{channel_id =>
-            aeser_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder))}.
+            aeser_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder)),
+       state_hash => aec_trees:hash(trees_with_accounts(Accounts))}.
 
 channel_deposit_next(S, _Value, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx] = Args) ->
     case channel_deposit_valid(S, Args) of
@@ -678,14 +688,24 @@ channel_withdraw_args(#{height := Height} = S) ->
                  amount => gen_channel_amount(Height),
                  round => gen_channel_round(S, CId),
                  fee => gen_fee(Height),
-                 state_hash => <<0:256>>,
+                 state_hash =>case channel(S, CId) of
+                                    false ->
+                                        {invalid, []};
+                                    Channel ->
+                                        %% Here we can change the state!
+                                        Channel#channel.trees
+                                end,
                  nonce => gen_nonce(account(S, From))
                 }]
     end).
 
-channel_withdraw_pre(S, [Height, {I, _, R}, Party, Tx]) ->
+channel_withdraw_pre(S, [Height, {I, _, R} = ChannelId, Party, Tx]) ->
     From = case Party of initiator -> I; responder -> R end,
-    correct_height(S, Height) andalso valid_nonce(S, From, Tx).
+    correct_height(S, Height) andalso valid_nonce(S, From, Tx) andalso
+        case maps:get(state_hash, Tx) of
+            {valid, Accounts} -> (channel(S, ChannelId))#channel.trees == Accounts;
+            _ -> true
+        end.
 
 channel_withdraw_valid(S, [Height, {Initiator, _, Responder} = ChannelId, Party, Tx]) ->
     From = case Party of initiator -> Initiator; responder -> Responder end,
@@ -701,13 +721,14 @@ channel_withdraw_valid(S, [Height, {Initiator, _, Responder} = ChannelId, Party,
 
 channel_withdraw_adapt(#{height := Height} = S, [_, {I, _ ,R}, Party, Tx]) ->
     From = case Party of initiator -> I; responder -> R end,
-    CIds = [ C#channel.id || C <- maps:get(channels, S, []),
+    Channels = [ C || C <- maps:get(channels, S, []),
                              element(1, C#channel.id) == I,
                              element(3, C#channel.id) == R],
-    case CIds of
+    case Channels of
         [] -> false;
         _ ->
-            [Height, elements(CIds), Party, adapt_nonce(S, From, Tx)]
+            ?LET(Channel, elements(Channels),
+                 [Height, Channel#channel.id, Party, adapt_state_hash(Channel, adapt_nonce(S, From, Tx))])
     end;
 channel_withdraw_adapt(_, _) ->
     %% in case we don't even have a Height
@@ -717,9 +738,10 @@ channel_withdraw(Height, ChannelId, Party, Tx) ->
     NewTx = channel_withdraw_tx(ChannelId, Party, Tx),
     apply_transaction(Height, aesc_withdraw_tx, NewTx).
 
-channel_withdraw_tx({Initiator, N, Responder}, _Party, Tx) ->
+channel_withdraw_tx({Initiator, N, Responder}, _Party, #{state_hash := {_, Accounts}} =Tx) ->
     Tx#{channel_id =>
-            aeser_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder))}.
+            aeser_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder)),
+       state_hash => aec_trees:hash(trees_with_accounts(Accounts))}.
 
 
 channel_withdraw_next(S, _Value, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx] = Args) ->
@@ -776,6 +798,7 @@ channel_close_mutual_valid(S, [Height, {Initiator, _, Responder} = ChannelId, Pa
     andalso valid_fee(Height, Tx)
     andalso maps:get(initiator_amount_final, Tx) >= 0
     andalso maps:get(responder_amount_final, Tx) >= 0
+    andalso (channel(S, ChannelId))#channel.closed == false
     andalso (channel(S, ChannelId))#channel.amount >=
                 maps:get(initiator_amount_final, Tx) + maps:get(responder_amount_final, Tx) + maps:get(fee, Tx).
 
@@ -835,9 +858,19 @@ channel_close_solo_args(#{height := Height} = S) ->
          begin
              From = case Party of initiator -> Initiator; responder -> Responder end,
              Poi = case channel(S, CId) of
-                         false -> {invalid, aec_trees:new_poi(initial_trees())};
-                         Channel ->
-                           create_matching_poi(Initiator, Responder, Channel)
+                       false -> {invalid, []};
+                       Channel ->
+                           case Channel#channel.trees of
+                               {valid, Accounts} ->
+                                   frequency(
+                                     [{50, {valid, Accounts}},
+                                      {10, {invalid,
+                                            ?LET({account, Acc, Amount}, elements(Accounts),
+                                                 (Accounts -- [{account, Acc, Amount}]) ++
+                                                     [ {account, Acc, ?SUCHTHAT(I, nat(), I =/= Amount)} ])}}]);
+                               Invalid ->
+                                   Invalid
+                           end
                    end,
              [Height, CId, Party,
               #{from_id => aeser_id:create(account, From),
@@ -858,6 +891,7 @@ channel_close_solo_valid(S, [Height, {Initiator, _, Responder} = ChannelId, Part
     andalso is_channel(S, ChannelId)
     andalso correct_nonce(S, From, Tx)
     andalso valid_solo_close_fee(Height, Tx)
+    andalso (channel(S, ChannelId))#channel.closed == false
     andalso is_valid_poi(maps:get(poi, Tx))
     andalso check_balance(S, From, maps:get(fee, Tx)).
 
@@ -872,37 +906,27 @@ channel_close_solo_adapt(#{height := Height} = S, [_, {I, _ ,R}, Party, Tx]) ->
         [] -> false;
         _ ->
             ?LET(Channel, elements(Channels),
-                 begin
-                     Poi = create_matching_poi(I, R, Channel),
-                     [Height, Channel#channel.id, Party, adapt_nonce(S, From, Tx#{poi => Poi})]
-                 end)
+                 [Height, Channel#channel.id, Party, adapt_poi(Channel, adapt_nonce(S, From, Tx))])
     end;
 channel_close_solo_adapt(_, _) ->
     %% in case we don't even have a Height
     false.
 
-create_matching_poi(_Initiator, _Responder, Channel) ->
-    case Channel#channel.trees of
-        {valid, Accounts} ->
-            ChannelTrees = trees_with_accounts(Accounts),
-            Poi1 = lists:foldl(fun({account, Acc, _}, Poi) ->
-                                       {ok, NewPoi} = aec_trees:add_poi(accounts, Acc, ChannelTrees, Poi),
-                                       NewPoi
-                               end, aec_trees:new_poi(ChannelTrees), Accounts),
-            {valid, Poi1};
-        {invalid, Accounts} ->
-            {invalid, aec_trees:new_poi(trees_with_accounts(Accounts))}
-    end.
-
-
 channel_close_solo(Height, Channeld, Party, Tx) ->
     NewTx = channel_close_solo_tx(Channeld, Party, Tx),
     apply_transaction(Height, aesc_close_solo_tx, NewTx).
 
-channel_close_solo_tx({Initiator, N, Responder}, _Party, #{poi := {_, Poi}} = Tx) ->
+channel_close_solo_tx({Initiator, N, Responder}, _Party, #{poi := {_, Accounts}} = Tx) ->
     Tx#{channel_id =>
             aeser_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder)),
-        poi => Poi}.
+        poi =>
+            begin
+                ChannelTrees = trees_with_accounts(Accounts),
+                lists:foldl(fun({account, Acc, _}, Poi) ->
+                                    {ok, NewPoi} = aec_trees:add_poi(accounts, Acc, ChannelTrees, Poi),
+                                    NewPoi
+                            end, aec_trees:new_poi(ChannelTrees), Accounts)
+            end}.
 
 channel_close_solo_next(S, _Value, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx] = Args) ->
     case channel_close_solo_valid(S, Args) of
@@ -1722,9 +1746,9 @@ credit_channel(Id, Round, Amount, S) ->
 close_channel(CId, mutual, S) ->
     on_channel(CId, fun(C) -> C#channel{closed = mutual} end, S);
 close_channel(CId, solo, S) ->
-    on_channel(CId, fun(C) -> C#channel{ closed = solo,
-                                         amount = 0,
-                                         reserve = 0 } end, S).
+    on_channel(CId, fun(C) ->
+                            C#channel{ closed = {solo, maps:get(height, S) + C#channel.lock_period}}
+                    end, S).
 
 transfer_name(NewOwner, Name, S) ->
     on_claim(Name, fun(C) -> C#claim{ claimer = NewOwner } end, S).
@@ -1840,7 +1864,21 @@ adapt_nonce(S, A, Tx = #{nonce := {good, _}}) ->
 adapt_nonce(_S, _A, Tx) ->
     Tx. %% Don't fix bad nonces...
 
+adapt_poi(Channel, Tx) ->
+    case maps:get(poi, Tx) of
+        {valid, _} ->
+            Tx#{poi => Channel#channel.trees};
+        Invalid ->
+            Invalid
+    end.
 
+adapt_state_hash(Channel, Tx) ->
+    case maps:get(state_hash, Tx) of
+        {valid, _} ->
+            Tx#{state_hash => Channel#channel.trees};
+        Invalid ->
+            Invalid
+    end.
 
 check_balance(S, Key, Amount) ->
      (account(S, Key))#account.amount >= Amount.
