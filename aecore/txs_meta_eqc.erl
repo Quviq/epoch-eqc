@@ -22,10 +22,11 @@ initial_state() ->
     txs_eqc:initial_state().
 
 command(S) ->
-    ?LET(Cmd, frequency([{2, txs_eqc:command(S)},
-                         {case maps:get(height, S, 0) > 0 of
-                              true -> 1;
-                              false -> 0
+    ?LET(Cmd, frequency([{20, txs_eqc:command(S)},
+                         {case maps:get(height, S, 0) of
+                              0 -> 0;
+                              H when H < 5 -> 1;
+                              _ -> 2
                           end, ?LAZY({call, ?MODULE, ga_attach, [ gen_as_meta(S)
                                                                   | ga_attach_args(S) ]})}]),
          case Cmd of
@@ -135,27 +136,27 @@ next_state(S, V, {call, ?MODULE, F, [GAccount | Args]}) ->
                         false ->
                             Nonce = maps:get(nonce, txs_eqc:untag_nonce(lists:last(Args))),
                             AuthNonce = aega_meta_tx:auth_id(GAccount#gaccount.id, AuthData),
-                    case F of
-                        contract_create ->
+                            case F of
+                                contract_create ->
                                     OldId = aect_contracts:compute_contract_pubkey(GAccount#gaccount.id, Nonce),
-                            NewId =  aect_contracts:compute_contract_pubkey(GAccount#gaccount.id, AuthNonce),
-                            txs_eqc:update_contract_id(OldId, NewId, NewS);
-                        register_oracle ->
-                            NewS;
-                        channel_create ->
+                                    NewId =  aect_contracts:compute_contract_pubkey(GAccount#gaccount.id, AuthNonce),
+                                    txs_eqc:update_contract_id(OldId, NewId, NewS);
+                                register_oracle ->
+                                    NewS;
+                                channel_create ->
                                     {_, RespPK} = aeser_id:specialize(maps:get(responder_id, lists:last(Args))),
                                     OldId = {GAccount#gaccount.id, Nonce, RespPK},
                                     NewId =  {GAccount#gaccount.id, AuthNonce, RespPK},
                                     %% io:format("Change ~p\nInto ~p\nIn: ~p\n", [OldId, NewId, maps:get(channels, NewS)]),
                                     txs_eqc:update_channel_id(OldId, NewId, NewS);
-                        query_oracle ->
+                                query_oracle ->
                                     {_, OraclePK} = aeser_id:specialize(maps:get(oracle_id, lists:last(Args))),
                                     OldId = {GAccount#gaccount.id, Nonce, OraclePK},
                                     NewId = {GAccount#gaccount.id, AuthNonce, OraclePK},
                                     %% io:format("Change ~p\nInto ~p\nIn: ~p\n", [OldId, NewId, maps:get(queries, NewS)]),
                                     txs_eqc:update_query_id(OldId, NewId, NewS);
-                        _ ->
-                            NewS
+                                _ ->
+                                    NewS
                     end
             end
             end
@@ -204,11 +205,15 @@ call_features(S, {call, ?MODULE, ga_attach, [AsMeta, Height, _, Name, _CompilerV
     [{correct,  if Correct -> ga_attach; true -> false end} ] ++
         [ {ga_attach, Res} ] ++
         [ {ga_meta, ga_attach} || AsMeta =/= false ];
+call_features(S, {call, ?MODULE, F, [false | Args]}, Res) ->
+    txs_eqc:call_features(S, {call, txs_eqc, F, Args}, Res);
 call_features(S, {call, ?MODULE, F, [AsMeta | Args]}, Res) ->
-    Correct = (AsMeta =/= false andalso is_meta_valid(S, AsMeta, F, Args)),
-    [{correct,  if Correct -> F; true -> false end} || AsMeta =/= false] ++
-    [ {ga_meta, F} || AsMeta =/= false ] ++
-        txs_eqc:call_features(S, {call, txs_eqc, F, Args}, Res).
+    Correct = is_meta_valid(S, AsMeta, F, Args),
+    [{correct,  if Correct -> F; true -> false end},
+     {ga_meta, {F, case lists:member({correct, F}, txs_eqc:call_features(S, {call, txs_eqc, F, Args}, Res)) of
+                        true -> ok;
+                        false -> error
+                   end}}].
 
 
 all_command_names() ->
@@ -228,8 +233,14 @@ extend_oracle(AsMeta, Height, _Oracle, Tx) ->
 query_oracle(AsMeta, Height, _Sender, _Oracle, Tx) ->
     apply_transaction(AsMeta, Height, aeo_query_tx, Tx).
 
-response_oracle(AsMeta, Height, _QueryId, Tx) ->
-    apply_transaction(AsMeta, Height, aeo_response_tx, Tx).
+response_oracle(AsMeta, Height, QueryId, Tx) ->
+    NewTx = response_oracle_tx(AsMeta, QueryId, Tx),
+    apply_transaction(AsMeta, Height, aeo_response_tx, NewTx).
+
+response_oracle_tx(false, QueryId, Tx) ->
+    txs_eqc:response_oracle_tx(QueryId, Tx);
+response_oracle_tx(_, {_Sender, AuthId, Oracle}, Tx) ->
+    Tx#{query_id => aeo_query:ga_id(AuthId, Oracle)}.
 
 channel_create(AsMeta, Height, _Initiator, _Responder, Tx) ->
     NewTx = txs_eqc:channel_create_tx(Tx),
