@@ -1561,17 +1561,19 @@ weight(S, channel_withdraw) ->
 weight(S, channel_close_mutual) ->
     case maps:get(channels, S, []) of
         [] -> 0;
-        _  -> 4 end;
+        Channels  -> 2 * (length([ 1 || #channel{closed = false} <- Channels]) + 1)
+    end;
 weight(S, channel_close_solo) ->
-    case maps:get(channels, S, []) of
-        [] -> 0;
-        _  -> 4 end;
-weight(_S, contract_create) ->
-    10;
-weight(S, contract_call) ->
-    case maps:get(contracts, S, []) of
-        [] -> 0;
-        _  -> 10 end;
+    case  [ C || #channel{closed = false} = C <-maps:get(channels, S, []) ] of
+        [] -> 1;
+        Channels  -> 50 * length(Channels)
+    end;
+weight(S, channel_settle) ->
+    case [ H + P || #channel{closed = {solo, H}, lock_period = P} <- maps:get(channels, S, []) ] of
+        [] -> 1;
+        Hs -> 50 * (length([ He || He <- Hs, maps:get(height, S, 0) >= He ]) + 1)
+    end;
+
 weight(_S, _) -> 0.
 
 
