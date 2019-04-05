@@ -70,6 +70,7 @@ valid_common(channel_deposit, S, Args)      -> channel_deposit_valid(S, Args);
 valid_common(channel_withdraw, S, Args)     -> channel_withdraw_valid(S, Args);
 valid_common(channel_close_mutual, S, Args) -> channel_close_mutual_valid(S, Args);
 valid_common(channel_close_solo, S, Args)   -> channel_close_solo_valid(S, Args);
+valid_common(channel_settle, S, Args)       -> channel_settle_valid(S, Args);
 valid_common(ns_preclaim, S, Args)          -> ns_preclaim_valid(S, Args);
 valid_common(ns_claim, S, Args)             -> ns_claim_valid(S, Args);
 valid_common(ns_update, S, Args)            -> ns_update_valid(S, Args);
@@ -128,9 +129,8 @@ mine(Height) ->
 mine_next(S, Value, [H]) ->
     multi_mine_next(S, Value, [H, 1]).
 
-mine_features(S, [H], _Res) ->
-    [mine_response_ttl || expired_queries(S, H) =/= [] ] ++
-    [mine].
+mine_features(S, [H], Res) ->
+    multi_mine_features(S, [H, 1], Res).
 
 expired_queries(S, Height) ->
     [ Q || Q <- maps:get(queries, S, []), Q#query.response_ttl =< Height ].
@@ -138,6 +138,10 @@ expired_queries(S, Height) ->
 expired_claims(S, Height) ->
     [ C || C <- maps:get(claims, S, []),
            C#claim.expires_by + aec_governance:name_protection_period() =< Height ].
+
+expired_solo_close(S, Height) ->
+    [ C || C <- maps:get(channels, S, []),
+           is_valid_unlock_solo(S#{height => Height}, C)].
 
 %% --- Operation: multi_mine ---
 multi_mine_pre(S) ->
@@ -167,6 +171,7 @@ multi_mine_next(#{height := Height, accounts := Accounts} = S, _Value, [_H, Bloc
     ExpiredQs = expired_queries(S, Height + Blocks - 1),
     ExpiredClaims = expired_claims(S, Height + Blocks - 1),
     ExpiredNames = [ C#claim.name || C <- ExpiredClaims ],
+    ExpiredSoloClose = expired_solo_close(S, Height + Blocks),
     Accounts1 = lists:foldl(
         fun(Q, As) -> case lists:keyfind(Q#query.sender, #account.key, As) of
                         false -> As;
@@ -182,7 +187,9 @@ multi_mine_next(#{height := Height, accounts := Accounts} = S, _Value, [_H, Bloc
            maps:without(ExpiredNames, maps:get(named_accounts, S, #{}))
       }.
 
-multi_mine_features(_S, [_, _], _Res) ->
+multi_mine_features(S, [H, B], _Res) ->
+    [{mine, solo_close_unlocked} || expired_solo_close(S, H+B) =/= [] ] ++
+    [{mine, response_ttl} || expired_queries(S, H+B) =/= [] ] ++
     [multi_mine].
 
 
@@ -193,10 +200,9 @@ spend_pre(S) ->
 spend_args(#{accounts := Accounts, height := Height} = S) ->
     ?LET({{SenderTag, Sender}, {ReceiverTag, Receiver}},
          {gen_account(1, 49, Accounts), gen_account(2, 1, Accounts)},
-         ?LET([Amount, Nonce, To],
-              [gen_spend_amount(Sender), gen_nonce(Sender),
+         ?LET(To,
                oneof([account,
-                      {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++ [<<"ta.test">>])}])],
+                      {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++ [<<"ta.test">>])}]),
               [Height, {SenderTag, Sender#account.key},
                case To of
                    account -> {ReceiverTag, Receiver#account.key};
@@ -210,9 +216,9 @@ spend_args(#{accounts := Accounts, height := Height} = S) ->
                          {name, Name} ->
                              aeser_id:create(name, aens_hash:name_hash(Name))
                      end,
-                 amount => Amount,
+                 amount => gen_spend_amount(Sender),
                  fee => gen_fee(Height),
-                 nonce => Nonce,
+                 nonce => gen_nonce(Sender),
                  payload => utf8()}])).
 
 spend_pre(#{accounts := Accounts} = S, [Height, {_, Sender}, {RTag, Receiver}, Tx]) ->
@@ -631,13 +637,14 @@ channel_deposit_valid(S, [Height, {Initiator, _, Responder} = ChannelId, Party, 
 
 channel_deposit_adapt(#{height := Height} = S, [_, {I, _, R}, Party, Tx]) ->
     From = case Party of initiator -> I; responder -> R end,
-    CIds = [ C#channel.id || C <- maps:get(channels, S, []),
+    Channels = [ C || C <- maps:get(channels, S, []),
                              element(1, C#channel.id) == I,
                              element(3, C#channel.id) == R],
-    case CIds of
+    case Channels of
         [] -> false;
         _ ->
-            [Height, elements(CIds), Party, adapt_nonce(S, From, Tx)]
+            ?LET(Channel, elements(Channels),
+                 [Height, Channel#channel.id, Party, adapt_state_hash(Channel, adapt_nonce(S, From, Tx))])
     end;
 channel_deposit_adapt(_, _) ->
     %% in case we don't even have a Height
@@ -839,7 +846,7 @@ channel_close_mutual_next(S, _Value, [_Height, {Initiator, _, Responder} = Chann
                 end,
             reserve_fee(Fee,
             bump_and_charge(From, -AF,
-                charge(To, -AT, close_channel(ChannelId, mutual, S))))
+                credit(To, AT, close_channel(ChannelId, mutual, S))))
     end.
 
 channel_close_mutual_features(S, [_Height, _Channeld, _Party, _Tx] = Args, Res) ->
@@ -863,7 +870,7 @@ channel_close_solo_args(#{height := Height} = S) ->
                            case Channel#channel.trees of
                                {valid, Accounts} ->
                                    frequency(
-                                     [{50, {valid, Accounts}},
+                                     [{90, {valid, Accounts}},
                                       {10, {invalid,
                                             ?LET({account, Acc, Amount}, elements(Accounts),
                                                  (Accounts -- [{account, Acc, Amount}]) ++
@@ -876,7 +883,7 @@ channel_close_solo_args(#{height := Height} = S) ->
               #{from_id => aeser_id:create(account, From),
                 payload => <<>>,
                 poi => Poi,
-                fee => gen_fee_above(Height, 24000),  %% POI takes bytes! 23120 is normal cost
+                fee => gen_fee_above(Height, 24999),  %% POI takes bytes! 23120 is normal cost
                 nonce => gen_nonce(account(S, From))
                }]
          end).
@@ -933,11 +940,9 @@ channel_close_solo_next(S, _Value, [_Height, {Initiator, _, Responder} = Channel
         false -> S;
         true  ->
             From = case Party of initiator -> Initiator; responder -> Responder end,
-            Amount = (channel(S, ChannelId))#channel.amount + (channel(S, ChannelId))#channel.reserve,
             #{fee := Fee} = Tx,
             reserve_fee(Fee,
-            bump_and_charge(From, -Fee,
-                charge(From, -Amount, close_channel(ChannelId, solo, S))))
+            bump_and_charge(From, Fee, close_channel(ChannelId, solo, S)))
     end.
 
 channel_close_solo_features(S, [_Height, _Channeld, _Party, _Tx] = Args, Res) ->
@@ -1607,7 +1612,7 @@ prop_txs(Fork) ->
                 Trees -> aec_trees:sum_total_coin(Trees)
             end,
         Total = lists:sum(maps:values(TreesTotal)),
-        FeeTotal =  lists:sum([ Fee || {Fee, _} <- maps:get(fees, S, [])]),
+        FeeTotal = lists:sum([ Fee || {Fee, _} <- maps:get(fees, S, [])]),
         check_command_names(Cmds,
             measure(length, commands_length(Cmds),
             measure(height, Height,
