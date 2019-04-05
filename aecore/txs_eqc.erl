@@ -171,7 +171,6 @@ multi_mine_next(#{height := Height, accounts := Accounts} = S, _Value, [_H, Bloc
     ExpiredQs = expired_queries(S, Height + Blocks - 1),
     ExpiredClaims = expired_claims(S, Height + Blocks - 1),
     ExpiredNames = [ C#claim.name || C <- ExpiredClaims ],
-    ExpiredSoloClose = expired_solo_close(S, Height + Blocks),
     Accounts1 = lists:foldl(
         fun(Q, As) -> case lists:keyfind(Q#query.sender, #account.key, As) of
                         false -> As;
@@ -604,7 +603,7 @@ channel_deposit_args(#{height := Height} = S) ->
      ?LET({CId = {Initiator, N, Responder}, Party},
           {gen_state_channel_id(S), gen_party()},
      begin
-          From = case Party of initiator -> Initiator; responder -> Responder end,
+          From = case Party of initiator -> Initiator; responder -> Responder end,  %% Add someone else as From as well!
           [Height, {Initiator, N, Responder}, Party,
                 #{from_id => aeser_id:create(account, From),
                   amount => gen_channel_amount(Height),
@@ -621,9 +620,13 @@ channel_deposit_args(#{height := Height} = S) ->
                  }]
      end).
 
-channel_deposit_pre(S, [Height, {I, _, R}, Party, Tx]) ->
+channel_deposit_pre(S, [Height, {I, _, R} = ChannelId, Party, Tx]) ->
     From = case Party of initiator -> I; responder -> R end,
-    correct_height(S, Height) andalso valid_nonce(S, From, Tx).
+    correct_height(S, Height) andalso valid_nonce(S, From, Tx) andalso
+        case maps:get(state_hash, Tx) of
+            {valid, _} = Ts -> (channel(S, ChannelId))#channel.trees == Ts;
+            _ -> true
+        end.
 
 channel_deposit_valid(S, [Height, {Initiator, _, Responder} = ChannelId, Party, Tx]) ->
     From = case Party of initiator -> Initiator; responder -> Responder end,
@@ -644,7 +647,7 @@ channel_deposit_adapt(#{height := Height} = S, [_, {I, _, R}, Party, Tx]) ->
         [] -> false;
         _ ->
             ?LET(Channel, elements(Channels),
-                 [Height, Channel#channel.id, Party, adapt_state_hash(Channel, adapt_nonce(S, From, Tx))])
+                 [Height, Channel#channel.id, Party, adapt_state_hash(Channel, From, maps:get(amount, Tx), adapt_nonce(S, From, Tx))])
     end;
 channel_deposit_adapt(_, _) ->
     %% in case we don't even have a Height
@@ -684,15 +687,15 @@ channel_deposit_features(S, [_Height, _Channeld, _Party, _Tx] = Args, Res) ->
 channel_withdraw_pre(S) ->
     maps:is_key(channels, S).
 
-%% We do not yet test wirthdraw by third party!
+%% We do not yet test withdraw by third party!
 channel_withdraw_args(#{height := Height} = S) ->
-    ?LET({CId = {Initiator, N, Responder}, Party},
-         {gen_state_channel_id(S), gen_party()},
+    ?LET({CId = {Initiator, N, Responder}, Party, Amount},
+         {gen_state_channel_id(S), gen_party(), gen_channel_amount(Height)},
     begin
          From = case Party of initiator -> Initiator; responder -> Responder end,
          [Height, {Initiator, N, Responder}, Party,
                #{to_id => aeser_id:create(account, From),
-                 amount => gen_channel_amount(Height),
+                 amount => Amount,
                  round => gen_channel_round(S, CId),
                  fee => gen_fee(Height),
                  state_hash =>case channel(S, CId) of
@@ -700,7 +703,14 @@ channel_withdraw_args(#{height := Height} = S) ->
                                         {invalid, []};
                                     Channel ->
                                         %% Here we can change the state!
-                                        Channel#channel.trees
+                                        case Channel#channel.trees of
+                                            {valid, Accounts} ->
+                                                weighted_default(
+                                                  {9, {valid, gen_state_hash_account_keys(adapt_account(Accounts, From, -Amount))}},
+                                                  {if Amount == 0 -> 0; true -> 1 end, {invalid, Accounts}});
+                                            Invalid ->
+                                                Invalid
+                                        end
                                 end,
                  nonce => gen_nonce(account(S, From))
                 }]
@@ -710,7 +720,7 @@ channel_withdraw_pre(S, [Height, {I, _, R} = ChannelId, Party, Tx]) ->
     From = case Party of initiator -> I; responder -> R end,
     correct_height(S, Height) andalso valid_nonce(S, From, Tx) andalso
         case maps:get(state_hash, Tx) of
-            {valid, Accounts} -> (channel(S, ChannelId))#channel.trees == Accounts;
+            {valid, _} = Ts -> (channel(S, ChannelId))#channel.trees == Ts;
             _ -> true
         end.
 
@@ -735,7 +745,7 @@ channel_withdraw_adapt(#{height := Height} = S, [_, {I, _ ,R}, Party, Tx]) ->
         [] -> false;
         _ ->
             ?LET(Channel, elements(Channels),
-                 [Height, Channel#channel.id, Party, adapt_state_hash(Channel, adapt_nonce(S, From, Tx))])
+                 [Height, Channel#channel.id, Party, adapt_state_hash(Channel, From, -maps:get(amount, Tx), adapt_nonce(S, From, Tx))])
     end;
 channel_withdraw_adapt(_, _) ->
     %% in case we don't even have a Height
@@ -778,7 +788,7 @@ channel_close_mutual_pre(S) ->
 
 channel_close_mutual_args(#{height := Height} = S) ->
     ?LET({CId = {Initiator, N, Responder}, Party},
-         {gen_state_channel_id(S), gen_party()},
+         {gen_state_channel_id(S, fun(C) -> C#channel.closed == false end), gen_party()},
     ?LET({IFinal, RFinal, Fee}, gen_close_channel_amounts(S, CId),
     begin
          From = case Party of initiator -> Initiator; responder -> Responder end,
@@ -861,7 +871,7 @@ channel_close_solo_pre(S) ->
 
 channel_close_solo_args(#{height := Height} = S) ->
     ?LET({CId = {Initiator, _, Responder}, Party},
-         {gen_state_channel_id(S), gen_party()},
+         {gen_state_channel_id(S, fun(C) -> C#channel.closed == false end), gen_party()},
          begin
              From = case Party of initiator -> Initiator; responder -> Responder end,
              Poi = case channel(S, CId) of
@@ -899,11 +909,13 @@ channel_close_solo_valid(S, [Height, {Initiator, _, Responder} = ChannelId, Part
     andalso correct_nonce(S, From, Tx)
     andalso valid_solo_close_fee(Height, Tx)
     andalso (channel(S, ChannelId))#channel.closed == false
-    andalso is_valid_poi(maps:get(poi, Tx))
+    andalso is_valid_poi(S, ChannelId, maps:get(poi, Tx))
     andalso check_balance(S, From, maps:get(fee, Tx)).
 
-is_valid_poi({Tag, _Poi}) ->
-    Tag == valid.
+is_valid_poi(_S, _ChannelId, {invalid, _}) ->
+    false;
+is_valid_poi(S, {I, _, R} = ChannelId, {valid, Accounts}) ->
+    (channel(S,ChannelId))#channel.amount >= lists:sum([ A || {account, Key, A} <- Accounts, lists:member(Key, [I, R])]).
 
 channel_close_solo_adapt(#{height := Height} = S, [_, {I, _ ,R}, Party, Tx]) ->
     From = case Party of initiator -> I; responder -> R end,
@@ -949,6 +961,115 @@ channel_close_solo_features(S, [_Height, _Channeld, _Party, _Tx] = Args, Res) ->
     Correct = channel_close_solo_valid(S, Args),
     [{correct, if Correct -> channel_close_solo; true -> false end},
      {channel_close_solo, Res}].
+
+
+%% --- Operation: channel_settle ---
+channel_settle_pre(S) ->
+    maps:get(channels, S, []) /= [].
+
+channel_settle_args(#{height := Height} = S) ->
+    ?LET({CId = {Initiator, _, Responder}, Party},
+         {gen_state_channel_id(S, fun(C) ->
+                                          case C#channel.closed of {solo, _} -> true; _ -> false end
+                                  end), gen_party()},
+         begin
+             From = case Party of initiator -> Initiator; responder -> Responder end,
+             [IAmount, RAmount] =
+                 case channel(S, CId) of
+                     false -> [nat(), nat()];
+                     Channel ->
+                         case Channel#channel.trees of
+                             {valid, Accounts} ->
+                                 {account, _, InA} = lists:keyfind(Initiator, 2, Accounts),
+                                 {account, _, ReA} = lists:keyfind(Responder, 2, Accounts),
+                                 [ frequency([{30, InA}, {1, InA - 10}, {1, InA + 10}]),
+                                   frequency([{30, ReA}, {1, ReA - 10}, {1, ReA + 10}])];
+                             _ ->
+                                 %% this is also invalid (unless in very unlikely case)
+                                 [Channel#channel.amount, Channel#channel.reserve]
+                         end
+                 end,
+             [Height, CId, Party,
+              #{from_id => aeser_id:create(account, From),
+                initiator_amount_final => IAmount,
+                responder_amount_final => RAmount,
+                fee => gen_fee(Height),
+                nonce => gen_nonce(account(S, From))
+               }]
+         end).
+
+channel_settle_pre(S, [Height, {I, _, R}, Party, Tx]) ->
+    From = case Party of initiator -> I; responder -> R end,
+    correct_height(S, Height) andalso valid_nonce(S, From, Tx).
+
+channel_settle_valid(S, [Height, {Initiator, _, Responder} = ChannelId, Party, Tx]) ->
+    From = case Party of initiator -> Initiator; responder -> Responder end,
+    is_account(S, From)
+    andalso is_channel(S, ChannelId)
+    andalso correct_nonce(S, From, Tx)
+    andalso valid_fee(Height, Tx)
+    andalso is_valid_unlock_solo(S, channel(S, ChannelId))
+    andalso is_valid_split(channel(S, ChannelId), Tx)
+    andalso check_balance(S, From, maps:get(fee, Tx)).
+
+
+is_valid_split(#channel{ id = {I, _, R}, amount = Amount,
+                         trees = {valid, Accounts}},
+               #{initiator_amount_final := IAmount,
+                 responder_amount_final := RAmount}) ->
+    {account, _, InA} = lists:keyfind(I, 2, Accounts),
+    {account, _, ReA} = lists:keyfind(R, 2, Accounts),
+    InA == IAmount andalso ReA == RAmount andalso ReA + InA =< Amount;
+is_valid_split(_, _Tx) ->
+    false.
+
+
+is_valid_unlock_solo(S, C) ->
+    case C#channel.closed of
+        {solo, H} -> H + C#channel.lock_period =< maps:get(height, S);
+        _ -> false
+    end.
+
+channel_settle_adapt(#{height := Height} = S, [_, {I, _ ,R}, Party, Tx]) ->
+    From = case Party of initiator -> I; responder -> R end,
+    Channels = [ C || C <- maps:get(channels, S, []), element(1, C#channel.id) == I,
+                  element(3, C#channel.id) == R],
+    case Channels of
+        [] -> false;
+        _ ->
+            ?LET(Channel, elements(Channels),
+                 [Height, Channel#channel.id, Party, adapt_nonce(S, From, Tx)])
+    end;
+channel_settle_adapt(_, _) ->
+    %% in case we don't even have a Height
+    false.
+
+channel_settle(Height, Channeld, Party, Tx) ->
+    NewTx = channel_settle_tx(Channeld, Party, Tx),
+    apply_transaction(Height, aesc_settle_tx, NewTx).
+
+channel_settle_tx({Initiator, N, Responder}, _Party, Tx) ->
+    Tx#{channel_id =>
+            aeser_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder))}.
+
+channel_settle_next(S, _Value, [_Height, {Initiator, _, Responder} = ChannelId, Party, Tx] = Args) ->
+    case channel_settle_valid(S, Args) of
+        false -> S;
+        true  ->
+            From = case Party of initiator -> Initiator; responder -> Responder end,
+            #{fee := Fee,  initiator_amount_final := IAmount, responder_amount_final := RAmount} = Tx,
+            Locked = (channel(S, ChannelId))#channel.amount - (IAmount + RAmount),
+            reserve_fee(Fee,
+            credit(Initiator, IAmount,
+            credit(Responder, RAmount,
+                   close_channel(ChannelId, {settle, Locked},
+                                 bump_and_charge(From, -Fee, S)))))
+    end.
+
+channel_settle_features(S, [_Height, _Channeld, _Party, _Tx] = Args, Res) ->
+    Correct = channel_settle_valid(S, Args),
+    [{correct, if Correct -> channel_settle; true -> false end},
+     {channel_settle, Res}].
 
 
 %% --- Operation: ns_preclaim ---
@@ -1553,27 +1674,34 @@ weight(_S, channel_create) -> 5;
 weight(S, channel_deposit) ->
     case maps:get(channels, S, []) of
         [] -> 0;
-        _  -> 10 end;
+        Channels  -> 3 * (length([ 1 || #channel{closed = false} <- Channels]) + 1)
+    end;
 weight(S, channel_withdraw) ->
     case maps:get(channels, S, []) of
         [] -> 0;
-        _  -> 10 end;
+        Channels  -> 3 * (length([ 1 || #channel{closed = false} <- Channels]) + 1)
+    end;
 weight(S, channel_close_mutual) ->
     case maps:get(channels, S, []) of
         [] -> 0;
-        Channels  -> 2 * (length([ 1 || #channel{closed = false} <- Channels]) + 1)
+        Channels  -> 3 * (length([ 1 || #channel{closed = false} <- Channels]) + 1)
     end;
 weight(S, channel_close_solo) ->
     case  [ C || #channel{closed = false} = C <-maps:get(channels, S, []) ] of
-        [] -> 1;
-        Channels  -> 50 * length(Channels)
+        [] -> 0;
+        Channels  -> 5 * length(Channels)
     end;
 weight(S, channel_settle) ->
     case [ H + P || #channel{closed = {solo, H}, lock_period = P} <- maps:get(channels, S, []) ] of
-        [] -> 1;
-        Hs -> 50 * (length([ He || He <- Hs, maps:get(height, S, 0) >= He ]) + 1)
+        [] -> 0;
+        Hs -> 5 * (length([ He || He <- Hs, maps:get(height, S, 0) >= He ]) + 1)
     end;
-
+weight(_S, contract_create) ->
+    10;
+weight(S, contract_call) ->
+    case maps:get(contracts, S, []) of
+        [] -> 0;
+        _  -> 10 end;
 weight(_S, _) -> 0.
 
 
@@ -1754,8 +1882,11 @@ close_channel(CId, mutual, S) ->
     on_channel(CId, fun(C) -> C#channel{closed = mutual} end, S);
 close_channel(CId, solo, S) ->
     on_channel(CId, fun(C) ->
-                            C#channel{ closed = {solo, maps:get(height, S) + C#channel.lock_period}}
-                    end, S).
+                            C#channel{ closed = {solo, maps:get(height, S)}}
+                    end, S);
+close_channel(CId, {settle, Locked}, S) ->
+    on_channel(CId, fun(C) -> C#channel{amount = Locked, closed = settle} end, S).
+
 
 transfer_name(NewOwner, Name, S) ->
     on_claim(Name, fun(C) -> C#claim{ claimer = NewOwner } end, S).
@@ -1879,13 +2010,23 @@ adapt_poi(Channel, Tx) ->
             Invalid
     end.
 
-adapt_state_hash(Channel, Tx) ->
+
+adapt_state_hash(Channel, From, Amount, Tx) ->
     case maps:get(state_hash, Tx) of
         {valid, _} ->
-            Tx#{state_hash => Channel#channel.trees};
+            {valid, Accounts} = Channel#channel.trees,
+            Tx#{state_hash => {valid, adapt_account(Accounts, From, Amount)}};
         Invalid ->
-            Invalid
+            Tx#{state_hash => Invalid}
     end.
+
+adapt_account(Accounts, From, Amount) ->
+    [ {account, Key,
+       case Key == From of
+           true -> min(0, Amt + Amount);   %% Amount can ne negative, but result always >= 0
+           false -> Amt
+       end} || {account, Key, Amt} <- Accounts].
+
 
 check_balance(S, Key, Amount) ->
      (account(S, Key))#account.amount >= Amount.
@@ -2042,13 +2183,18 @@ gen_name(S) ->
     frequency([{90, elements(maps:keys(maps:get(names, S, #{})) ++ [<<"ta.test">>])},
                {1, gen_name()}]).
 
-gen_state_channel_id(#{channels := [], accounts := As}) ->
+gen_state_channel_id(S) ->
+    gen_state_channel_id(S, fun(_) -> true end).
+
+gen_state_channel_id(#{channels := [], accounts := As}, _) ->
     ?LET([{_, A1}, {_, A2}], vector(2, gen_account(0, 1, As)),
          {A1#account.key, choose(1, 5), A2#account.key});
-gen_state_channel_id(#{channels := Cs} = S) ->
-    weighted_default(
-        {39, ?LET(C, elements(Cs), C#channel.id)},
-        {1,  gen_state_channel_id(S#{channels := []})}).
+gen_state_channel_id(#{channels := Cs} = S, Filter) ->
+    Channels = [ Channel || Channel <- Cs, Filter(Channel)],
+    frequency([{if Channels /= [] -> 44; true -> 0 end,
+                ?LAZY(?LET(C, elements(Channels), C#channel.id))},
+               {5,  ?LET(C, elements(Cs), C#channel.id)},
+               {1,  gen_state_channel_id(S#{channels := []}, Filter)}]).
 
 gen_party() ->
     elements([initiator, responder]).
@@ -2061,10 +2207,12 @@ gen_channel_round(#{channels := Cs}, CId) ->
     end.
 
 gen_state_hash(Accounts) ->
-    List = [ {account, A#account.key, Amount} || {account, A, Amount} <- Accounts ],
-    oneof([{invalid, []},
-           {invalid, [elements(List) || length(List) > 1 ]},
-           {valid, List}]).
+    gen_state_hash_account_keys([ {account, A#account.key, Amount} || {account, A, Amount} <- Accounts ]).
+
+gen_state_hash_account_keys(List) ->
+    frequency([{1, {invalid, []}},
+               {1, {invalid, [elements(List) || length(List) > 1 ]}},
+               {40, {valid, List}}]).
 
 
 gen_fee(H) ->
