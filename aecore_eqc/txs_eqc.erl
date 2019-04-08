@@ -1893,7 +1893,9 @@ gen_ttl() ->
 
 %% Generate a contract
 gen_contract() ->
-    elements(["identity", "authorize_nonce"]).
+    elements([ "identity"
+             %% , "authorize_nonce" TODO Restore `authorize_nonce.aes` alongside `identity.aes` in https://github.com/aeternity/aeternity/tree/master/test/contracts
+             ]).
 
 contract(Name) ->
     [{_, Map}] = ets:lookup(contracts, Name),
@@ -1902,21 +1904,21 @@ contract(Name) ->
 %% Add srcs dynamically for the compilers available
 contracts() ->
     Static =
-        [#{name => "identity",
-           args => [],
-           gasfun => fun(_) -> 193 end,
-           basefee => 75000 + 24000,
-           functions => [{<<"main">>, [nat()], 192, <<>>}]
-          },
-         #{name => "authorize_nonce",
-           args => [],
-           gasfun => fun(_) -> 275 end,
-           basefee => 75000 + 30000,
-           auth_fun => <<"nonce_correct">>,
-           functions => [{<<"nonce_correct">>, [nat()], 314, <<175,167,108,196,77,122,134,90,197,152,206,179,38,153,
-                                                               232,187,88,41,45,167,79,246,181,13,185,101,189,45,109,
-                                                               228,184,223>> }]
-          }
+        [ #{name => "identity",
+            args => [],
+            gasfun => fun(_) -> 193 end,
+            basefee => 75000 + 24000,
+            functions => [{<<"main">>, [nat()], 192, <<>>}]
+           }
+        %% , #{name => "authorize_nonce",
+        %%     args => [],
+        %%     gasfun => fun(_) -> 275 end,
+        %%     basefee => 75000 + 30000,
+        %%     auth_fun => <<"nonce_correct">>,
+        %%     functions => [{<<"nonce_correct">>, [nat()], 314, <<175,167,108,196,77,122,134,90,197,152,206,179,38,153,
+        %%                                                         232,187,88,41,45,167,79,246,181,13,185,101,189,45,109,
+        %%                                                         228,184,223>> }]
+        %%    }
         ],
     [ begin
           Name = maps:get(name, C),
