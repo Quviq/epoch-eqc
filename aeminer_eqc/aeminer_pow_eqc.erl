@@ -1,4 +1,4 @@
--module(aec_pow_eqc).
+-module(aeminer_pow_eqc).
 
 -compile([export_all, no_warn_export_all]).
 
@@ -17,14 +17,14 @@ prop_roundtrip_basic() ->
   ?FORALL(X, choose(0, ?HIGHEST_TARGET_INT),
   ?TIMEOUT(100,
   begin
-    Sci = aec_pow:integer_to_scientific(X),
-    equals(Sci, aec_pow:integer_to_scientific(aec_pow:scientific_to_integer(Sci)))
+    Sci = aeminer_pow:integer_to_scientific(X),
+    equals(Sci, aeminer_pow:integer_to_scientific(aeminer_pow:scientific_to_integer(Sci)))
   end)).
 
 prop_roundtrip() ->
   ?FORALL(Sci, gen_sci(),
   ?TIMEOUT(100,
-    equals(Sci, aec_pow:integer_to_scientific(aec_pow:scientific_to_integer(Sci)))
+    equals(Sci, aeminer_pow:integer_to_scientific(aeminer_pow:scientific_to_integer(Sci)))
   )).
 
 %% Check that we can spot the difference between two different compactly represented
@@ -32,10 +32,10 @@ prop_roundtrip() ->
 prop_precision() ->
   ?FORALL(Sc1, gen_sci(),
   begin
-    Int = aec_pow:scientific_to_integer(Sc1),
-    Sc2 = aec_pow:integer_to_scientific(Int - 1),
-    D1 = aec_pow:target_to_difficulty(Sc1),
-    D2 = aec_pow:target_to_difficulty(Sc2),
+    Int = aeminer_pow:scientific_to_integer(Sc1),
+    Sc2 = aeminer_pow:integer_to_scientific(Int - 1),
+    D1 = aeminer_pow:target_to_difficulty(Sc1),
+    D2 = aeminer_pow:target_to_difficulty(Sc2),
     ?WHENFAIL(
       io:format("Sc1: ~.16b\nSc2: ~.16b\nD1 : ~p\nD2 : ~p\n",
                 [Sc1, Sc2, D1, D2]),
@@ -46,11 +46,11 @@ prop_precision() ->
 prop_test_target() ->
   ?FORALL(Sci, gen_sci(),
   begin
-    Int = aec_pow:scientific_to_integer(Sci),
+    Int = aeminer_pow:scientific_to_integer(Sci),
     BSol1 = int_to_bin(Int + 1, 32),
     BSol2 = int_to_bin(Int - 1, 32),
     ?WHENFAIL(io:format("Sci: ~.16b\nI+1: ~.16b\nI-1: ~.16b\nB1: ~p\nB2: ~p\n", [Sci, Int+1, Int-1, BSol1, BSol2]),
-    equals({true, false}, {aec_pow:test_target(BSol2, Sci), aec_pow:test_target(BSol1, Sci)}))
+    equals({true, false}, {aeminer_pow:test_target(BSol2, Sci), aeminer_pow:test_target(BSol1, Sci)}))
   end).
 
 int_to_bin(X, Bytes) -> <<X:Bytes/big-unsigned-integer-unit:8>>.
