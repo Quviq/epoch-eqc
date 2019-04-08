@@ -521,7 +521,7 @@ bugs(Time, Bugs) ->
   more_bugs(eqc:testing_time(Time, prop_sync()), 20, Bugs).
 
 encode(Bin) ->
-  aec_base58c:encode(block_hash, Bin).
+  aeser_api_encoder:encode(key_block_hash, Bin).
 
 %% -- API-spec ---------------------------------------------------------------
 api_spec() -> #api_spec{ language = erlang, mocking = eqc_mocking,
