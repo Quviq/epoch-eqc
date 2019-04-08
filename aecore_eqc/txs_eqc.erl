@@ -1919,8 +1919,9 @@ contracts() ->
           }
         ],
     [ begin
-          File = filename:join("contracts", maps:get(name, C)),
-          {ok, ContractSrc} = aect_test_utils:read_contract(File),
+          Name = maps:get(name, C),
+          File = filename:join("contracts", Name),
+          {{ok, ContractSrc}, _} = {aect_test_utils:read_contract(File), Name},
           CompiledCode =
               [ begin
                     {ok, Code} = aect_test_utils:compile_contract(CompilerVersion, File),
