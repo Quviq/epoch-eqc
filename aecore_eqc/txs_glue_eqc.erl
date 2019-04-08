@@ -1161,7 +1161,7 @@ contract_create_args(#{height := Height, accounts := Accounts}) ->
                    #{gasfun := GasFun, basefee := Fixed} = contract(Name),
                    [Height, {SenderTag, Sender#account.key}, Name,
                     frequency([{10, 1}, {30, 2}]),
-                    #{owner_id => aec_id:create(account, Sender#account.key),
+                    #{owner_id => aeser_id:create(account, Sender#account.key),
                       vm_version  => frequency([{1, elements([0,4])}, {max(10, Height), sophia_1}, {2, solidity}, {50, sophia_2}]),
                       abi_version => weighted_default({49, 1}, {1, elements([0,3])}),
                       fee => gen_fee_above(Height, Fixed),
@@ -1271,8 +1271,8 @@ contract_call_args(#{height := Height, accounts := Accounts, contracts := Contra
                    valid -> oneof(maps:get(functions, contract(Contract#contract.name)))
                end,
                [Height, {SenderTag, Sender#account.key}, {ContractTag, Contract},
-                #{caller_id => aec_id:create(account, Sender#account.key),   %% could also be a contract!
-                  contract_id => aec_id:create(contract, Contract#contract.id),
+                #{caller_id => aeser_id:create(account, Sender#account.key),   %% could also be a contract!
+                  contract_id => aeser_id:create(contract, Contract#contract.id),
                   abi_version => weighted_default({49, Contract#contract.abi}, {1, elements([0,3])}),
                   fee => gen_fee_above(Height, call_base_fee(As)),
                   gas_price => frequency([{1,0}, {10, 1}, {89, minimum_gas_price(Height)}]),
