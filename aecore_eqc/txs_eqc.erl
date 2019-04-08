@@ -1394,9 +1394,6 @@ prop_txs() ->
     prop_txs(3).
 
 prop_txs(Fork) ->
-    application:load(aecore),
-    application:set_env(aecore, hard_forks,
-                                   #{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
     application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
     %% read and compile contracts once (and use them in parallel
     catch ets:delete(contracts),
@@ -1404,9 +1401,16 @@ prop_txs(Fork) ->
     [ ets:insert(contracts, {maps:get(name, C), C}) || C <- contracts() ],
     ?SETUP(
     fun() ->
+        AecoreUnloadFun = load_app_if_unloaded(aecore),
+        undefined = application:get_env(aecore, hard_forks),
+        ok = application:set_env(aecore, hard_forks, #{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
         undefined = application:get_env(setup, data_dir),
         ok = application:set_env(setup, data_dir, "data"),
-        fun() -> ok = application:unset_env(setup, data_dir) end
+        fun() ->
+            ok = application:unset_env(setup, data_dir),
+            ok = application:unset_env(aecore, hard_forks),
+            ok = AecoreUnloadFun()
+        end
     end,
     eqc:dont_print_counterexample(
     in_parallel(
@@ -1432,6 +1436,21 @@ prop_txs(Fork) ->
                               conjunction([{result, Res == ok},
                                            {total, Total == 0 orelse equals(Total, ?PatronAmount - FeeTotal)}]))))))))
     end)))).
+
+load_app_if_unloaded(App) ->
+    case is_app_loaded(App) of
+        false ->
+            ok = application:load(App),
+            fun() -> ok = application:unload(App) end;
+        true ->
+            fun() -> ok end
+    end.
+
+is_app_loaded(App) ->
+    lists:member(App, loaded_apps()).
+
+loaded_apps() ->
+    lists:map(fun({A,_,_}) -> A end, application:loaded_applications()).
 
 aggregate_feats([], [], Prop) -> Prop;
 aggregate_feats([atoms | Kinds], Features, Prop) ->

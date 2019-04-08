@@ -121,14 +121,20 @@ ns_transfer(Height, _Sender, _Receiver, _Name, Tx) ->
 %% -- Property ---------------------------------------------------------------
 
 prop_txs() ->
+    ?SETUP(
+    fun() ->
+        AecoreUnloadFun = load_app_if_unloaded(aecore),
+        undefined = application:get_env(aecore, hard_forks),
+        ok = application:set_env(aecore, hard_forks, #{<<"1">> => 0, <<"2">> => 3}),
+        fun() ->
+            ok = application:unset_env(aecore, hard_forks),
+            ok = AecoreUnloadFun()
+        end
+    end,
    %% eqc:dont_print_counterexample(
     in_parallel(
     ?FORALL(Cmds, commands(?MODULE),
     begin
-        application:load(aecore),
-        application:set_env(aecore, hard_forks, 
-                                   #{<<"1">> => 0, <<"2">> => 3}),
-
         {H, S, Res} = run_commands(Cmds),
         Height = maps:get(height, S, 0),
         check_command_names(Cmds,
@@ -138,7 +144,22 @@ prop_txs() ->
             aggregate_feats([atoms, correct | all_command_names()], call_features(H),
                 pretty_commands(?MODULE, Cmds, {H, S, Res},
                                 Res == ok))))))
-    end)).
+    end))).
+
+load_app_if_unloaded(App) ->
+    case is_app_loaded(App) of
+        false ->
+            ok = application:load(App),
+            fun() -> ok = application:unload(App) end;
+        true ->
+            fun() -> ok end
+    end.
+
+is_app_loaded(App) ->
+    lists:member(App, loaded_apps()).
+
+loaded_apps() ->
+    lists:map(fun({A,_,_}) -> A end, application:loaded_applications()).
 
 aggregate_feats([], [], Prop) -> Prop;
 aggregate_feats([atoms | Kinds], Features, Prop) ->
