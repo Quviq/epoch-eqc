@@ -1423,7 +1423,13 @@ weight(_S, contract_call) ->
 weight(_S, _) -> 0.
 
 prop_txs() ->
-    ?SETUP(fun() -> eqc_mocking:start_mocking(api_spec()), fun() -> ok end end,
+    ?SETUP(
+    fun() ->
+        undefined = application:get_env(setup, data_dir),
+        ok = application:set_env(setup, data_dir, "data"),
+        eqc_mocking:start_mocking(api_spec()),
+        fun() -> ok = application:unset_env(setup, data_dir) end
+    end,
     eqc:dont_print_counterexample(
     ?FORALL(Cmds, commands(?MODULE),
     begin
