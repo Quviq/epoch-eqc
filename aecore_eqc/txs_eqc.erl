@@ -1404,10 +1404,9 @@ prop_txs(Fork) ->
     [ ets:insert(contracts, {maps:get(name, C), C}) || C <- contracts() ],
     ?SETUP(
     fun() ->
-        meck:new(aec_fork_block_settings, [passthrough]),
-        meck:expect(aec_fork_block_settings, file_name,
-                        fun(R) -> "../../" ++ meck:passthrough([R]) end),
-        fun() -> meck:unload(aec_fork_block_settings) end
+        undefined = application:get_env(setup, data_dir),
+        ok = application:set_env(setup, data_dir, "data"),
+        fun() -> ok = application:unset_env(setup, data_dir) end
     end,
     eqc:dont_print_counterexample(
     in_parallel(
