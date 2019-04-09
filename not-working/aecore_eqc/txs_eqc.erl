@@ -1401,15 +1401,14 @@ prop_txs(Fork) ->
     [ ets:insert(contracts, {maps:get(name, C), C}) || C <- contracts() ],
     ?SETUP(
     fun() ->
-        AecoreUnloadFun = load_app_if_unloaded(aecore),
+        _ = application:load(aecore),
         undefined = application:get_env(aecore, hard_forks),
         ok = application:set_env(aecore, hard_forks, #{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
         undefined = application:get_env(setup, data_dir),
         ok = application:set_env(setup, data_dir, "data"),
         fun() ->
             ok = application:unset_env(setup, data_dir),
-            ok = application:unset_env(aecore, hard_forks),
-            ok = AecoreUnloadFun()
+            ok = application:unset_env(aecore, hard_forks)
         end
     end,
     eqc:dont_print_counterexample(
@@ -1436,21 +1435,6 @@ prop_txs(Fork) ->
                               conjunction([{result, Res == ok},
                                            {total, Total == 0 orelse equals(Total, ?PatronAmount - FeeTotal)}]))))))))
     end)))).
-
-load_app_if_unloaded(App) ->
-    case is_app_loaded(App) of
-        false ->
-            ok = application:load(App),
-            fun() -> ok = application:unload(App) end;
-        true ->
-            fun() -> ok end
-    end.
-
-is_app_loaded(App) ->
-    lists:member(App, loaded_apps()).
-
-loaded_apps() ->
-    lists:map(fun({A,_,_}) -> A end, application:loaded_applications()).
 
 aggregate_feats([], [], Prop) -> Prop;
 aggregate_feats([atoms | Kinds], Features, Prop) ->
