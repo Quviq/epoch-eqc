@@ -126,7 +126,10 @@ prop_txs() ->
         AecoreUnloadFun = load_app_if_unloaded(aecore),
         undefined = application:get_env(aecore, hard_forks),
         ok = application:set_env(aecore, hard_forks, #{<<"1">> => 0, <<"2">> => 3}),
+        undefined = application:get_env(setup, data_dir),
+        ok = application:set_env(setup, data_dir, "data"),
         fun() ->
+            ok = application:unset_env(setup, data_dir),
             ok = application:unset_env(aecore, hard_forks),
             ok = AecoreUnloadFun()
         end
