@@ -118,6 +118,11 @@ ns_revoke(Height, _Sender, _Name, Tx) ->
 ns_transfer(Height, _Sender, _Receiver, _Name, Tx) ->
     txs_eqc:apply_transaction(Height, aens_transfer_tx, Tx).
 
+%% --- Operation: create_contract ---
+contract_create(Height, {_, _Sender}, Name, CompilerVersion, Tx) ->
+    NewTx = txs_eqc:contract_create_tx(Name, CompilerVersion, Tx),
+    txs_eqc:apply_transaction(Height, aect_create_tx, NewTx).
+
 %% -- Property ---------------------------------------------------------------
 
 prop_txs() ->
