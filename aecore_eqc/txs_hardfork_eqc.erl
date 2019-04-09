@@ -144,7 +144,7 @@ prop_txs() ->
             measure(length, commands_length(Cmds),
             measure(height, Height,
             features(call_features(H),
-            aggregate_feats([atoms, correct | all_command_names()], call_features(H),
+            aggregate_feats([atoms, correct, protocol | all_command_names()], call_features(H),
                 pretty_commands(?MODULE, Cmds, {H, S, Res},
                                 Res == ok))))))
     end))).
