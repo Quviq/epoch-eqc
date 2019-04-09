@@ -1428,7 +1428,9 @@ prop_txs() ->
         undefined = application:get_env(setup, data_dir),
         ok = application:set_env(setup, data_dir, "data"),
         eqc_mocking:start_mocking(api_spec()),
-        fun() -> ok = application:unset_env(setup, data_dir) end
+        fun() ->
+            eqc_mocking:stop_mocking(),
+            ok = application:unset_env(setup, data_dir) end
     end,
     eqc:dont_print_counterexample(
     ?FORALL(Cmds, commands(?MODULE),
