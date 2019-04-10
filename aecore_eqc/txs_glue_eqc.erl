@@ -1184,12 +1184,15 @@ contract_create_valid(S, [Height, {_, Sender}, Name, CompilerVersion, Tx]) ->
     andalso check_balance(S, Sender, maps:get(fee, Tx) + GasFun(Height) * maps:get(gas_price, Tx) +
                               maps:get(amount, Tx) + maps:get(deposit, Tx))
     andalso valid_contract_fee(Height, Fixed, Tx)
-    andalso if Protocol == 1 ->
+    andalso  if Protocol == 1 ->
                     lists:member({maps:get(vm_version, Tx), maps:get(abi_version, Tx)},
-                                 [{sophia_1, 1}, {sophia_1, 1}]);  %% second compiler could create VM1 code ?
+                                 [{aevm_sophia_1, 1}]);  %% second compiler could create VM1 code ?
                Protocol == 2 ->
                     lists:member({maps:get(vm_version, Tx), maps:get(abi_version, Tx)},
-                                 [{sophia_2, 1}, {sophia_2, 1}])
+                                 [{aevm_sophia_2, 1}]);
+               Protocol == 3 ->
+                    lists:member({maps:get(vm_version, Tx), maps:get(abi_version, Tx)},
+                                 [{aevm_sophia_3, 1}, {aevm_sophia_2, 1}])
             end
     andalso lists:member(CompilerVersion, [1, 2]).
 
@@ -1204,9 +1207,10 @@ contract_create(Height, {_, _Sender}, Name, CompilerVersion, Tx) ->
     {ok, Contract} = aect_test_utils:read_contract(File),
     {ok, Code}     = aect_test_utils:compile_contract(CompilerVersion, File),
     {ok, CallData} = aect_sophia:encode_call_data(Contract, <<"init">>, Args),
-    NTx = maps:update_with(vm_version, fun(sophia_1) -> 1;
-                                          (solidity) -> 2;
-                                          (sophia_2) -> 3;
+    NTx = maps:update_with(vm_version, fun(aevm_sophia_1) -> 1;
+                                          (vm_solidity) -> 2;
+                                          (aevm_sophia_2) -> 3;
+                                          (aevm_sophia_3) -> 4;
                                           (N) -> N
                                        end, Tx),
     apply_transaction(Height, aect_create_tx, NTx#{code => Code, call_data => CallData}).
@@ -1425,12 +1429,12 @@ weight(_S, _) -> 0.
 prop_txs() ->
     ?SETUP(
     fun() ->
-        undefined = application:get_env(setup, data_dir),
-        ok = application:set_env(setup, data_dir, "data"),
         eqc_mocking:start_mocking(api_spec()),
-        fun() ->
-            eqc_mocking:stop_mocking(),
-            ok = application:unset_env(setup, data_dir) end
+        %% make sure we can run in eqc/aecore_eqc
+        meck:new(aec_fork_block_settings, [passthrough]),
+        meck:expect(aec_fork_block_settings, file_name,
+                        fun(R) -> "../../" ++ meck:passthrough([R]) end),
+        fun() -> meck:unload(aec_fork_block_settings) end
     end,
     eqc:dont_print_counterexample(
     ?FORALL(Cmds, commands(?MODULE),
