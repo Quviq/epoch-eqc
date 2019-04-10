@@ -1429,12 +1429,20 @@ weight(_S, _) -> 0.
 prop_txs() ->
     ?SETUP(
     fun() ->
-        eqc_mocking:start_mocking(api_spec()),
-        %% make sure we can run in eqc/aecore_eqc
-        meck:new(aec_fork_block_settings, [passthrough]),
-        meck:expect(aec_fork_block_settings, file_name,
-                        fun(R) -> "../../" ++ meck:passthrough([R]) end),
-        fun() -> meck:unload(aec_fork_block_settings) end
+            eqc_mocking:start_mocking(api_spec()),
+            %% make sure we can run in eqc/aecore_eqc
+            {ok, Dir} = file:get_cwd(),
+            DataDir = application:get_env(setup, data_dir),
+            ok = case lists:reverse(filename:split(Dir)) of
+                     [_, "eqc" | _] ->
+                         application:set_env(setup, data_dir, "../../data");
+                     _ ->
+                         application:set_env(setup, data_dir, "data")
+                 end,
+            fun() ->
+                    eqc_mocking:stop_mocking(),
+                    ok = application:set_env(setup, data_dir, DataDir)
+            end
     end,
     eqc:dont_print_counterexample(
     ?FORALL(Cmds, commands(?MODULE),
