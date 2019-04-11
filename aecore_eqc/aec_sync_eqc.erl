@@ -528,7 +528,8 @@ api_spec() -> #api_spec{ language = erlang, mocking = eqc_mocking,
                          modules = [ aehttp_app_spec(),
                                      jobs_spec(),
                                      aec_conductor_spec(),
-                                     aeu_http_client_spec()
+                                     aeu_http_client_spec(),
+                                     aec_keys_spec()
                                    ] }.
 
 aeu_requests_spec() ->
@@ -571,7 +572,12 @@ aec_conductor_spec() ->
          #api_fun{ name = get_total_difficulty, arity = 0}
        ] }.
 
-
+aec_keys_spec() ->
+  #api_module{
+     name = aec_keys, fallback = aec_keys_mock,
+     functions =
+       [
+       ] }.
 
 %% -- Generators -------------------------------------------------------------
 
