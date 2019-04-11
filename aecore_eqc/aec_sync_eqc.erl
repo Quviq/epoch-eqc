@@ -88,9 +88,9 @@ start_callouts(_S, [Peers]) ->
 
 start_next(S, V, [Peers]) ->
     S#state{ aec_sync_pid = V
-           , blocked = lists:usort([ {_,_,_} = full_peer(Peer) || {?BLOCKED, Peer} <- Peers, Peer =/= error])
-           , trusted = lists:usort([ {_,_,_} = full_peer(Peer) || {?PEER, Peer} <- Peers, Peer =/= error,
-                                                        not local_peer(full_peer(Peer)) ])
+           , blocked = lists:usort([ {_,_,_} = Peer || {?BLOCKED, Peer} <- Peers, Peer =/= error])
+           , trusted = lists:usort([ {_,_,_} = Peer || {?PEER, Peer} <- Peers, Peer =/= error,
+                                                        not local_peer(Peer) ])
            }.
 
 start_post(_S, _Args, Res) ->
@@ -111,7 +111,7 @@ is_blocked(Peer) ->
   aec_peers:is_blocked(pp(Peer)).
 
 is_blocked_post(S, [Peer], Res) ->
-  eq(Res, (Peer == error) orelse lists:member(full_peer(Peer), S#state.blocked)).
+  eq(Res, (Peer == error) orelse lists:member(Peer, S#state.blocked)).
 
 is_blocked_features(S, [Peer], _Res) ->
   [{is_blocked, lists:member(Peer, S#state.blocked)}].
@@ -140,7 +140,7 @@ stop_next(S, _Value, []) ->
 %% --- Operation: connect ---
 
 can_be_added(S, Uri) ->
-  not (Uri == error orelse lists:member(full_peer(Uri), S#state.blocked) orelse local_peer(full_peer(Uri))).
+  not (Uri == error orelse lists:member(Uri, S#state.blocked) orelse local_peer(Uri)).
 
 connect_peer_args(S) ->
   [oneof([uri()|S#state.errored])].
@@ -153,17 +153,17 @@ connect_peer(Uri) ->
 %% We do not test the parser
 connect_peer_callouts(S, [Uri]) ->
   ?WHEN(S#state.aec_sync_pid =/= undefined,
-        ?APPLY(connect, [full_peer(Uri)])).
+        ?APPLY(connect, [Uri])).
 
 connect_peer_post(_S, [_Peer], Res) ->
   eq(Res, ok).
 
 connect_callouts(S, [Uri]) ->
-  ?WHEN(can_be_added(S, Uri) andalso not lists:member(full_peer(Uri), S#state.peers),
+  ?WHEN(can_be_added(S, Uri) andalso not lists:member(Uri, S#state.peers),
         begin
-          BinUri = list_to_binary(pp(full_peer(Uri))),
+          BinUri = list_to_binary(pp(Uri)),
           ?CALLOUT(jobs, enqueue, [sync_jobs, {ping, BinUri}], ok),
-          ?APPLY(add_peer, [full_peer(Uri)]),
+          ?APPLY(add_peer, [Uri]),
           ?APPLY(enqueue, [Uri, {ping, BinUri}])
         end).
 
@@ -171,7 +171,7 @@ connect_features(S, [Uri], _Res) ->
   [ {connecting_to_blocked_peer, Uri} || lists:member(Uri, S#state.blocked) ] ++
    [ {connect_to_self, Uri} || myhost() == Uri ] ++
     [ {connect_to_existing_peer, Uri} || lists:member(Uri, S#state.peers) ] ++
-    [ {connect_to_errored_peer, Uri} || lists:member(full_peer(Uri), S#state.errored) ] ++
+    [ {connect_to_errored_peer, Uri} || lists:member(Uri, S#state.errored) ] ++
     [ connect ].
 
 enqueue_next(S, _, [Uri, Task]) ->
@@ -181,7 +181,7 @@ enqueue_next(S, _, [Uri, Task]) ->
 add_peer_next(S, _, [Uri]) ->
   case can_be_added(S, Uri) of
     true ->
-      S#state{ peers = (S#state.peers -- [full_peer(Uri)]) ++ [full_peer(Uri)] };
+      S#state{ peers = (S#state.peers -- [Uri]) ++ [Uri] };
     false ->
       S
   end.
@@ -195,7 +195,7 @@ sync_worker_args(S) ->
   {Uri, Task} = hd(S#state.queue),
   [Uri, Task, frequency([{2,ok}, {1,block}, 
                          %% High probability recurrent error
-                         {case lists:member(full_peer(Uri), S#state.errored) of 
+                         {case lists:member(Uri, S#state.errored) of
                             true -> 4;
                             false -> 1
                           end, error}])].
@@ -227,8 +227,8 @@ sync_worker_process(_S, [_Uri, _Task, _]) ->
 
 sync_worker_features(S, [Uri, _Task, Response], _Res) ->
   [{response, Response}] ++
-   [ sync_errored || lists:member(full_peer(Uri), S#state.errored)] ++
-   [ repeated_error || Response == error, lists:member(full_peer(Uri), S#state.errored)].
+   [ sync_errored || lists:member(Uri, S#state.errored)] ++
+   [ repeated_error || Response == error, lists:member(Uri, S#state.errored)].
 
 
 %% --- Operation: all_peers ---
@@ -256,7 +256,7 @@ get_random(N, Exclude) ->
   end.
 
 get_random_post(S, [N, Exclude], Res) ->
-  RealExclude = [ full_peer(Ex) || Ex <- Exclude ] ++ S#state.errored,
+  RealExclude = [ Ex || Ex <- Exclude ] ++ S#state.errored,
   eqc_statem:conj([not lists:any(fun(Ex) ->
                                      lists:member(pp(Ex), Res)
                                  end, RealExclude),
@@ -281,13 +281,13 @@ block(Uri) ->
 
 %% We cannot block trusted notes
 block_next(S, _Value, [Uri]) ->
-  S#state{ blocked = (S#state.blocked -- [full_peer(Uri)]) ++ [full_peer(Uri)] -- S#state.trusted,
-           peers = S#state.peers -- [full_peer(Uri) 
-                                     || not lists:member(full_peer(Uri), S#state.trusted)]}.
+  S#state{ blocked = (S#state.blocked -- [Uri]) ++ [Uri] -- S#state.trusted,
+           peers = S#state.peers -- [Uri
+                                     || not lists:member(Uri, S#state.trusted)]}.
 
 block_features(S, [Uri], _Res) ->
-  [ {block, errored} || lists:member(full_peer(Uri), S#state.errored) ] ++
-    [ {block, trusted} || lists:member(full_peer(Uri), S#state.trusted) ].
+  [ {block, errored} || lists:member(Uri, S#state.errored) ] ++
+    [ {block, trusted} || lists:member(Uri, S#state.trusted) ].
 
 
 %% --- Operation: unblock ---
@@ -298,7 +298,7 @@ unblock(Uri) ->
   aec_peers:unblock_peer(pp(Uri)).
 
 unblock_next(S, _Value, [Uri]) ->
-   S#state{ blocked = (S#state.blocked -- [full_peer(Uri)]) }.
+   S#state{ blocked = (S#state.blocked -- [Uri]) }.
 
 
 %% --- Operation: remove ---
@@ -309,9 +309,9 @@ remove(Uri) ->
   aec_peers:remove(pp(Uri)).
 
 remove_next(S, _Value, [Uri]) ->
-   S#state{ blocked = S#state.blocked -- [full_peer(Uri)],
-            peers = S#state.peers -- [full_peer(Uri)],
-            trusted =  S#state.trusted -- [full_peer(Uri)]}.
+   S#state{ blocked = S#state.blocked -- [Uri],
+            peers = S#state.peers -- [Uri],
+            trusted =  S#state.trusted -- [Uri]}.
 
 
 
@@ -374,15 +374,15 @@ ping_next(S, Value, [Uri, block]) ->
   block_next(S, Value, [Uri]);
 ping_next(S, _Value, [Uri, error]) ->
   %% Only when it is a valid peer it can be errored
-  case lists:member(full_peer(Uri), S#state.peers) of
+  case lists:member(Uri, S#state.peers) of
     true ->
-      S#state{ errored = (S#state.errored -- [full_peer(Uri)]) ++ [full_peer(Uri)]};
+      S#state{ errored = (S#state.errored -- [Uri]) ++ [Uri]};
     false ->
       S
   end;
 ping_next(S, _Value, [Uri, ok]) ->
   %% do not add peers here, if they don't block they are added in callouts
-  S#state{ errored = S#state.errored -- [full_peer(Uri)]}.
+  S#state{ errored = S#state.errored -- [Uri]}.
 
 
 %% Only ping unknown valid Uri's that are provided by new peer.
@@ -586,7 +586,7 @@ aec_keys_spec() ->
 %% -- Generators -------------------------------------------------------------
 
 uri() ->
-  elements([{http, "129.1.2.3", 3013}, {http, "129.1.2.3", 3012}, {http, "192.1.1.0"}, {http, "my_computer", 80},
+  elements([{http, "129.1.2.3", 3013}, {http, "129.1.2.3", 3012}, {http, "192.1.1.0", 80}, {http, "my_computer", 80},
             {http, "localhost", 3013}, {http, "127.0.0.1", 3013}, {http, "localhost", 8043}, error ]).
 
 myhost() ->
