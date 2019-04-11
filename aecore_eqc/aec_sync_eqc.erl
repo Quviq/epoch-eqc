@@ -21,8 +21,8 @@
 -record(state,{ aec_peers_pid
               , aec_sync_pid    %% pids of aec_sync and aec_peers processes
               , peers = []
-              , blocked = [] :: [{Scheme::http, Host::nonempty_string(), Port::non_neg_integer()}]
-              , trusted = [] :: [{Scheme::http, Host::nonempty_string(), Port::non_neg_integer()}]
+              , blocked = [] :: [{Scheme::noise, PubKey::aec_keys:pubkey(), Host::nonempty_string(), Port::non_neg_integer()}]
+              , trusted = [] :: [{Scheme::noise, PubKey::aec_keys:pubkey(), Host::nonempty_string(), Port::non_neg_integer()}]
               , queue = []
               , errored = []
               , tried_connect = []
@@ -48,7 +48,7 @@ start_peers_args(_S) ->
   [].
 
 start_peers() ->
-  {ok, PeersPid} = aec_peers:start_link(),
+  {ok, PeersPid} = aec_peers_start_link(),
   unlink(PeersPid),
   timer:sleep(10),
   PeersPid.
@@ -75,12 +75,15 @@ start_args(_S) ->
                        not (Tag == ?BLOCKED andalso lists:member({?PEER, P}, Peers))]) ].
 
 start(Peers) ->
-  application:set_env(aecore, peers, [ pp(Peer) || {?PEER, Peer} <- Peers]),
-  application:set_env(aecore, blocked_peers, [ pp(Peer) || {?BLOCKED, Peer} <- Peers]),
-  {ok, Pid} = ?SUT:start_link(),
+  application_set_env(aecore, peers, [ encode_peer_address(Peer) || {?PEER, Peer} <- Peers]),
+  application_set_env(aecore, blocked_peers, [ encode_peer_address(Peer) || {?BLOCKED, Peer} <- Peers]),
+  {ok, Pid} = sut_start_link(),
   unlink(Pid),
   timer:sleep(100),
   Pid.
+
+encode_peer_address({noise, PubKey, Host, Port}) ->
+    aec_peers:encode_peer_address(#{ pubkey => PubKey, host => Host, port => Port }).
 
 start_callouts(_S, [Peers]) ->
   ?PAR([?APPLY(connect, [ Peer ])  || {?PEER, Peer} <- lists:sort(Peers), Peer =/= error]).
@@ -88,8 +91,8 @@ start_callouts(_S, [Peers]) ->
 
 start_next(S, V, [Peers]) ->
     S#state{ aec_sync_pid = V
-           , blocked = lists:usort([ {_,_,_} = Peer || {?BLOCKED, Peer} <- Peers, Peer =/= error])
-           , trusted = lists:usort([ {_,_,_} = Peer || {?PEER, Peer} <- Peers, Peer =/= error,
+           , blocked = lists:usort([ {_,_,_,_} = Peer || {?BLOCKED, Peer} <- Peers, Peer =/= error])
+           , trusted = lists:usort([ {_,_,_,_} = Peer || {?PEER, Peer} <- Peers, Peer =/= error,
                                                         not local_peer(Peer) ])
            }.
 
@@ -108,7 +111,7 @@ is_blocked_args(_S) ->
   [uri()].
 
 is_blocked(Peer) ->
-  aec_peers:is_blocked(pp(Peer)).
+  aec_peers_is_blocked(peer_pubkey(Peer)).
 
 is_blocked_post(S, [Peer], Res) ->
   eq(Res, (Peer == error) orelse lists:member(Peer, S#state.blocked)).
@@ -147,7 +150,7 @@ connect_peer_args(S) ->
 
 connect_peer(Uri) ->
   Peer = pp(Uri),
-  ?SUT:connect_peer(Peer),
+  sut_connect_peer(Peer),
   timer:sleep(100).
 
 %% We do not test the parser
@@ -205,7 +208,7 @@ sync_worker_pre(S, [Uri, Task, _]) ->
   hd(S#state.queue) == {Uri, Task}.
 
 sync_worker(_Uri, _Task, _) ->
-  ?SUT:sync_worker().
+  sut_sync_worker().
 
 sync_worker_callouts(S, [Uri, Task, Response]) ->
   %% Note that tag of job is not symbolic
@@ -238,7 +241,7 @@ all_peers_args(_S) ->
   [].
 
 all_peers() ->
-  aec_peers:all().
+  aec_peers_all().
 
 all_peers_post(S, [], Res) ->
   eq(lists:sort([binary_to_list(P) || {P, _} <- Res]),
@@ -251,8 +254,8 @@ get_random_args(_S) ->
 
 get_random(N, Exclude) ->
   case Exclude of
-    [] -> aec_peers:get_random(N);
-    _ ->  aec_peers:get_random(N, [pp(Uri) || Uri <- Exclude])
+    [] -> aec_peers_get_random(N);
+    _ ->  aec_peers_get_random(N, [peer_pubkey(Uri) || Uri <- Exclude])
   end.
 
 get_random_post(S, [N, Exclude], Res) ->
@@ -277,7 +280,7 @@ block_args(_S) ->
   [ uri() ].
 
 block(Uri) ->
-  aec_peers:block_peer(pp(Uri)).
+  aec_peers_block_peer(peer_pubkey_host_port(Uri)).
 
 %% We cannot block trusted notes
 block_next(S, _Value, [Uri]) ->
@@ -295,7 +298,7 @@ unblock_args(_S) ->
   [uri()].
 
 unblock(Uri) ->
-  aec_peers:unblock_peer(pp(Uri)).
+  aec_peers_unblock_peer(peer_pubkey(Uri)).
 
 unblock_next(S, _Value, [Uri]) ->
    S#state{ blocked = (S#state.blocked -- [Uri]) }.
@@ -306,7 +309,7 @@ remove_args(_S) ->
   [uri()].
 
 remove(Uri) ->
-  aec_peers:remove(pp(Uri)).
+  aec_peers_remove(peer_pubkey(Uri)).
 
 remove_next(S, _Value, [Uri]) ->
    S#state{ blocked = S#state.blocked -- [Uri],
@@ -442,7 +445,7 @@ timer_expire_pre(S, [Uri]) ->
   can_be_added(S, Uri).
 
 timer_expire(Uri) ->
-  aec_sync:schedule_ping(aeu_requests:pp_uri(Uri)),
+  aec_sync_schedule_ping(peer_pubkey(Uri)),
   timer:sleep(10).
 
 timer_expire_callouts(S, [Uri]) ->
@@ -477,7 +480,7 @@ prop_sync(Verbose) ->
                          lager:set_loglevel(lager_console_backend, debug);
               true -> ok
            end,
-           application:set_env(aecore, peer_error_expiry, 1),  
+           application_set_env(aecore, peer_error_expiry, 1),
                 %% put to 1 to find that model not yet covers removing of errored nodes 
            %% Return the teardwown function
            fun() ->
@@ -586,13 +589,14 @@ aec_keys_spec() ->
 %% -- Generators -------------------------------------------------------------
 
 uri() ->
-  elements([{http, "129.1.2.3", 3013}, {http, "129.1.2.3", 3012}, {http, "192.1.1.0", 80}, {http, "my_computer", 80},
-            {http, "localhost", 3013}, {http, "127.0.0.1", 3013}, {http, "localhost", 8043}, error ]).
+  elements([{noise, <<1:32/unit:8>>, "129.1.2.3", 3013}, {noise, <<2:32/unit:8>>, "129.1.2.3", 3012}, {noise, <<3:32/unit:8>>, "192.1.1.0", 80}, {noise, <<4:32/unit:8>>, "my_computer", 80},
+            {noise, <<5:32/unit:8>>, "localhost", 3013}, {noise, <<6:32/unit:8>>, "127.0.0.1", 3013}, {noise, <<7:32/unit:8>>, "localhost", 8043}, error ]).
 
 myhost() ->
   {ok, Host} = inet:gethostname(),
   {http, Host, 3013}.
 
+%% TODO Delete?
 local_peer({http, Host, Port}) ->
   {http, LocalHost, LocalPort} = myhost(),
   Port == LocalPort andalso lists:member(Host, ["127.0.0.1", "localhost", LocalHost]).
@@ -617,5 +621,29 @@ parse(String) ->
 difficulty() ->
   elements([4.0, 5.0]).
 
-full_peer({Scheme, Host}) -> {Scheme, Host, 80};
-full_peer(Uri) -> Uri.
+
+%% SUT
+
+sut_start_link() -> ?SUT:start_link().
+sut_connect_peer(Peer) -> ?SUT:connect_peer(Peer). %% TODO Fix
+sut_sync_worker() -> ?SUT:sync_worker(). %% TODO Fix
+
+aec_peers_start_link() -> aec_peers:start_link().
+aec_peers_is_blocked(Peer) -> aec_peers:is_blocked(Peer). %% Valid, passing pubkey
+aec_peers_all() -> aec_peers:available_peers().
+aec_peers_get_random(N) -> aec_peers:get_random(N). %% Valid.
+aec_peers_get_random(N, Peers) -> aec_peers:get_random(N, Peers). %% Valid, with peers as pubkey.
+aec_peers_block_peer(Peer) -> aec_peers:block_peer(Peer).
+aec_peers_unblock_peer(Peer) -> aec_peers:unblock_peer(Peer).
+aec_peers_remove(Peer) -> aec_peers:del_peer(Peer). %% Similar as del_peer?
+
+aec_sync_schedule_ping(Peer) -> aec_sync:schedule_ping(Peer).
+
+application_set_env(aecore, peers, Peers) -> application_set_env(aecore, peers, Peers); %% Still valid.
+application_set_env(aecore, blocked_peers, Peers) -> application_set_env(aecore, blocked_peers, Peers); %% Still valid.
+application_set_env(aecore, peer_error_expiry, X) -> application_set_env(aecore, peer_error_expiry, X). %% TODO Remove, invalid.
+
+%% Model internal state
+
+peer_pubkey({noise, K, _, _}) -> K.
+peer_pubkey_host_port({noise, K, H, P}) -> #{pubkey => K, host => H, port => P}.
