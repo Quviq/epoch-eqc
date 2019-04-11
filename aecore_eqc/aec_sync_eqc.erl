@@ -21,8 +21,8 @@
 -record(state,{ aec_peers_pid
               , aec_sync_pid    %% pids of aec_sync and aec_peers processes
               , peers = []
-              , blocked = []
-              , trusted = []
+              , blocked = [] :: [{Scheme::http, Host::nonempty_string(), Port::non_neg_integer()}]
+              , trusted = [] :: [{Scheme::http, Host::nonempty_string(), Port::non_neg_integer()}]
               , queue = []
               , errored = []
               , tried_connect = []
@@ -64,28 +64,32 @@ start_peers_post(_S, _Args, Res) ->
 
 
 %% --- Operation: start ---
+
+-define(PEER, peer).
+-define(BLOCKED, blocked).
+
 %% Don't start with peers that are also blocked
 start_args(_S) ->
-  [ ?LET(Peers, list({elements([peer, blocked]), uri()}),
+  [ ?LET(Peers, list({elements([?PEER, ?BLOCKED]), uri()}),
          [ {Tag, P} || {Tag, P} <- Peers,
-                       not (Tag == blocked andalso lists:member({peer, P}, Peers))]) ].
+                       not (Tag == ?BLOCKED andalso lists:member({?PEER, P}, Peers))]) ].
 
 start(Peers) ->
-  application:set_env(aecore, peers, [ pp(Peer) || {peer, Peer} <- Peers]),
-  application:set_env(aecore, blocked_peers, [ pp(Peer) || {blocked, Peer} <- Peers]),
+  application:set_env(aecore, peers, [ pp(Peer) || {?PEER, Peer} <- Peers]),
+  application:set_env(aecore, blocked_peers, [ pp(Peer) || {?BLOCKED, Peer} <- Peers]),
   {ok, Pid} = ?SUT:start_link(),
   unlink(Pid),
   timer:sleep(100),
   Pid.
 
 start_callouts(_S, [Peers]) ->
-  ?PAR([?APPLY(connect, [ Peer ])  || {peer, Peer} <- lists:sort(Peers), Peer =/= error]).
+  ?PAR([?APPLY(connect, [ Peer ])  || {?PEER, Peer} <- lists:sort(Peers), Peer =/= error]).
 
 
 start_next(S, V, [Peers]) ->
     S#state{ aec_sync_pid = V
-           , blocked = lists:usort([ full_peer(Peer) || {blocked, Peer} <- Peers, Peer =/= error])
-           , trusted = lists:usort([ full_peer(Peer) || {peer, Peer} <- Peers, Peer =/= error, 
+           , blocked = lists:usort([ {_,_,_} = full_peer(Peer) || {?BLOCKED, Peer} <- Peers, Peer =/= error])
+           , trusted = lists:usort([ {_,_,_} = full_peer(Peer) || {?PEER, Peer} <- Peers, Peer =/= error,
                                                         not local_peer(full_peer(Peer)) ])
            }.
 
