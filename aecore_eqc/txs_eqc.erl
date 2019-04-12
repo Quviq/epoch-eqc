@@ -1549,9 +1549,8 @@ contract_call_args(#{height := Height, accounts := Accounts, contracts := Contra
                   call_data => {Func, As, UseGas}
                  }])).
 
-%% Give it ten bytes per argument, approx
 call_base_fee(As) ->
-    aec_governance:tx_base_gas(contract_call_tx) + 10000 + 10 * length(As).
+    aec_governance:tx_base_gas(contract_call_tx) + 5000 + 32 * length(As).
 
 contract_call_pre(S, [Height, {_, Sender}, {ContractTag, Contract}, Tx]) ->
     correct_height(S, Height) andalso valid_nonce(S, Sender, Tx) andalso
@@ -1721,14 +1720,7 @@ prop_txs(Fork) ->
                                    #{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
     application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
     compile_contracts(),
-    ?SETUP(
-    fun() ->
-        %% make sure we can run in eqc/aecore
-        meck:new(aec_fork_block_settings, [passthrough]),
-        meck:expect(aec_fork_block_settings, file_name,
-                        fun(R) -> "../../" ++ meck:passthrough([R]) end),
-        fun() -> meck:unload(aec_fork_block_settings) end
-    end,
+    aecore_eqc_utils:setup_data_dir(
     eqc:dont_print_counterexample(
     in_parallel(
     ?FORALL(Cmds, commands(?MODULE),
@@ -2325,3 +2317,20 @@ fake_contract_id() ->
                    abi = nat(),
                    vm = nat()
                   }).
+
+
+setup_data_dir(Prop) ->
+    %% make sure we can run in eqc/aecore_eqc
+    ?SETUP(fun() ->
+                   {ok, Dir} = file:get_cwd(),
+                   DataDir = application:get_env(setup, data_dir),
+                   case lists:reverse(filename:split(Dir)) of
+                       [_, "eqc" | _] ->
+                           application:set_env(setup, data_dir, "../../data");
+                       _ ->
+                           application:set_env(setup, data_dir, "data")
+                   end,
+                   fun() ->
+                           application:set_env(setup, data_dir, DataDir)
+                   end
+           end, Prop).
