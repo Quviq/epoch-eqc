@@ -222,45 +222,49 @@ all_command_names() ->
 %% -- Operations -------------------------------------------------------------
 
 spend(AsMeta, Height, _Sender, _Receiver, Tx) ->
-    apply_transaction(AsMeta, Height, aec_spend_tx, Tx).
+    apply_transaction(AsMeta, [], Height, aec_spend_tx, Tx).
 
 register_oracle(AsMeta, Height, _Sender, Tx) ->
-    apply_transaction(AsMeta, Height, aeo_register_tx, Tx).
+    apply_transaction(AsMeta, [], Height, aeo_register_tx, Tx).
 
 extend_oracle(AsMeta, Height, _Oracle, Tx) ->
-    apply_transaction(AsMeta, Height, aeo_extend_tx, Tx).
+    apply_transaction(AsMeta, [], Height, aeo_extend_tx, Tx).
 
 query_oracle(AsMeta, Height, _Sender, _Oracle, Tx) ->
-    apply_transaction(AsMeta, Height, aeo_query_tx, Tx).
+    apply_transaction(AsMeta, [], Height, aeo_query_tx, Tx).
 
 response_oracle(AsMeta, Height, QueryId, Tx) ->
     NewTx = response_oracle_tx(AsMeta, QueryId, Tx),
-    apply_transaction(AsMeta, Height, aeo_response_tx, NewTx).
+    apply_transaction(AsMeta, [], Height, aeo_response_tx, NewTx).
 
-response_oracle_tx(false, QueryId, Tx) ->
+response_oracle_tx(_, {_Sender, Nonce, _} = QueryId, Tx) when is_integer(Nonce) ->
     txs_eqc:response_oracle_tx(QueryId, Tx);
-response_oracle_tx(_, {_Sender, AuthId, Oracle}, Tx) ->
+response_oracle_tx(_, {_Sender, AuthId, Oracle}, Tx) when is_binary(AuthId) ->
     Tx#{query_id => aeo_query:ga_id(AuthId, Oracle)}.
 
-channel_create(AsMeta, Height, _Initiator, _Responder, Tx) ->
+channel_create(AsMeta, Height, _Initiator, Responder, Tx) ->
     NewTx = txs_eqc:channel_create_tx(Tx),
-    apply_transaction(AsMeta, Height, aesc_create_tx, NewTx).
+    apply_transaction(AsMeta, [Responder], Height, aesc_create_tx, NewTx).
 
-channel_deposit(AsMeta, Height, ChannelId, _Party, Tx) ->
-    NewTx = channel_add_id(AsMeta, ChannelId, Tx),
-    apply_transaction(AsMeta, Height, aesc_deposit_tx, NewTx).
+channel_deposit(AsMeta, Height, {In, _, Resp} = ChannelId, Party, Tx) ->
+    Signer = if Party == initiator -> Resp; true -> In end,
+    NewTx = txs_eqc:channel_deposit_tx(ChannelId, Party, channel_add_id(AsMeta, ChannelId, Tx)),
+    apply_transaction(AsMeta, [Signer], Height, aesc_deposit_tx, NewTx).
 
-channel_withdraw(AsMeta, Height, ChannelId, _Party, Tx) ->
-    NewTx = channel_add_id(AsMeta, ChannelId, Tx),
-    apply_transaction(AsMeta, Height, aesc_withdraw_tx, NewTx).
+channel_withdraw(AsMeta, Height, {In, _, Resp} = ChannelId, Party, Tx) ->
+    Signer = if Party == initiator -> Resp; true -> In end,
+    NewTx = txs_eqc:channel_withdraw_tx(ChannelId, Party, channel_add_id(AsMeta, ChannelId, Tx)),
+    apply_transaction(AsMeta, [Signer], Height, aesc_withdraw_tx, NewTx).
 
-channel_close_mutual(AsMeta, Height, ChannelId, _Party, Tx) ->
+channel_close_mutual(AsMeta, Height, {In, _, Resp} = ChannelId, Party, Tx) ->
+    Signer = if Party == initiator -> Resp; true -> In end,
     NewTx = channel_add_id(AsMeta, ChannelId, Tx),
-    apply_transaction(AsMeta, Height, aesc_close_mutual_tx, NewTx).
+    apply_transaction(AsMeta, [Signer], Height, aesc_close_mutual_tx, NewTx).
 
-channel_close_solo(AsMeta, Height, ChannelId, _Party, Tx) ->
-    NewTx = channel_add_id(AsMeta, ChannelId, Tx),
-    apply_transaction(AsMeta, Height, aesc_close_solo_tx, NewTx).
+channel_close_solo(AsMeta, Height, {_In, _, _Resp} = ChannelId, Party, Tx) ->
+    %% Signer = if Party == initiator -> maps:get(responder, Tx); true -> maps:get(initiator, Tx) end,
+    NewTx = txs_eqc:channel_close_solo_tx(ChannelId, Party, channel_add_id(AsMeta, ChannelId, Tx)),
+    apply_transaction(AsMeta, [], Height, aesc_close_solo_tx, NewTx).
 
 channel_add_id(_AsMeta, {Initiator, N, Responder}, Tx) ->
      Tx#{channel_id =>
@@ -268,31 +272,31 @@ channel_add_id(_AsMeta, {Initiator, N, Responder}, Tx) ->
 
 
 ns_preclaim(AsMeta, Height, _Sender, {_Name,_Salt}, Tx) ->
-    apply_transaction(AsMeta, Height, aens_preclaim_tx, Tx).
+    apply_transaction(AsMeta, [], Height, aens_preclaim_tx, Tx).
 
 ns_claim(AsMeta, Height, _Sender, Tx) ->
-    apply_transaction(AsMeta, Height, aens_claim_tx, Tx).
+    apply_transaction(AsMeta, [], Height, aens_claim_tx, Tx).
 
 ns_update(AsMeta, Height, _Name, _Sender, _NameAccount, Tx) ->
-    apply_transaction(AsMeta, Height, aens_update_tx, Tx).
+    apply_transaction(AsMeta, [], Height, aens_update_tx, Tx).
 
 ns_transfer(AsMeta, Height, _Sender, _Receiver, _Name, Tx) ->
-    apply_transaction(AsMeta, Height, aens_transfer_tx, Tx).
+    apply_transaction(AsMeta, [], Height, aens_transfer_tx, Tx).
 
 ns_revoke(AsMeta, Height, _Sender, _Name, Tx) ->
-    apply_transaction(AsMeta, Height, aens_revoke_tx, Tx).
+    apply_transaction(AsMeta, [], Height, aens_revoke_tx, Tx).
 
 contract_create(AsMeta, Height, {_, _Sender}, Name, CompilerVersion, Tx) ->
     NewTx =  txs_eqc:contract_create_tx(Name, CompilerVersion, Tx),
-    apply_transaction(AsMeta, Height, aect_create_tx, NewTx).
+    apply_transaction(AsMeta, [], Height, aect_create_tx, NewTx).
 
 contract_call(AsMeta, Height, _, Contract, Tx) ->
     NewTx = txs_eqc:contract_call_tx(Contract, Tx),
-    apply_transaction(AsMeta, Height, aect_call_tx, NewTx).
+    apply_transaction(AsMeta, [], Height, aect_call_tx, NewTx).
 
 ga_attach(AsMeta, Height, _, Name, CompilerVersion, Tx) ->
     NewTx = ga_attach_tx(Name, CompilerVersion, Tx),
-    apply_transaction(AsMeta, Height, aega_attach_tx, NewTx).
+    apply_transaction(AsMeta, [], Height, aega_attach_tx, NewTx).
 
 ga_attach_tx(Name, CompilerVersion, Tx) ->
     NewTx = txs_eqc:contract_create_tx(Name, CompilerVersion, Tx),
@@ -348,14 +352,15 @@ origin(response_oracle, Args) ->
     {_Sender, _Nonce, Oracle} = lists:nth(2, Args),
     Oracle;
 origin(F, Args) when F == channel_deposit; F == channel_withdraw;
-                     F == channel_close_mutual; F == channel_close_solo ->
+                     F == channel_close_mutual; F == channel_close_solo;
+                     F == channel_settle ->
     Party = lists:nth(3, Args),
     {Initiator, _, Responder} = lists:nth(2, Args),
     case Party of initiator -> Initiator; responder -> Responder end;
 origin(ns_update, Args) ->
     {_SenderTag, Sender} = lists:nth(3, Args),
     Sender;
-origin(_, Args) ->
+origin(Kind, Args) ->
     {_SenderTag, Sender} = lists:nth(2, Args),
     Sender.
 
@@ -386,13 +391,23 @@ prop_txs(Fork) ->
                                    #{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
     application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
     txs_eqc:compile_contracts(),
-    ?SETUP(
-    fun() ->
-        meck:new(aec_fork_block_settings, [passthrough]),
-        meck:expect(aec_fork_block_settings, file_name,
-                        fun(R) -> "../../" ++ meck:passthrough([R]) end),
-        fun() -> meck:unload(aec_fork_block_settings) end
-    end,
+    ?SETUP(fun() ->
+                   {ok, Dir} = file:get_cwd(),
+                   DataDir = application:get_env(setup, data_dir),
+                   case lists:reverse(filename:split(Dir)) of
+                       [_, "eqc" | _] ->
+                           application:set_env(setup, data_dir, "../../data");
+                       _ ->
+                           application:set_env(setup, data_dir, "data")
+                   end,
+                   meck:new(aetx_sign, [passthrough]),
+                   meck:expect(aetx_sign, verify,
+                               fun(_, _, _) -> ok end),
+                   fun() ->
+                           application:set_env(setup, data_dir, DataDir),
+                           meck:unload(aetx_sign)
+                   end
+           end,
     eqc:dont_print_counterexample(
     in_parallel(
     ?FORALL(Cmds, commands(?MODULE),
@@ -439,16 +454,16 @@ auth_data(Name, Nonce) ->
                                                          [integer_to_list(Nonce)]),
     CallData.
 
-apply_transaction(false, Height, Kind, Tx) ->
+apply_transaction(false, _, Height, Kind, Tx) ->
     txs_eqc:apply_transaction(Height, Kind, Tx);
-apply_transaction(GAccount, Height, Kind, Tx) ->
+apply_transaction(GAccount, Signers, Height, Kind, Tx) ->
     Nonce = GAccount#gaccount.nonce,
     Name = GAccount#gaccount.name,
     AuthData = auth_data(Name, Nonce),
     TxNonce =
         case maps:get(nonce, Tx) of
-            {good, _} -> {good, 0};
-            {bad, _}  -> {bad, 1}
+            {good, _} -> 0;
+            {bad, _}  -> 210210210
         end,
     NewTx = #{ga_id       => aeser_id:create(account, GAccount#gaccount.id),
               auth_data   => AuthData,
@@ -456,9 +471,14 @@ apply_transaction(GAccount, Height, Kind, Tx) ->
               gas         => 5000,
               gas_price   => 1000000,
               fee         => 500000 * 1000000,
-              tx          => txs_eqc:create_aetx(Kind, Tx#{nonce => TxNonce})
+              tx          => sign_aetx(Signers, Kind, Tx#{nonce => TxNonce})
              },
     txs_eqc:apply_transaction(Height, aega_meta_tx, NewTx).
+
+%% State channel transacrtions need to be signed by 2 parties
+sign_aetx(Signers, Kind, Tx) ->
+    %% Only signature length is asserted it seems
+    aetx_sign:new(txs_eqc:create_aetx(Kind, Tx), [ <<Sig/binary, Sig/binary>> || Sig <- Signers ]).
 
 
 ga_bump_and_charge(#gaccount{id = Key, nonce = Nonce} = GAccount, Fee, S) ->
