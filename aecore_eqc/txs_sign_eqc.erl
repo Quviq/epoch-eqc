@@ -11,18 +11,20 @@
 -eqc_group_commands(false).
 -define(PatronAmount, 100000000000001).  %% read from file?
 
+-define(TXS, txs_eqc).
+%%-define(TXS, txs_ga_eqc).
 
 -compile([export_all, nowarn_export_all]).
 
 
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
-    txs_eqc:initial_state().
+    ?TXS:initial_state().
 
 command(S) ->
-    ?LET(Cmd, txs_eqc:command(S),
+    ?LET(Cmd, ?TXS:command(S),
          case Cmd of
-             {call, txs_eqc, F, Args} ->
+             {call, _, F, Args} ->
                  case lists:member(F, [init, newkey, mine, multi_mine]) of
                      true -> Cmd;
                      false -> {call, ?MODULE, F, [ ?LET(Incorrect,sublist(maps:values(maps:get(keys, S, #{}))),
@@ -31,46 +33,50 @@ command(S) ->
              _ -> Cmd
          end).
 
-precondition(S, {call, txs_eqc, F, Args}) ->
-    txs_eqc:precondition(S, {call, txs_eqc, F, Args});
+
 precondition(S, {call, ?MODULE, F, [{_, Signers} | Args]}) ->
     lists:all(fun(Signer) ->
                       lists:member(Signer, maps:values(maps:get(keys, S, #{})))
               end, Signers) andalso
-        txs_eqc:precondition(S, {call, txs_eqc, F, Args}).
+        ?TXS:precondition(S, {call, ?TXS, F, Args});
+precondition(S, {call, M, F, Args}) ->
+    ?TXS:precondition(S, {call, M, F, Args}).
 
-adapt(S, {call, txs_eqc, F, Args}) ->
-    case txs_eqc:adapt(S, {call, txs_eqc, F, Args}) of
-        false -> false;
-        NewArgs ->
-            {call, txs_eqc, F, NewArgs}
-    end;
+
 adapt(S, {call, ?MODULE, F, [Signers | Args]}) ->
-    case txs_eqc:adapt(S, {call, txs_eqc, F, Args}) of
+    case ?TXS:adapt(S, {call, ?TXS, F, Args}) of
         false   -> false;
         NewArgs -> {call, ?MODULE, F, [Signers | NewArgs]}
+    end;
+adapt(S, {call, M, F, Args}) ->
+    case ?TXS:adapt(S, {call, M, F, Args}) of
+        false -> false;
+        NewArgs ->
+            {call, M, F, NewArgs}
     end.
 
-next_state(S, V, {call, txs_eqc, F, Args}) ->
-    txs_eqc:next_state(S, V, {call, txs_eqc, F, Args});
-next_state(S, V, {call, ?MODULE, F, [{correct, _Signers} | Args]}) ->
-    txs_eqc:next_state(S, V, {call, txs_eqc, F, Args});
-next_state(S, _V, {call, ?MODULE, _F, [{faulty, _Signers} | _Args]}) ->
-    S.
 
-postcondition(S, {call, txs_eqc, F, Args}, Res) ->
-    txs_eqc:postcondition(S, {call, txs_eqc, F, Args}, Res);
-postcondition(S, {call, ?MODULE, F, [{correct, _Signers} | Args]}, Res) ->
-    txs_eqc:postcondition(S, {call, txs_eqc, F, Args}, Res);
+next_state(S, _V, {call, ?MODULE, _F, [{faulty, _Signers} | _Args]}) ->
+    S;
+next_state(S, V, {call, ?MODULE, F, [{correct, _Signers} | Args]}) ->
+    ?TXS:next_state(S, V, {call, ?TXS, F, Args});
+next_state(S, V, {call, M, F, Args}) ->
+    ?TXS:next_state(S, V, {call, M, F, Args}).
+
+
 postcondition(_S, {call, ?MODULE, _F, [{faulty, _Signers} | _Args]}, Res) ->
-    eq(Res, {error, signature_check_failed}).
+    eq(Res, {error, signature_check_failed});
+postcondition(S, {call, ?MODULE, F, [{correct, _Signers} | Args]}, Res) ->
+    ?TXS:postcondition(S, {call, ?TXS, F, Args}, Res);
+postcondition(S, {call, M, F, Args}, Res) ->
+    ?TXS:postcondition(S, {call, M, F, Args}, Res).
 
 call_features(S, {call, txs_eqc, F, Args}, Res) ->
     txs_eqc:call_features(S, {call, txs_eqc, F, Args}, Res);
 call_features(S, {call, ?MODULE, F, [{correct, _Signers} | Args]}, Res) ->
     txs_eqc:call_features(S, {call, txs_eqc, F, Args}, Res);
-call_features(_S, {call, ?MODULE, _, [{faulty, _Signers} | _Args]}, Res) ->
-    [{correct, false}, {spend, Res}].
+call_features(_S, {call, ?MODULE, F, [{faulty, _Signers} | _Args]}, Res) ->
+    [{correct, false}, {F, Res}].
 
 
 all_command_names() ->
@@ -261,9 +267,6 @@ prop_txs(Fork) ->
 
 %% -----
 
-%% apply_transaction(Signers, Height, Kind, Tx) ->
-%%     io:format("Signing with ~p\n", [Signers]),
-%%     txs_eqc:apply_transaction(Height, Kind, Tx);
 apply_transaction({_Tag, Signers}, Height, Kind, Tx) ->
     Env      = aetx_env:tx_env(Height),
     Trees    = get(trees),
