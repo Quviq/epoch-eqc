@@ -58,7 +58,7 @@ command_precondition_common(_S, _Cmd) ->
 precondition_common(_S, _Call) ->
     true.
 
-postcondition_common(S, {call, ?MODULE, newkey, Args}, Res) ->
+postcondition_common(_S, {call, ?MODULE, newkey, _Args}, _Res) ->
     true;
 postcondition_common(S, {call, ?MODULE, Fun, Args}, Res) ->
     Correct = valid_common(Fun, S, Args),
@@ -1654,7 +1654,7 @@ contract_call_features(S, [Height, {_, _Sender}, {_ContractTag, Contract}, Tx] =
 
 %% -- Property ---------------------------------------------------------------
 weight(_S, spend) -> 10;
-weight(S, newkey) -> max(1, 10 - maps:size(maps:get(keys, S)));
+weight(S, newkey) -> max(1, 5 - maps:size(maps:get(keys, S)));
 weight(S, mine)  ->
     case maps:get(preclaims, S, []) of
         [] -> 1;
