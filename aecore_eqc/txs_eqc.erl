@@ -17,7 +17,6 @@
 -include_lib("eqc/include/eqc_statem.hrl").
 
 -compile([export_all, nowarn_export_all]).
--define(Patron, <<1, 1, 0:240>>).
 -define(PatronAmount, 100000000000001).  %% read from file
 -define(NAMEFRAGS, ["foo", "bar", "baz"]).
 
@@ -36,7 +35,18 @@ initial_state(Contracts) ->
     maps:put(compiled_contracts, Contracts, initial_state()).
 
 patron() ->
-    {?Patron, ?PatronAmount}.
+    #{ public := Pubkey, secret := Privkey } =
+                     #{public =>
+                           <<227,81,22,143,182,219,118,194,214,164,169,153,6,190,90,
+                             72,72,11,74,195,160,239,10,12,98,144,86,254,51,110,216,
+                             22>>,
+                       secret =>
+                           <<156,127,9,241,107,48,249,188,92,91,80,218,172,41,140,
+                             147,102,228,17,21,148,192,27,47,228,212,93,153,220,174,
+                             52,19,227,81,22,143,182,219,118,194,214,164,169,153,6,
+                             190,90,72,72,11,74,195,160,239,10,12,98,144,86,254,51,
+                             110,216,22>>},
+    {Pubkey, Privkey, ?PatronAmount}.
 
 minimum_gas_price(H) ->
     aec_governance:minimum_gas_price(H).
@@ -95,13 +105,14 @@ init(_Height) ->
     ok.
 
 initial_trees() ->
-    {PA, PAmount} = patron(),
+    {PA, _Secret, PAmount} = patron(),
     trees_with_accounts([{account, PA, PAmount}]).
 
 init_next(S, _Value, [Height]) ->
-    {PA, PAmount} = patron(),
+    {PA, Secret, PAmount} = patron(),
     S#{height   => Height,
-       accounts => [#account{key = PA, amount = PAmount, nonce = 1}]}.
+       accounts => [#account{key = PA, amount = PAmount, nonce = 1}],
+       keys => #{PA => Secret}}.
 
 %% --- Operation: mine ---
 mine_pre(S) ->
@@ -443,14 +454,13 @@ query_oracle_features(S, [_Height, _, _, _Tx] = Args, Res) ->
 response_oracle_pre(S) ->
      maps:get(queries, S, []) =/= [].
 
-%% Only responses to existing query tested for the moment, no fault injection
 response_oracle_args(#{accounts := Accounts, height := Height} = S) ->
      ?LET({Sender, Nonce, Oracle} = QueryId,
-           frequency([{99, ?LET(Query, elements(maps:get(queries, S)), Query#query.id)},
-                      {1, {?Patron, 2, ?Patron}}]),
+           frequency([{9, ?LET(Query, elements(maps:get(queries, S)), Query#query.id)},
+                      {1, {gen_map_key(maps:get(keys, S)), 2, gen_map_key(maps:get(keys, S))}}]),
           [Height, {Sender, Nonce, Oracle},
            #{oracle_id => aeser_id:create(oracle, Oracle),
-             response => <<"yes, you can">>,
+             response => weighted_default({9, <<"yes, you can">>}, {1, utf8()}),
              response_ttl => gen_query_response_ttl(S, QueryId),
              fee => gen_fee(Height),
              nonce => case lists:keyfind(Oracle, #account.key, Accounts) of
@@ -1137,7 +1147,6 @@ ns_claim_pre(S) ->
     maps:is_key(accounts, S) andalso maps:get(preclaims, S, []) /= [].
 
 %% @doc ns_claim_args - Argument generator
--spec ns_claim_args(S :: eqc_statem:symbolic_state()) -> eqc_gen:gen([term()]).
 ns_claim_args(S = #{height := Height}) ->
      ?LET({Name, Salt, {SenderTag, Sender}}, gen_preclaim(S),
           [Height, {SenderTag, Sender#account.key},
@@ -2126,10 +2135,6 @@ gen_new_oracle_account(S = #{accounts := As}) ->
                              {1,  gen_account(1, 9, As)})
     end.
 
-gen_account_pubkey(Accounts) ->
-    oneof([?LAZY({existing, elements(Accounts)}),
-           ?LAZY({new, gen_account()})]).
-
 gen_preclaim(#{preclaims := [], accounts := As}) ->
     {gen_name(), gen_salt(), gen_account(1, 1, As)};
 gen_preclaim(#{preclaims := Ps, accounts := As}) ->
@@ -2314,9 +2319,12 @@ gen_contract_id(Invalid, Valid, Contracts) ->
                      },
                      {Invalid, {invalid, fake_contract_id()}}).
 
+gen_map_key(Map) ->
+    elements(maps:keys(Map)).
+
 fake_contract_id() ->
-    ?LET(A, gen_account(),
-         #contract{id = aect_contracts:compute_contract_pubkey(A#account.key, 12),
+    ?LET(Pubkey, noshrink(binary(32)),
+         #contract{id = aect_contracts:compute_contract_pubkey(Pubkey, 12),
                    abi = nat(),
                    vm = nat()
                   }).
