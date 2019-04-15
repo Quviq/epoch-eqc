@@ -31,14 +31,6 @@ command(S) ->
              _ -> Cmd
          end).
 
-gen_signers(Correct, Incorrect) ->
-    case lists:sort(Correct) == lists:sort(Incorrect) of
-        true ->
-            {correct, Correct};
-        false ->
-           weighted_default({99, {correct, Correct}}, {1, {faulty, Incorrect}})
-    end.
-
 precondition(S, {call, txs_eqc, F, Args}) ->
     txs_eqc:precondition(S, {call, txs_eqc, F, Args});
 precondition(S, {call, ?MODULE, F, [{_, Signers} | Args]}) ->
@@ -118,6 +110,10 @@ channel_close_mutual(Signers, Height, ChannelId, _Party, Tx) ->
     NewTx = channel_add_id(ChannelId, Tx),
     apply_transaction(Signers, Height, aesc_close_mutual_tx, NewTx).
 
+channel_settle(Signers, Height, ChannelId, _Party, Tx) ->
+    NewTx = channel_add_id(ChannelId, Tx),
+    apply_transaction(Signers, Height, aesc_settle_tx, NewTx).
+
 %% Describe this channel_id trick!
 channel_close_solo(Signers, Height, ChannelId, Party, Tx) ->
     NewTx = txs_eqc:channel_close_solo_tx(ChannelId, Party, channel_add_id(ChannelId, Tx)),
@@ -151,27 +147,62 @@ contract_call(Signers, Height, _, Contract, Tx) ->
     apply_transaction(Signers, Height, aect_call_tx, NewTx).
 
 
-origin(F, Args) when F == extend_oracle; F == channel_create ->
-    lists:nth(2, Args);
-origin(response_oracle, Args) ->
+%%% helper functions
+
+gen_signers(Correct, Incorrect) ->
+    case lists:sort(Correct) == lists:sort(Incorrect) of
+        true ->
+            {correct, Correct};
+        false ->
+           weighted_default({99, {correct, Correct}}, {1, {faulty, Incorrect}})
+    end.
+
+%% origin(F, Args) when F == extend_oracle; F == channel_create ->
+%%     lists:nth(2, Args);
+%% origin(response_oracle, Args) ->
+%%     {_Sender, _Nonce, Oracle} = lists:nth(2, Args),
+%%     Oracle;
+%% origin(F, Args) when F == channel_deposit; F == channel_withdraw;
+%%                      F == channel_close_mutual; F == channel_close_solo;
+%%                      F == channel_settle ->
+%%     Party = lists:nth(3, Args),
+%%     {Initiator, _, Responder} = lists:nth(2, Args),
+%%     case Party of initiator -> Initiator; responder -> Responder end;
+%% origin(ns_update, Args) ->
+%%     {_SenderTag, Sender} = lists:nth(3, Args),
+%%     Sender;
+%% origin(_Kind, Args) ->
+%%     {_SenderTag, Sender} = lists:nth(2, Args),
+%%     Sender.
+
+signers(F, Args) when F == extend_oracle ->
+    [lists:nth(2, Args)];
+signers(F, Args) when F == channel_create  ->
+    [lists:nth(2, Args), lists:nth(3, Args)];
+signers(response_oracle, Args) ->
     {_Sender, _Nonce, Oracle} = lists:nth(2, Args),
-    Oracle;
-origin(F, Args) when F == channel_deposit; F == channel_withdraw;
+    [Oracle];
+signers(F, Args) when F == channel_deposit; F == channel_withdraw;
                      F == channel_close_mutual; F == channel_close_solo;
                      F == channel_settle ->
     Party = lists:nth(3, Args),
     {Initiator, _, Responder} = lists:nth(2, Args),
-    case Party of initiator -> Initiator; responder -> Responder end;
-origin(ns_update, Args) ->
+    Sender = case Party of initiator -> Initiator; responder -> Responder end,
+    case F of
+        channel_close_solo -> [Sender];
+        _ -> [Initiator, Responder]
+    end;
+signers(ns_update, Args) ->
     {_SenderTag, Sender} = lists:nth(3, Args),
-    Sender;
-origin(_Kind, Args) ->
+    [Sender];
+signers(Kind, Args) ->
+    %% io:format("Kind ~p ~p\n", [Kind, Args]),
     {_SenderTag, Sender} = lists:nth(2, Args),
-    Sender.
+    [Sender].
+
 
 signers(S, F, Args) ->
-    Origin = origin(F, Args),
-    [maps:get(Origin, maps:get(keys, S))].
+    [maps:get(Signer, maps:get(keys, S)) || Signer <- signers(F, Args)].
 
 
 %% -- Property ---------------------------------------------------------------
