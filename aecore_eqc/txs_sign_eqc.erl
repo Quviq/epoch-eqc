@@ -63,7 +63,7 @@ postcondition(S, {call, txs_eqc, F, Args}, Res) ->
 postcondition(S, {call, ?MODULE, F, [{correct, _Signers} | Args]}, Res) ->
     txs_eqc:postcondition(S, {call, txs_eqc, F, Args}, Res);
 postcondition(_S, {call, ?MODULE, _F, [{faulty, _Signers} | _Args]}, Res) ->
-    eq(Res, {error, signatures}).
+    eq(Res, {error, signature_check_failed}).
 
 call_features(S, {call, txs_eqc, F, Args}, Res) ->
     txs_eqc:call_features(S, {call, txs_eqc, F, Args}, Res);
@@ -190,13 +190,14 @@ signers(F, Args) when F == channel_deposit; F == channel_withdraw;
     Sender = case Party of initiator -> Initiator; responder -> Responder end,
     case F of
         channel_close_solo -> [Sender];
+        channel_settle -> [Sender];
         _ -> [Initiator, Responder]
     end;
 signers(ns_update, Args) ->
     {_SenderTag, Sender} = lists:nth(3, Args),
     [Sender];
-signers(Kind, Args) ->
-    %% io:format("Kind ~p ~p\n", [Kind, Args]),
+signers(_Kind, Args) ->
+    %% io:format("Kind ~p ~p\n", [_Kind, Args]),
     {_SenderTag, Sender} = lists:nth(2, Args),
     [Sender].
 
@@ -270,7 +271,8 @@ apply_transaction({_Tag, Signers}, Height, Kind, Tx) ->
     BinTx = aec_governance:add_network_id(aetx:serialize_to_binary(AeTx)),
     Signatures = [ enacl:sign_detached(BinTx, Signer) || Signer <- Signers ],
     SignedTx = aetx_sign:new(AeTx, Signatures),
-    case aec_trees:apply_txs_on_state_trees([SignedTx], Trees, Env) of
+    %% When we use strict, we see errors returned, otherwise only invalid txs returned
+    case aec_trees:apply_txs_on_state_trees_strict([SignedTx], Trees, Env) of
         {ok, _ValidTxs, InvalidTxs, NewTrees, _} ->
             put(trees, NewTrees),
             case InvalidTxs of
