@@ -2112,12 +2112,12 @@ trees_with_accounts([{account, Acc, Amount}|Rest], Trees) ->
 %% -- Generators -------------------------------------------------------------
 
 
-gen_account(_, _, []) -> {new, gen_account()};
+gen_account(_, _, []) -> gen_account();
 gen_account(New, Exist, Accounts) ->
     weighted_default({Exist, {existing, elements(Accounts)}},
-                     {New,   {new, gen_account()}}).
+                     {New,   gen_account()}).
 
-gen_account() ->  #account{key = noshrink(binary(32)), amount = 0, nonce = 0 }.
+gen_account() ->  {new, #account{key = noshrink(binary(32)), amount = 0, nonce = 0 }}.
 
 gen_oracle_account(#{accounts := As, oracles := []}) ->
     gen_account(1, 1, As);
