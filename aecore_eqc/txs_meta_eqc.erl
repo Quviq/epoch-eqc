@@ -63,6 +63,7 @@ precondition(S, {call, ?MODULE, ga_attach, [AsMeta, Height, {_, Sender}, _, _, T
         txs_eqc:correct_height(S, Height) andalso txs_eqc:valid_nonce(S, Sender, Tx);
 precondition(S, {call, ?MODULE, F, [AsMeta | Args]}) ->
     (AsMeta == false orelse lists:member(AsMeta, maps:get(gaccounts, S))) andalso
+         lists:member(F, [spend, register_oracle, extend_oracle, query_oracle, response_oracle]) andalso
         txs_eqc:precondition(S, {call, txs_eqc, F, Args}).
 
 adapt(S, {call, txs_eqc, F, Args}) ->
@@ -126,10 +127,18 @@ next_state(S, V, {call, ?MODULE, F, [GAccount | Args]}) ->
             AuthData = auth_data(GAccount#gaccount.name, GAccount#gaccount.nonce),
             AuthS = txs_eqc:reserve_fee(AuthFee,
                                         ga_bump_and_charge(GAccount, AuthFee, S)),
-            case is_meta_valid(S, GAccount, F, Args) of
+            case  is_meta_valid(S, GAccount, F, Args) of %% GAccount#gaccount.id == origin(F, Args) of
                 false ->
-                    AuthS;
+                    %% If signature of inner Tx is correct, we apply transaction.
+                    %% Implement some kind of check here
+                    %% AuthS;
+                    case lists:member(F, [ga_attach]) of
+                        true ->
+                            AuthS;
+                        false -> next_state(AuthS, V, {call, ?MODULE, F, [false | Args]})
+                    end;
                 true ->
+                    %% GA account is origin... update
                     NewS = txs_eqc:next_state(AuthS, V, {call, txs_eqc, F, Args}),
                     case AuthS == NewS of
                         true -> NewS;
@@ -221,17 +230,17 @@ all_command_names() ->
 
 %% -- Operations -------------------------------------------------------------
 
-spend(AsMeta, Height, _Sender, _Receiver, Tx) ->
-    apply_transaction(AsMeta, [], Height, aec_spend_tx, Tx).
+spend(AsMeta, Height, {_, Sender}, _Receiver, Tx) ->
+    apply_transaction(AsMeta, [{origin, Sender}], Height, aec_spend_tx, Tx).
 
-register_oracle(AsMeta, Height, _Sender, Tx) ->
-    apply_transaction(AsMeta, [], Height, aeo_register_tx, Tx).
+register_oracle(AsMeta, Height, {_, Sender}, Tx) ->
+    apply_transaction(AsMeta, [{origin, Sender}], Height, aeo_register_tx, Tx).
 
 extend_oracle(AsMeta, Height, _Oracle, Tx) ->
     apply_transaction(AsMeta, [], Height, aeo_extend_tx, Tx).
 
-query_oracle(AsMeta, Height, _Sender, _Oracle, Tx) ->
-    apply_transaction(AsMeta, [], Height, aeo_query_tx, Tx).
+query_oracle(AsMeta, Height, {_, Sender}, _Oracle, Tx) ->
+    apply_transaction(AsMeta, [{origin, Sender}], Height, aeo_query_tx, Tx).
 
 response_oracle(AsMeta, Height, QueryId, Tx) ->
     NewTx = response_oracle_tx(AsMeta, QueryId, Tx),
@@ -242,9 +251,9 @@ response_oracle_tx(_, {_Sender, Nonce, _} = QueryId, Tx) when is_integer(Nonce) 
 response_oracle_tx(_, {_Sender, AuthId, Oracle}, Tx) when is_binary(AuthId) ->
     Tx#{query_id => aeo_query:ga_id(AuthId, Oracle)}.
 
-channel_create(AsMeta, Height, _Initiator, Responder, Tx) ->
+channel_create(AsMeta, Height, Initiator, Responder, Tx) ->
     NewTx = txs_eqc:channel_create_tx(Tx),
-    apply_transaction(AsMeta, [Responder], Height, aesc_create_tx, NewTx).
+    apply_transaction(AsMeta, [{origin, Initiator}, Responder], Height, aesc_create_tx, NewTx).
 
 channel_deposit(AsMeta, Height, {In, _, Resp} = ChannelId, Party, Tx) ->
     Signer = if Party == initiator -> Resp; true -> In end,
@@ -283,12 +292,12 @@ ns_update(AsMeta, Height, _Name, _Sender, _NameAccount, Tx) ->
 ns_transfer(AsMeta, Height, _Sender, _Receiver, _Name, Tx) ->
     apply_transaction(AsMeta, [], Height, aens_transfer_tx, Tx).
 
-ns_revoke(AsMeta, Height, _Sender, _Name, Tx) ->
-    apply_transaction(AsMeta, [], Height, aens_revoke_tx, Tx).
+ns_revoke(AsMeta, Height, {_, Sender}, _Name, Tx) ->
+    apply_transaction(AsMeta, [Sender], Height, aens_revoke_tx, Tx).
 
-contract_create(AsMeta, Height, {_, _Sender}, Name, CompilerVersion, Tx) ->
+contract_create(AsMeta, Height, {_, Sender}, Name, CompilerVersion, Tx) ->
     NewTx =  txs_eqc:contract_create_tx(Name, CompilerVersion, Tx),
-    apply_transaction(AsMeta, [], Height, aect_create_tx, NewTx).
+    apply_transaction(AsMeta, [Sender], Height, aect_create_tx, NewTx).
 
 contract_call(AsMeta, Height, _, Contract, Tx) ->
     NewTx = txs_eqc:contract_call_tx(Contract, Tx),
@@ -364,6 +373,12 @@ origin(Kind, Args) ->
     {_SenderTag, Sender} = lists:nth(2, Args),
     Sender.
 
+
+%% is_meta_valid(S, _, F, Args) ->
+%%     true;
+%% This seems no longer the case, it suffices if the inner transaction is correctly signed
+
+%% Not a generalized account orelse must be signer of inner transaction
 is_meta_valid(S, false, F, Args) ->
     Origin = origin(F, Args),
     not lists:keymember(Origin, #gaccount.id, maps:get(gaccounts, S));
@@ -402,7 +417,8 @@ prop_txs(Fork) ->
                    end,
                    meck:new(aetx_sign, [passthrough]),
                    meck:expect(aetx_sign, verify,
-                               fun(_, _, _) -> ok end),
+                               fun({signed_tx, _, Signers}, _, C) -> %% io:format(user,"mecking ~p ~p\n", [Signers, C]),
+                                       ok end),
                    fun() ->
                            application:set_env(setup, data_dir, DataDir),
                            meck:unload(aetx_sign)
@@ -459,11 +475,17 @@ apply_transaction(false, _, Height, Kind, Tx) ->
 apply_transaction(GAccount, Signers, Height, Kind, Tx) ->
     Nonce = GAccount#gaccount.nonce,
     Name = GAccount#gaccount.name,
+    %% Make signers contain the origin as well! Then nonce change related to whether origin a Gaccount or not.
     AuthData = auth_data(Name, Nonce),
+    Origin = [ PubKey || {origin, PubKey} <- Signers ],
+    ActualSigners = Origin ++ [ PubKey || PubKey <- Signers, is_binary(PubKey) ],
     TxNonce =
-        case maps:get(nonce, Tx) of
-            {good, _} -> 0;
-            {bad, _}  -> 210210210
+        case {Origin, maps:get(nonce, Tx)} of
+            {[PK], {_, N}} when PK =/= GAccount#gaccount.id -> N;
+            {_, {good, N}} -> 0;
+            {_, {bad, _}}  -> 2010102 %% one should not be able to post a signed tx with bad nonce and get fee subtracted
+                              %% make a test case replay attack as well as too high nonce.
+
         end,
     NewTx = #{ga_id       => aeser_id:create(account, GAccount#gaccount.id),
               auth_data   => AuthData,
@@ -471,7 +493,7 @@ apply_transaction(GAccount, Signers, Height, Kind, Tx) ->
               gas         => 5000,
               gas_price   => 1000000,
               fee         => 500000 * 1000000,
-              tx          => sign_aetx(Signers, Kind, Tx#{nonce => TxNonce})
+              tx          => sign_aetx(ActualSigners, Kind, Tx#{nonce => TxNonce})
              },
     txs_eqc:apply_transaction(Height, aega_meta_tx, NewTx).
 
