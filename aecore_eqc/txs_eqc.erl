@@ -17,7 +17,6 @@
 -include_lib("eqc/include/eqc_statem.hrl").
 
 -compile([export_all, nowarn_export_all]).
--define(Patron, <<1, 1, 0:240>>).
 -define(PatronAmount, 100000000000001).  %% read from file
 -define(NAMEFRAGS, ["foo", "bar", "baz"]).
 
@@ -30,13 +29,24 @@
 
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
-    #{claims => [], preclaims => [], oracles => [], fees => [], contracts => [], gaccounts => []}.
+    #{claims => [], preclaims => [], oracles => [], fees => [], contracts => [], gaccounts => [], keys => #{}}.
 
 initial_state(Contracts) ->
     maps:put(compiled_contracts, Contracts, initial_state()).
 
 patron() ->
-    {?Patron, ?PatronAmount}.
+    #{ public := Pubkey, secret := Privkey } =
+                     #{public =>
+                           <<227,81,22,143,182,219,118,194,214,164,169,153,6,190,90,
+                             72,72,11,74,195,160,239,10,12,98,144,86,254,51,110,216,
+                             22>>,
+                       secret =>
+                           <<156,127,9,241,107,48,249,188,92,91,80,218,172,41,140,
+                             147,102,228,17,21,148,192,27,47,228,212,93,153,220,174,
+                             52,19,227,81,22,143,182,219,118,194,214,164,169,153,6,
+                             190,90,72,72,11,74,195,160,239,10,12,98,144,86,254,51,
+                             110,216,22>>},
+    {Pubkey, Privkey, ?PatronAmount}.
 
 minimum_gas_price(H) ->
     aec_governance:minimum_gas_price(H).
@@ -48,6 +58,8 @@ command_precondition_common(_S, _Cmd) ->
 precondition_common(_S, _Call) ->
     true.
 
+postcondition_common(_S, {call, ?MODULE, newkey, _Args}, _Res) ->
+    true;
 postcondition_common(S, {call, ?MODULE, Fun, Args}, Res) ->
     Correct = valid_common(Fun, S, Args),
     case Res of
@@ -95,13 +107,25 @@ init(_Height) ->
     ok.
 
 initial_trees() ->
-    {PA, PAmount} = patron(),
+    {PA, _Secret, PAmount} = patron(),
     trees_with_accounts([{account, PA, PAmount}]).
 
 init_next(S, _Value, [Height]) ->
-    {PA, PAmount} = patron(),
+    {PA, Secret, PAmount} = patron(),
     S#{height   => Height,
-       accounts => [#account{key = PA, amount = PAmount, nonce = 1}]}.
+       accounts => [#account{key = PA, amount = PAmount, nonce = 1}],
+       keys => maps:put(PA, Secret, maps:get(keys, S))}.
+
+%% --- Operation: init ---
+newkey_args(_S) ->
+    #{ public := Pubkey, secret := Privkey } = enacl:sign_keypair(),
+    [Pubkey, Privkey].
+
+newkey(PubKey, _) ->
+    PubKey.
+
+newkey_next(S, Value, [_Pubkey, Privkey]) ->
+    S#{keys => maps:put(Value, Privkey, maps:get(keys, S))}.
 
 %% --- Operation: mine ---
 mine_pre(S) ->
@@ -196,9 +220,9 @@ multi_mine_features(S, [H, B], _Res) ->
 spend_pre(S) ->
     maps:is_key(accounts, S).
 
-spend_args(#{accounts := Accounts, height := Height} = S) ->
+spend_args(#{height := Height} = S) ->
     ?LET({{SenderTag, Sender}, {ReceiverTag, Receiver}},
-         {gen_account(1, 49, Accounts), gen_account(2, 1, Accounts)},
+         {gen_account(1, 49, S), gen_account(2, 1, S)},
          ?LET(To,
                oneof([account,
                       {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++ [<<"ta.test">>])}]),
@@ -374,9 +398,9 @@ extend_oracle_features(S, [_Height, _, _Tx] = Args, Res) ->
 query_oracle_pre(S) ->
      maps:is_key(accounts, S).
 
-query_oracle_args(S = #{accounts := Accounts, height := Height}) ->
+query_oracle_args(#{height := Height} = S) ->
      ?LET({{SenderTag, Sender}, {_, Oracle}},
-          {gen_account(1, 49, Accounts), gen_oracle_account(S)},
+          {gen_account(1, 49, S), gen_oracle_account(S)},
           begin
               QFee = case oracle(S, Oracle#account.key) of
                        false -> 100;
@@ -443,14 +467,13 @@ query_oracle_features(S, [_Height, _, _, _Tx] = Args, Res) ->
 response_oracle_pre(S) ->
      maps:get(queries, S, []) =/= [].
 
-%% Only responses to existing query tested for the moment, no fault injection
 response_oracle_args(#{accounts := Accounts, height := Height} = S) ->
      ?LET({Sender, Nonce, Oracle} = QueryId,
-           frequency([{99, ?LET(Query, elements(maps:get(queries, S)), Query#query.id)},
-                      {1, {?Patron, 2, ?Patron}}]),
+           frequency([{9, ?LET(Query, elements(maps:get(queries, S)), Query#query.id)},
+                      {1, {gen_map_key(maps:get(keys, S)), 2, gen_map_key(maps:get(keys, S))}}]),
           [Height, {Sender, Nonce, Oracle},
            #{oracle_id => aeser_id:create(oracle, Oracle),
-             response => <<"yes, you can">>,
+             response => weighted_default({9, <<"yes, you can">>}, {1, utf8()}),
              response_ttl => gen_query_response_ttl(S, QueryId),
              fee => gen_fee(Height),
              nonce => case lists:keyfind(Oracle, #account.key, Accounts) of
@@ -515,9 +538,9 @@ channel_create_pre(S) ->
     maps:get(height, S, 0) >= 1 andalso
     length(maps:get(accounts, S, [])) > 1.
 
-channel_create_args(#{accounts := Accounts, height := Height}) ->
+channel_create_args(#{height := Height} = S) ->
      ?LET([{_, Initiator}, {_, Responder}],
-          vector(2, gen_account(1, 49, Accounts)),
+          vector(2, gen_account(1, 49, S)),
      ?LET({IAmount, RAmount, ChannelReserve}, gen_create_channel_amounts(Height),
           [Height, Initiator#account.key, Responder#account.key,
                 #{initiator_id => aeser_id:create(account, Initiator#account.key),
@@ -1080,9 +1103,9 @@ channel_settle_features(S, [_Height, _Channeld, _Party, _Tx] = Args, Res) ->
 ns_preclaim_pre(S) ->
     maps:is_key(accounts, S).
 
-ns_preclaim_args(#{accounts := Accounts, height := Height}) ->
+ns_preclaim_args(#{height := Height} = S) ->
      ?LET([{SenderTag, Sender}, Name, Salt],
-          [gen_account(1, 49, Accounts), gen_name(), gen_salt()],
+          [gen_account(1, 49, S), gen_name(), gen_salt()],
           [Height, {SenderTag, Sender#account.key}, {Name, Salt},
            #{account_id => aeser_id:create(account, Sender#account.key),
              fee => gen_fee(Height),
@@ -1137,7 +1160,6 @@ ns_claim_pre(S) ->
     maps:is_key(accounts, S) andalso maps:get(preclaims, S, []) /= [].
 
 %% @doc ns_claim_args - Argument generator
--spec ns_claim_args(S :: eqc_statem:symbolic_state()) -> eqc_gen:gen([term()]).
 ns_claim_args(S = #{height := Height}) ->
      ?LET({Name, Salt, {SenderTag, Sender}}, gen_preclaim(S),
           [Height, {SenderTag, Sender#account.key},
@@ -1213,9 +1235,9 @@ ns_claim_features(S, [Height, {_, _Sender}, Tx] = Args, Res) ->
 ns_update_pre(S) ->
     maps:is_key(accounts, S).
 
-ns_update_args(#{accounts := Accounts, height := Height} = S) ->
+ns_update_args(#{height := Height} = S) ->
      ?LET({{Name, {SenderTag, Sender}}, {Tag, NameAccount}},
-          {gen_name_claim(S), gen_account(1, 5, Accounts)},
+          {gen_name_claim(S), gen_account(1, 5, S)},
           [Height, Name, {SenderTag, Sender#account.key}, {Tag, NameAccount#account.key},
            #{account_id => aeser_id:create(account, Sender#account.key),
              name_id => aeser_id:create(name, aens_hash:name_hash(Name)),
@@ -1224,14 +1246,14 @@ ns_update_args(#{accounts := Accounts, height := Height} = S) ->
              fee => gen_fee(Height),
              nonce => gen_nonce(Sender),
              pointers =>
-                 gen_pointers(Accounts, aeser_id:create(account, NameAccount#account.key))
+                 gen_pointers(S, aeser_id:create(account, NameAccount#account.key))
             }]).
 
-gen_pointers(Accounts, Id) ->
+gen_pointers(S, Id) ->
     frequency([
         {3, [aens_pointer:new(<<"account_pubkey">>, Id)]},
         {1, [aens_pointer:new(<<"account_pubkey">>, Id),
-             ?LET({_, Acc}, gen_account(1, 49, Accounts),
+             ?LET({_, Acc}, gen_account(1, 49, S),
                   aens_pointer:new(<<"account_pubkey">>, aeser_id:create(account, Acc#account.key)))]},
             %% if there are more than one accounts with same key, node seems to take the first one
         {1, []}]).
@@ -1336,9 +1358,9 @@ ns_revoke_features(S, [Height, {_SenderTag, Sender}, Name, _Tx] = Args, Res) ->
 ns_transfer_pre(S) ->
     maps:is_key(accounts, S).
 
-ns_transfer_args(#{accounts := Accounts, height := Height} = S) ->
+ns_transfer_args(#{height := Height} = S) ->
     ?LET({{Name, {SenderTag, Sender}}, {ReceiverTag, Receiver}},
-         {gen_name_claim(S), gen_account(1, 49, Accounts)},
+         {gen_name_claim(S), gen_account(1, 49, S)},
          ?LET(To, oneof([account, {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++ [<<"ta.test">>])}]),
               [Height, {SenderTag, Sender#account.key},
                case To of
@@ -1412,8 +1434,8 @@ contract_create_pre(S) ->
     maps:is_key(accounts, S) andalso maps:get(height, S) > 0.
 
 
-contract_create_args(#{height := Height, accounts := Accounts}) ->
-     ?LET({SenderTag, Sender}, gen_account(1, 100, Accounts),
+contract_create_args(#{height := Height} = S) ->
+     ?LET({SenderTag, Sender}, gen_account(1, 100, S),
           ?LET(Name, gen_contract(),
                begin
                    #{gasfun := GasFun, basefee := Fixed} = contract(Name),
@@ -1477,6 +1499,8 @@ contract_create_tx(Name, CompilerVersion, Tx) ->
                                        end, Tx),
     NTx#{code => Code, call_data => CallData}.
 
+%% Since the nonce is part of the contract ID, shrinking a contract create could possibly work, but then it will
+%% no longer be called by a contract call, since the create ID has changed!
 contract_create_next(S, _Value, [Height, {_, Sender}, Name,
                                  CompilerVersion, Tx] = Args) ->
     case contract_create_valid(S, Args) of
@@ -1487,7 +1511,7 @@ contract_create_next(S, _Value, [Height, {_, Sender}, Name,
                deposit := Deposit, gas := Gas, vm_version := Vm, abi_version := Abi} = Tx,
             case Gas >= GasFun(Height) of
                 true ->
-                    ContractId = aect_contracts:compute_contract_pubkey(Sender, maps:get(nonce, untag_nonce(Tx))),
+                    ContractId = {call, aect_contracts, compute_contract_pubkey, [Sender, maps:get(nonce, untag_nonce(Tx))]},
                     reserve_fee(Fee + GasFun(Height) * GasPrice,
                                 bump_and_charge(Sender,
                                                 Fee + GasFun(Height) * GasPrice + Amount + Deposit,
@@ -1526,9 +1550,9 @@ contract_call_pre(S) ->
 %% I would expect vm_version to be present either in ct_version form or as separate key
 %% But not so in aect_call_tx
 %% Most likely determined by the contract's VM version!
-contract_call_args(#{height := Height, accounts := Accounts, contracts := Contracts}) ->
+contract_call_args(#{height := Height, contracts := Contracts} = S) ->
      ?LET([{SenderTag, Sender}, {ContractTag, Contract}],
-          [gen_account(1, 100, Accounts), gen_contract_id(1, 100, Contracts)],
+          [gen_account(1, 100, S), gen_contract_id(1, 100, Contracts)],
           ?LET({Func, As, UseGas, _},
                case ContractTag of
                    invalid -> {<<"main">>, [], 1, <<>>};
@@ -1539,7 +1563,7 @@ contract_call_args(#{height := Height, accounts := Accounts, contracts := Contra
                   contract_id =>
                       case ContractTag of
                           {name, Name} -> aeser_id:create(name, aens_hash:name_hash(Name));
-                          _ -> aeser_id:create(contract, Contract#contract.id)
+                          _ -> aeser_id:create(contract, Contract#contract.id)   %% handles symbolic calls!
                       end,
                   abi_version => weighted_default({49, Contract#contract.abi}, {1, elements([0,3])}),
                   fee => gen_fee_above(Height, call_base_fee(As)),
@@ -1630,6 +1654,7 @@ contract_call_features(S, [Height, {_, _Sender}, {_ContractTag, Contract}, Tx] =
 
 %% -- Property ---------------------------------------------------------------
 weight(_S, spend) -> 10;
+weight(S, newkey) -> max(1, 5 - maps:size(maps:get(keys, S)));
 weight(S, mine)  ->
     case maps:get(preclaims, S, []) of
         [] -> 1;
@@ -2008,7 +2033,7 @@ adapt_poi(Channel, Tx) ->
         {valid, _} ->
             Tx#{poi => Channel#channel.trees};
         Invalid ->
-            Invalid
+            Tx
     end.
 
 
@@ -2109,54 +2134,54 @@ trees_with_accounts([{account, Acc, Amount}|Rest], Trees) ->
 %% -- Generators -------------------------------------------------------------
 
 
-gen_account(_, _, []) -> {new, gen_account()};
-gen_account(New, Exist, Accounts) ->
-    weighted_default({Exist, {existing, elements(Accounts)}},
-                     {New,   {new, gen_account()}}).
-
-gen_account() ->  #account{key = noshrink(binary(32)), amount = 0, nonce = 0 }.
-
-gen_oracle_account(#{accounts := As, oracles := []}) ->
-    gen_account(1, 1, As);
-gen_oracle_account(#{accounts := As, oracles := Os}) ->
-    weighted_default(
-        {39, ?LET({O, _, _}, elements(Os), {existing, lists:keyfind(O, #account.key, As)})},
-        {1,  gen_account(9, 1, As)}).
-
-
-gen_new_oracle_account(S = #{accounts := As}) ->
-    case non_oracle_accounts(S) of
-        [] -> gen_account(1, 1, As); %% We can't get a good one, fail evenly
-        GoodAs ->
-            weighted_default({29, {existing, elements(GoodAs)}},
-                             {1,  gen_account(1, 9, As)})
+gen_account(New, Exist, #{accounts := Accounts, keys := Keys}) ->
+    case [ Key || Key <- maps:keys(Keys), not lists:keymember(Key, #account.key, Accounts) ] of
+        [] ->
+            {existing, elements(Accounts)};
+        NewKeys ->
+            weighted_default(
+              {Exist, {existing, elements(Accounts)}},
+              {New,   {new, #account{key = oneof(NewKeys),  %% do not shrink (cannot become un-new either)
+                                     amount = 0, nonce = 0 }}})
     end.
 
-gen_account_pubkey(Accounts) ->
-    oneof([?LAZY({existing, elements(Accounts)}),
-           ?LAZY({new, gen_account()})]).
-
-gen_preclaim(#{preclaims := [], accounts := As}) ->
-    {gen_name(), gen_salt(), gen_account(1, 1, As)};
-gen_preclaim(#{preclaims := Ps, accounts := As}) ->
+gen_oracle_account(#{oracles := []} = S) ->
+    gen_account(1, 1, S);
+gen_oracle_account(#{accounts := As, oracles := Os} = S) ->
     weighted_default(
-        {39, ?LET(#preclaim{name = N, salt = S, claimer = C}, elements(Ps),
+        {39, ?LET({O, _, _}, elements(Os), {existing, lists:keyfind(O, #account.key, As)})},
+        {1,  gen_account(9, 1, S)}).
+
+
+gen_new_oracle_account(S) ->
+    case non_oracle_accounts(S) of
+        [] -> gen_account(1, 1, S); %% We can't get a good one, fail evenly
+        GoodAs ->
+            weighted_default({29, {existing, elements(GoodAs)}},
+                             {1,  gen_account(1, 9, S)})
+    end.
+
+gen_preclaim(#{preclaims := []} = S) ->
+    {gen_name(), gen_salt(), gen_account(1, 1, S)};
+gen_preclaim(#{preclaims := Ps, accounts := As} = S) ->
+    weighted_default(
+        {39, ?LET(#preclaim{name = N, salt = Salt, claimer = C}, elements(Ps),
                   begin
                     A = {existing, lists:keyfind(C, #account.key, As)},
-                    frequency([{1, {N, S+1, A}}, {1, {gen_name(), S, A}}, {37, {N, S, A}}])
+                    frequency([{1, {N, Salt+1, A}}, {1, {gen_name(), Salt, A}}, {37, {N, Salt, A}}])
                   end)},
-        {1, {gen_name(), gen_salt(), gen_account(1, 1, As)}}).
+        {1, {gen_name(), gen_salt(), gen_account(1, 1, S)}}).
 
-gen_name_claim(#{claims := [], accounts := As}) ->
-    {gen_name(), gen_account(1, 1, As)};
-gen_name_claim(#{claims := Cs, accounts := As}) ->
+gen_name_claim(#{claims := []} = S) ->
+    {gen_name(), gen_account(1, 1, S)};
+gen_name_claim(#{claims := Cs, accounts := As} = S) ->
     weighted_default(
         {39, ?LET(#claim{name = N, claimer = C}, elements(Cs),
                   begin
                     A = {existing, lists:keyfind(C, #account.key, As)},
-                    frequency([{1, {gen_name(), A}}, {1, {N, gen_account(0, 1, As)}}, {38, {N, A}}])
+                    frequency([{1, {gen_name(), A}}, {1, {N, gen_account(0, 1, S)}}, {38, {N, A}}])
                   end)},
-        {1, {gen_name(), gen_account(1, 1, As)}}).
+        {1, {gen_name(), gen_account(1, 1, S)}}).
 
 
 unique_name(List) ->
@@ -2187,8 +2212,8 @@ gen_name(S) ->
 gen_state_channel_id(S) ->
     gen_state_channel_id(S, fun(_) -> true end).
 
-gen_state_channel_id(#{channels := [], accounts := As}, _) ->
-    ?LET([{_, A1}, {_, A2}], vector(2, gen_account(0, 1, As)),
+gen_state_channel_id(#{channels := []} = S, _) ->
+    ?LET([{_, A1}, {_, A2}], vector(2, gen_account(0, 1, S)),
          {A1#account.key, choose(1, 5), A2#account.key});
 gen_state_channel_id(#{channels := Cs} = S, Filter) ->
     Channels = [ Channel || Channel <- Cs, Filter(Channel)],
@@ -2320,9 +2345,12 @@ gen_contract_id(Invalid, Valid, Contracts) ->
                      },
                      {Invalid, {invalid, fake_contract_id()}}).
 
+gen_map_key(Map) ->
+    elements(maps:keys(Map)).
+
 fake_contract_id() ->
-    ?LET(A, gen_account(),
-         #contract{id = aect_contracts:compute_contract_pubkey(A#account.key, 12),
+    ?LET(Pubkey, noshrink(binary(32)),
+         #contract{id = aect_contracts:compute_contract_pubkey(Pubkey, 12),
                    abi = nat(),
                    vm = nat()
                   }).
