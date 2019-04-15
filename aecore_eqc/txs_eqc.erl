@@ -58,6 +58,8 @@ command_precondition_common(_S, _Cmd) ->
 precondition_common(_S, _Call) ->
     true.
 
+postcondition_common(S, {call, ?MODULE, newkey, Args}, Res) ->
+    true;
 postcondition_common(S, {call, ?MODULE, Fun, Args}, Res) ->
     Correct = valid_common(Fun, S, Args),
     case Res of
@@ -68,7 +70,6 @@ postcondition_common(S, {call, ?MODULE, Fun, Args}, Res) ->
     end.
 
 valid_common(init, _, _)                    -> true;
-valid_common(newkey, _, _)                  -> true;
 valid_common(mine, _, _)                    -> true;
 valid_common(multi_mine, _, _)              -> true;
 valid_common(spend, S, Args)                -> spend_valid(S, Args);
@@ -120,11 +121,11 @@ newkey_args(_S) ->
     #{ public := Pubkey, secret := Privkey } = enacl:sign_keypair(),
     [Pubkey, Privkey].
 
-newkey(_, _) ->
-    ok.
+newkey(PubKey, _) ->
+    PubKey.
 
-newkey_next(S, _Value, [Pubkey, Privkey]) ->
-    S#{keys => maps:put(Pubkey, Privkey, maps:get(keys, S))}.
+newkey_next(S, Value, [_Pubkey, Privkey]) ->
+    S#{keys => maps:put(Value, Privkey, maps:get(keys, S))}.
 
 %% --- Operation: mine ---
 mine_pre(S) ->
@@ -1498,6 +1499,8 @@ contract_create_tx(Name, CompilerVersion, Tx) ->
                                        end, Tx),
     NTx#{code => Code, call_data => CallData}.
 
+%% Since the nonce is part of the contract ID, shrinking a contract create could possibly work, but then it will
+%% no longer be called by a contract call, since the create ID has changed!
 contract_create_next(S, _Value, [Height, {_, Sender}, Name,
                                  CompilerVersion, Tx] = Args) ->
     case contract_create_valid(S, Args) of
@@ -1508,7 +1511,7 @@ contract_create_next(S, _Value, [Height, {_, Sender}, Name,
                deposit := Deposit, gas := Gas, vm_version := Vm, abi_version := Abi} = Tx,
             case Gas >= GasFun(Height) of
                 true ->
-                    ContractId = aect_contracts:compute_contract_pubkey(Sender, maps:get(nonce, untag_nonce(Tx))),
+                    ContractId = {call, aect_contracts, compute_contract_pubkey, [Sender, maps:get(nonce, untag_nonce(Tx))]},
                     reserve_fee(Fee + GasFun(Height) * GasPrice,
                                 bump_and_charge(Sender,
                                                 Fee + GasFun(Height) * GasPrice + Amount + Deposit,
@@ -1560,7 +1563,7 @@ contract_call_args(#{height := Height, contracts := Contracts} = S) ->
                   contract_id =>
                       case ContractTag of
                           {name, Name} -> aeser_id:create(name, aens_hash:name_hash(Name));
-                          _ -> aeser_id:create(contract, Contract#contract.id)
+                          _ -> aeser_id:create(contract, Contract#contract.id)   %% handles symbolic calls!
                       end,
                   abi_version => weighted_default({49, Contract#contract.abi}, {1, elements([0,3])}),
                   fee => gen_fee_above(Height, call_base_fee(As)),
