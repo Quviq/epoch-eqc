@@ -154,7 +154,7 @@ gen_signers(Correct, Incorrect) ->
         true ->
             {correct, Correct};
         false ->
-           weighted_default({99, {correct, Correct}}, {1, {faulty, Incorrect}})
+           weighted_default({90, {correct, Correct}}, {10, {faulty, Incorrect}})
     end.
 
 %% origin(F, Args) when F == extend_oracle; F == channel_create ->
