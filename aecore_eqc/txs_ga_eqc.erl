@@ -74,11 +74,8 @@ postcondition(S, {call, M, F, Args}, Res) ->
     end.
 
 
-call_features(S, {call, ?MODULE, ga_attach, [ Height, _, Name, _CompilerVersion, Tx] = Args}, Res) ->
-    #{gasfun := GasFun} = txs_eqc:contract(Name),
-    Correct = ga_attach_valid(S, Args) andalso maps:get(gas, Tx) >= GasFun(Height),
-    [{correct,  if Correct -> ga_attach; true -> false end} ] ++
-        [ {ga_attach, Res} ];
+call_features(S, {call, ?MODULE, ga_attach, Args}, Res) ->
+    ga_attach_features(S, Args, Res);
 call_features(S, {call, M, F, Args}, Res) ->
     M:call_features(S, {call, M, F, Args}, Res).
 
@@ -173,6 +170,14 @@ ga_attach_next(S, _V, [Height, {_, Sender}, Name, _, Tx] = Args) ->
              end
      end.
 
+ga_attach_features(S, [ Height, _, Name, _CompilerVersion, Tx] = Args, Res) ->
+    #{gasfun := GasFun} = txs_eqc:contract(Name),
+    Correct = ga_attach_valid(S, Args) andalso maps:get(gas, Tx) >= GasFun(Height),
+    [{correct,  if Correct -> ga_attach; true -> false end} ] ++
+        [ {ga_attach, Res} ].
+
+%% -------------------------
+
 origin(F, Args) when F == extend_oracle; F == channel_create ->
     lists:nth(2, Args);
 origin(response_oracle, Args) ->
@@ -190,6 +195,18 @@ origin(ns_update, Args) ->
 origin(_Kind, Args) ->
     {_SenderTag, Sender} = lists:nth(2, Args),
     Sender.
+
+%% -- gaccount data structure
+id(#gaccount{id = Id}) -> Id.
+name(#gaccount{name = Name}) -> Name.
+nonce(#gaccount{nonce = Nonce}) -> Nonce.
+
+find_account(S, Id) ->
+    lists:keyfind(Id, #gaccount.id, maps:get(gaccounts, S, [])).
+
+ga_bump_and_charge(#gaccount{id = Key, nonce = Nonce} = GAccount, Fee, S) ->
+    Gaccounts = (maps:get(gaccounts, S) -- [GAccount]) ++ [GAccount#gaccount{nonce = Nonce + 1}],
+    txs_eqc:charge(Key, Fee, S#{gaccounts => Gaccounts}).
 
 
 %% -- Property ---------------------------------------------------------------
