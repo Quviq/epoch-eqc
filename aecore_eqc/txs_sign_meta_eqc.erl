@@ -33,7 +33,7 @@ command(S) ->
 
 
 precondition(S, {call, ?MODULE, F, [M, AsMeta | Args]}) ->
-    (AsMeta == false orelse lists:member(AsMeta, maps:get(gaccounts, S))) andalso
+    (AsMeta == false orelse element(1, AsMeta) == basic orelse lists:member(AsMeta, maps:get(gaccounts, S))) andalso
         txs_sign_eqc:has_correct_signers(S, {call, M, F, Args}) andalso
         lists:member(F, [spend, ga_attach]) andalso
         ?TXS:precondition(S, {call, M, F, Args});
@@ -51,11 +51,15 @@ adapt(S, {call, M, F, Args}) ->
 
 adapt_meta(_S, false) ->
     false;
+adapt_meta(_S, {basic, PK}) ->
+    {basic, PK};   %% basic does not shrink to GA
 adapt_meta(S, GAccount) ->
     txs_ga_eqc:find_account(S, txs_ga_eqc:id(GAccount)).
 
 next_state(S, V, {call, ?MODULE, F, [M, false | Args]}) ->
     ?TXS:next_state(S, V, {call, M, F, Args});
+next_state(S, V, {call, ?MODULE, F, [M, {basic, _} | Args]}) ->
+    S;
 next_state(S, V, {call, ?MODULE, F, [M, GAccount | Args]}) ->
     Id = txs_ga_eqc:id(GAccount),
     case authorizes_meta(S, GAccount, F, Args) of
@@ -75,8 +79,8 @@ next_state(S, V, {call, ?MODULE, F, [M, GAccount | Args]}) ->
                     %% Problem here is that I don't want the check whether it is a generalized account
                     %% So rather directly call the inner txs_eqc:next:state... but need to peal of the things added by txs_sign
                     GAccounts = [ GA || GA <- maps:get(gaccounts, S), txs_ga_eqc:id(GA) =/= Id],
-                    ToNormalS = maps:merge(AuthS, #{gaccounts => GAccounts}),
-                    NewS = maps:merge(?TXS:next_state(ToNormalS, V, {call, M, F, Args}), #{gaccounts => maps:get(gaccounts, AuthS)}),
+                    ToBasicS = maps:merge(AuthS, #{gaccounts => GAccounts}),
+                    NewS = maps:merge(?TXS:next_state(ToBasicS, V, {call, M, F, Args}), #{gaccounts => maps:get(gaccounts, AuthS)}),
                     case AuthS == NewS of
                         true -> AuthS;
                         false ->
@@ -123,6 +127,11 @@ postcondition(S, {call, ?MODULE, F, [M, AsMeta | Args]}, Res) ->
                         {error, _} -> true
                     end
             end;
+        {basic, _} ->
+            case Res of
+                ok         -> eq(ok, {error, '_'});
+                {error, _} -> true
+            end;
         _ ->
             case authorizes_meta(S, AsMeta, F, Args) of
                 true ->
@@ -142,6 +151,8 @@ postcondition(S, {call, M, F, Args}, Res) ->
 
 call_features(S, {call, ?MODULE, F, [M, false | Args]}, Res) ->
     ?TXS:call_features(S, {call, M, F, Args}, Res);
+call_features(S, {call, ?MODULE, F, [M, {basic, _} | Args]}, Res) ->
+    [{ga_meta, with_basic_account}];
 call_features(S, {call, ?MODULE, F, [_M, GAccount | Args]}, _Res) ->
     Authorized = authorizes_meta(S, GAccount, F, Args),
     Correct = (txs_ga_eqc:id(GAccount) == origin(F, Args)),  %% and more, but how?
@@ -304,8 +315,8 @@ prop_txs(Fork) ->
 
 gen_as_meta(S, Origin) ->
     case txs_ga_eqc:find_account(S, Origin) of
-        false -> false;
-        GA -> ?SHRINK(weighted_default({90, GA}, {10, elements(maps:get(gaccounts, S))}),
+        false -> weighted_default({90, false}, {10, {basic, Origin}});
+        GA -> ?SHRINK(weighted_default({90, GA}, {20, elements(maps:get(gaccounts, S))}),
                       [false])
     end.
 
@@ -323,20 +334,38 @@ auth_data(Name, Nonce) ->
 
 apply_transaction(false, Signers, Height, Kind, Tx) ->
     ?TXS:apply_transaction(Signers, Height, Kind, Tx);
+apply_transaction({basic, PK}, {correct, Signers}, Height, Kind, Tx) ->
+    AeTx       = txs_eqc:create_aetx(Kind, txs_eqc:untag_nonce(Tx)),
+    BinTx      = aec_governance:add_network_id(aetx:serialize_to_binary(AeTx)),
+    Signatures = [ enacl:sign_detached(BinTx, Signer) || Signer <- Signers ],
+    SignedTx   = aetx_sign:new(AeTx, Signatures),
+
+    NewTx = #{ga_id       => aeser_id:create(account, PK),
+              auth_data   => auth_data("authorize_nonce", 1),
+              abi_version => 1,
+              gas         => 5000,
+              gas_price   => 1000000,
+              fee         => 500000 * 1000000,
+              tx          => SignedTx
+             },
+    txs_eqc:apply_transaction(Height, aega_meta_tx, NewTx);
 apply_transaction(GAccount, {correct, Signers}, Height, Kind, Tx) ->
     Nonce = txs_ga_eqc:nonce(GAccount),
     Name = txs_ga_eqc:name(GAccount),
     AuthData = auth_data(Name, Nonce),
     ActualSigners = [ <<SK:(32*8), PK/binary>> || <<SK:(32*8), PK/binary>> <- Signers,
                                                   PK =/= txs_ga_eqc:id(GAccount)],
+    if ActualSigners /= [] -> exit(nonequal); true -> ok end,
     TxNonce =
         case maps:get(nonce, Tx) of
+            {_, N} when ActualSigners /= [] -> io:format("Nonce unchanged ~p\n", [N]), N;
             {good, _} -> 0;
             {bad, _}  -> 2010102 %% one should not be able to post a signed tx with bad nonce and get fee subtracted
                          %% make a test case replay attack as well as too high nonce.
         end,
 
     AeTx       = txs_eqc:create_aetx(Kind, Tx#{nonce => TxNonce}),
+    %% io:format("AeTx ~p\nSigned by ~p\n", [AeTx, ActualSigners]),
     BinTx      = aec_governance:add_network_id(aetx:serialize_to_binary(AeTx)),
     Signatures = [ enacl:sign_detached(BinTx, Signer) || Signer <- ActualSigners ],
     SignedTx   = aetx_sign:new(AeTx, Signatures),
@@ -350,25 +379,6 @@ apply_transaction(GAccount, {correct, Signers}, Height, Kind, Tx) ->
               tx          => SignedTx
              },
     txs_eqc:apply_transaction(Height, aega_meta_tx, NewTx).
-
-%% apply_transaction({_Tag, Signers}, Height, Kind, Tx) ->
-%%     Env      = aetx_env:tx_env(Height),
-%%     Trees    = get(trees),
-%%     AeTx     = txs_eqc:create_aetx(Kind, Tx),
-%%     BinTx = aec_governance:add_network_id(aetx:serialize_to_binary(AeTx)),
-%%     Signatures = [ enacl:sign_detached(BinTx, Signer) || Signer <- Signers ],
-%%     SignedTx = aetx_sign:new(AeTx, Signatures),
-%%     %% When we use strict, we see errors returned, otherwise only invalid txs returned
-%%     case aec_trees:apply_txs_on_state_trees_strict([SignedTx], Trees, Env) of
-%%         {ok, _ValidTxs, InvalidTxs, NewTrees, _} ->
-%%             put(trees, NewTrees),
-%%             case InvalidTxs of
-%%                 [] -> ok;
-%%                 _  -> {error, signatures}
-%%             end;
-%%         Other ->
-%%             Other
-%%     end.
 
 %% State channel transacrtions need to be signed by 2 parties
 sign_aetx(Signers, Kind, Tx) ->
