@@ -72,7 +72,11 @@ next_state(S, V, {call, ?MODULE, F, [M, GAccount | Args]}) ->
                 true ->
                     %% GA account is origin.
                     %% do the transaction as original one
-                    NewS = ?TXS:next_state(AuthS, V, {call, M, F, Args}),
+                    %% Problem here is that I don't want the check whether it is a generalized account
+                    %% So rather directly call the inner txs_eqc:next:state... but need to peal of the things added by txs_sign
+                    GAccounts = [ GA || GA <- maps:get(gaccounts, S), txs_ga_eqc:id(GA) =/= Id],
+                    ToNormalS = maps:merge(AuthS, #{gaccounts => GAccounts}),
+                    NewS = maps:merge(?TXS:next_state(ToNormalS, V, {call, M, F, Args}), #{gaccounts => maps:get(gaccounts, AuthS)}),
                     case AuthS == NewS of
                         true -> AuthS;
                         false ->
