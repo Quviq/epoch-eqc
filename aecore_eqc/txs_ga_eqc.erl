@@ -209,21 +209,8 @@ prop_txs(Fork) ->
     application:set_env(aecore, hard_forks,
                                    #{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
     application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
-    txs_eqc:compile_contracts(),
-    ?SETUP(fun() ->
-                   {ok, Dir} = file:get_cwd(),
-                   DataDir = application:get_env(setup, data_dir),
-                   case lists:reverse(filename:split(Dir)) of
-                       [_, "eqc" | _] ->
-                           application:set_env(setup, data_dir, "../../data");
-                       _ ->
-                           application:set_env(setup, data_dir, "data")
-                   end,
-                   fun() ->
-                           application:set_env(setup, data_dir, DataDir)
-                   end
-           end,
     eqc:dont_print_counterexample(
+    propsetup(
     in_parallel(
     ?FORALL(Cmds, commands(?MODULE),
     begin
@@ -253,3 +240,6 @@ prop_txs(Fork) ->
 
 basic_account(S, Sender) ->
     not lists:keymember(Sender, #gaccount.id, maps:get(gaccounts, S)).
+
+propsetup(Prop) ->
+    ?TXS:propsetup(Prop).
