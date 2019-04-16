@@ -1747,8 +1747,7 @@ prop_txs(Fork) ->
     application:set_env(aecore, hard_forks,
                                    #{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
     application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
-    compile_contracts(),
-    aecore_eqc_utils:setup_data_dir(
+    propsetup(
     eqc:dont_print_counterexample(
     in_parallel(
     ?FORALL(Cmds, commands(?MODULE),
@@ -2350,8 +2349,9 @@ fake_contract_id() ->
                   }).
 
 
-setup_data_dir(Prop) ->
+propsetup(Prop) ->
     %% make sure we can run in eqc/aecore_eqc
+    compile_contracts(),
     ?SETUP(fun() ->
                    {ok, Dir} = file:get_cwd(),
                    DataDir = application:get_env(setup, data_dir),
