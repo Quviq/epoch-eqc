@@ -45,15 +45,12 @@ precondition(S, {call, M, F, Args}) ->
 
 adapt(S, {call, ?MODULE, F, [M, Signers | Args]}) ->
     case ?TXS:adapt(S, {call, M, F, Args}) of
-        false   -> false;
-        NewArgs -> {call, ?MODULE, F, [M, Signers | NewArgs]}
-    end;
-adapt(S, {call, M, F, Args}) ->
-    case ?TXS:adapt(S, {call, M, F, Args}) of
         false -> false;
         NewArgs ->
-            {call, M, F, NewArgs}
-    end.
+            [ M, Signers | NewArgs]
+    end;
+adapt(S, {call, M, F, Args}) ->
+    ?TXS:adapt(S, {call, M, F, Args}).
 
 
 next_state(S, _V, {call, ?MODULE, _F, [_M, {faulty, _Signers} | _Args]}) ->
@@ -155,6 +152,10 @@ contract_call(_, Signers, Height, _, Contract, Tx) ->
     NewTx = txs_eqc:contract_call_tx(Contract, Tx),
     apply_transaction(Signers, Height, aect_call_tx, NewTx).
 
+ga_attach(_, Signers, Height, _, Name, CompilerVersion, Tx) ->
+    NewTx = ?TXS:ga_attach_tx(Name, CompilerVersion, Tx),
+    apply_transaction(Signers, Height, aega_attach_tx, NewTx).
+
 
 %%% helper functions
 
@@ -163,7 +164,7 @@ gen_signers(Correct, Incorrect) ->
         true ->
             {correct, Correct};
         false ->
-           weighted_default({90, {correct, Correct}}, {10, {faulty, Incorrect}})
+           weighted_default({95, {correct, Correct}}, {5, {faulty, Incorrect}})
     end.
 
 signers(F, Args) when F == extend_oracle ->
