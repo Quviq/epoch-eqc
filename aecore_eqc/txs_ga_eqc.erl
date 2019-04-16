@@ -17,18 +17,86 @@
 
 -record(gaccount, {id, nonce, name, vm, abi, protocol}).
 
+%% This is a typical ADD operation meta model
 
 %% -- State and state functions ----------------------------------------------
+%% Should be a map merge of all underlying initial states.
 initial_state() ->
-    txs_eqc:initial_state().
+    ?TXS:initial_state().
 
 command(S) ->
-    frequency([{20, ?TXS:command(S)},
-                         {case maps:get(height, S, 0) of
-                              0 -> 0;
-                              H when H < 5 -> 1;
-                              _ -> 2
-                          end, ?LAZY({call, ?MODULE, ga_attach, ga_attach_args(S)})}]).
+    frequency([{20, ?TXS:command(S)} ] ++
+              [{1, ?LAZY({call, ?MODULE, ga_attach, ga_attach_args(S)})} || ga_attach_pre(S)]).
+
+precondition(S, {call, ?MODULE, ga_attach, Args}) ->
+    ga_attach_pre(S) andalso ga_attach_pre(S, Args);
+precondition(S, {call, M, F, Args}) ->
+    M:precondition(S, {call, M, F, Args}).
+
+adapt(S, {call, ?MODULE, ga_attach, Args}) ->
+    case ga_attach_adapt(S, Args) of
+        false -> false;
+        NewArgs ->
+            {call, ?MODULE, ga_attach, NewArgs}
+    end;
+adapt(S, {call, M, F, Args}) ->
+    case M:adapt(S, {call, M, F, Args}) of
+        false -> false;
+        NewArgs ->
+            {call, M, F, NewArgs}
+    end.
+
+%% We do something in next state for all basic Txs... this is where expressing
+%% as one model no longer possible.
+
+next_state(S, V, {call, ?MODULE, ga_attach, Args}) ->
+    ga_attach_next(S, V, Args);
+next_state(S, V, {call, M, F, Args}) ->
+    case lists:member(F, [init, newkey, mine, multi_mine]) of
+        true -> M:next_state(S, V, {call, M, F, Args});
+        false ->
+            case basic_account(S, origin(F, Args)) of
+                true -> M:next_state(S, V, {call, M, F, Args});
+                false -> S
+            end
+    end.
+
+
+postcondition(S, {call, ?MODULE, ga_attach, Args}, Res) ->
+    Correct = ga_attach_valid(S, Args),
+    case Res of
+        {error, _} when Correct -> eq(Res, ok);
+        {error, _}              -> true;
+        ok when Correct         -> true;
+        ok                      -> eq(ok, {error, '_'})
+    end;
+postcondition(S, {call, M, F, Args}, Res) when F == init; F == newkey; F == mine; F == multi_mine ->
+    M:postcondition(S, {call, M, F, Args}, Res);
+postcondition(S, {call, M, F, Args}, Res) ->
+    BasicAccount = basic_account(S, origin(F, Args)),
+    case {Res, M:postcondition(S, {call, M, F, Args}, Res)} of
+        {ok, true}          -> BasicAccount;
+        {{error, _}, true}  -> true;              %% got an error and expected an error
+        {{error, _}, _}     -> not BasicAccount;  %% got unexpected error, must be non-basic
+        {_, Other} -> Other
+    end.
+
+
+call_features(S, {call, ?MODULE, ga_attach, [ Height, _, Name, _CompilerVersion, Tx] = Args}, Res) ->
+    #{gasfun := GasFun} = txs_eqc:contract(Name),
+    Correct = ga_attach_valid(S, Args) andalso maps:get(gas, Tx) >= GasFun(Height),
+    [{correct,  if Correct -> ga_attach; true -> false end} ] ++
+        [ {ga_attach, Res} ];
+call_features(S, {call, M, F, Args}, Res) ->
+    M:call_features(S, {call, M, F, Args}, Res).
+
+
+
+all_command_names() ->
+    [ga_attach | ?TXS:all_command_names()].
+
+%% --- Operations
+
 
 ga_attach_args(#{height := Height} = S) ->
     Name = "authorize_nonce",
@@ -48,162 +116,12 @@ ga_attach_args(#{height := Height} = S) ->
          end).
 
 
-precondition(S, {call, ?MODULE, ga_attach, [Height, {_, Sender}, _, _, Tx]}) ->
-    maps:get(height, S, 0) > 0 andalso maps:get(accounts, S, []) =/= [] andalso
-        txs_eqc:correct_height(S, Height) andalso txs_eqc:valid_nonce(S, Sender, Tx);
-precondition(S, {call, M, F, Args}) ->
-    ?TXS:precondition(S, {call, M, F, Args}).
+ga_attach_pre(S) ->
+    maps:get(height, S, 0) > 0.
 
-
-adapt(S, {call, ?MODULE, ga_attach, [Height, {STag, Sender}, Contract, CompilerVersion, Tx]}) ->
-    case  maps:get(height, S, 0) > 0 andalso maps:get(accounts, S, []) =/= [] of
-        false -> false;
-        true ->
-            {call, ?MODULE, ga_attach, [maps:get(height, S, Height), {STag, Sender}, Contract, CompilerVersion,
-                                        txs_eqc:adapt_nonce(S, Sender, Tx)]}
-    end;
-adapt(S, {call, M, F, Args}) ->
-    case ?TXS:adapt(S, {call, M, F, Args}) of
-        false -> false;
-        NewArgs ->
-            {call, M, F, NewArgs}
-    end.
-
-
-next_state(S, V, {call, ?MODULE, ga_attach, Args}) ->
-     case ga_attach_valid(S, Args) of
-         false -> S;
-         true -> ga_attach_next(S, V, Args)
-     end;
-next_state(S, V, {call, M, F, Args}) ->
-    case lists:member(F, [init, newkey, mine, multi_mine]) of
-        true -> ?TXS:next_state(S, V, {call, M, F, Args});
-        false ->
-            case basic_account(S, origin(F, Args)) of
-                true -> ?TXS:next_state(S, V, {call, M, F, Args});
-                false -> S
-            end
-    end.
-
-
-postcondition(S, {call, ?MODULE, ga_attach, Args}, Res) ->
-    Correct = ga_attach_valid(S, Args),
-    case Res of
-        {error, _} when Correct -> eq(Res, ok);
-        {error, _}              -> true;
-        ok when Correct         -> true;
-        ok                      -> eq(ok, {error, '_'})
-    end;
-postcondition(S, {call, M, F, Args}, Res) when F == init; F == newkey; F == mine; F == multi_mine ->
-    ?TXS:postcondition(S, {call, M, F, Args}, Res);
-postcondition(S, {call, M, F, Args}, Res) ->
-    BasicAccount = basic_account(S, origin(F, Args)),
-    case {Res, ?TXS:postcondition(S, {call, M, F, Args}, Res)} of
-        {ok, true}          -> BasicAccount;
-        {{error, _}, true}  -> true;              %% got an error and expected an error
-        {{error, _}, _}     -> not BasicAccount;  %% got unexpected error, must be non-basic
-        {_, Other} -> Other
-    end.
-
-
-call_features(S, {call, ?MODULE, ga_attach, [ Height, _, Name, _CompilerVersion, Tx] = Args}, Res) ->
-    #{gasfun := GasFun} = txs_eqc:contract(Name),
-    Correct = ga_attach_valid(S, Args) andalso maps:get(gas, Tx) >= GasFun(Height),
-    [{correct,  if Correct -> ga_attach; true -> false end} ] ++
-        [ {ga_attach, Res} ];
-call_features(S, {call, M, F, Args}, Res) ->
-    ?TXS:call_features(S, {call, M, F, Args}, Res).
-
-
-all_command_names() ->
-    [ga_attach | ?TXS:all_command_names()].
-
-%% -- Operations -------------------------------------------------------------
-
-%% spend(AsMeta, Height, {_, Sender}, _Receiver, Tx) ->
-%%     apply_transaction(AsMeta, [{origin, Sender}], Height, aec_spend_tx, Tx).
-
-%% register_oracle(AsMeta, Height, {_, Sender}, Tx) ->
-%%     apply_transaction(AsMeta, [{origin, Sender}], Height, aeo_register_tx, Tx).
-
-%% extend_oracle(AsMeta, Height, Oracle, Tx) ->
-%%     apply_transaction(AsMeta, [Oracle], Height, aeo_extend_tx, Tx).
-
-%% query_oracle(AsMeta, Height, {_, Sender}, _Oracle, Tx) ->
-%%     apply_transaction(AsMeta, [{origin, Sender}], Height, aeo_query_tx, Tx).
-
-%% response_oracle(AsMeta, Height, QueryId, Tx) ->
-%%     NewTx = response_oracle_tx(AsMeta, QueryId, Tx),
-%%     apply_transaction(AsMeta, [], Height, aeo_response_tx, NewTx).
-
-%% response_oracle_tx(_, {_Sender, Nonce, _} = QueryId, Tx) when is_integer(Nonce) ->
-%%     txs_eqc:response_oracle_tx(QueryId, Tx);
-%% response_oracle_tx(_, {_Sender, AuthId, Oracle}, Tx) when is_binary(AuthId) ->
-%%     Tx#{query_id => aeo_query:ga_id(AuthId, Oracle)}.
-
-%% channel_create(AsMeta, Height, Initiator, Responder, Tx) ->
-%%     NewTx = txs_eqc:channel_create_tx(Tx),
-%%     apply_transaction(AsMeta, [{origin, Initiator}, Responder], Height, aesc_create_tx, NewTx).
-
-%% channel_deposit(AsMeta, Height, {In, _, Resp} = ChannelId, Party, Tx) ->
-%%     Signer = if Party == initiator -> Resp; true -> In end,
-%%     NewTx = txs_eqc:channel_deposit_tx(ChannelId, Party, channel_add_id(AsMeta, ChannelId, Tx)),
-%%     apply_transaction(AsMeta, [Signer], Height, aesc_deposit_tx, NewTx).
-
-%% channel_withdraw(AsMeta, Height, {In, _, Resp} = ChannelId, Party, Tx) ->
-%%     Signer = if Party == initiator -> Resp; true -> In end,
-%%     NewTx = txs_eqc:channel_withdraw_tx(ChannelId, Party, channel_add_id(AsMeta, ChannelId, Tx)),
-%%     apply_transaction(AsMeta, [Signer], Height, aesc_withdraw_tx, NewTx).
-
-%% channel_close_mutual(AsMeta, Height, {In, _, Resp} = ChannelId, Party, Tx) ->
-%%     Signer = if Party == initiator -> Resp; true -> In end,
-%%     NewTx = channel_add_id(AsMeta, ChannelId, Tx),
-%%     apply_transaction(AsMeta, [Signer], Height, aesc_close_mutual_tx, NewTx).
-
-%% channel_close_solo(AsMeta, Height, {_In, _, _Resp} = ChannelId, Party, Tx) ->
-%%     %% Signer = if Party == initiator -> maps:get(responder, Tx); true -> maps:get(initiator, Tx) end,
-%%     NewTx = txs_eqc:channel_close_solo_tx(ChannelId, Party, channel_add_id(AsMeta, ChannelId, Tx)),
-%%     apply_transaction(AsMeta, [], Height, aesc_close_solo_tx, NewTx).
-
-%% channel_add_id(_AsMeta, {Initiator, N, Responder}, Tx) ->
-%%      Tx#{channel_id =>
-%%             aeser_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder))}.
-
-
-%% ns_preclaim(AsMeta, Height, _Sender, {_Name,_Salt}, Tx) ->
-%%     apply_transaction(AsMeta, [], Height, aens_preclaim_tx, Tx).
-
-%% ns_claim(AsMeta, Height, _Sender, Tx) ->
-%%     apply_transaction(AsMeta, [], Height, aens_claim_tx, Tx).
-
-%% ns_update(AsMeta, Height, _Name, _Sender, _NameAccount, Tx) ->
-%%     apply_transaction(AsMeta, [], Height, aens_update_tx, Tx).
-
-%% ns_transfer(AsMeta, Height, _Sender, _Receiver, _Name, Tx) ->
-%%     apply_transaction(AsMeta, [], Height, aens_transfer_tx, Tx).
-
-%% ns_revoke(AsMeta, Height, {_, Sender}, _Name, Tx) ->
-%%     apply_transaction(AsMeta, [Sender], Height, aens_revoke_tx, Tx).
-
-%% contract_create(AsMeta, Height, {_, Sender}, Name, CompilerVersion, Tx) ->
-%%     NewTx =  txs_eqc:contract_create_tx(Name, CompilerVersion, Tx),
-%%     apply_transaction(AsMeta, [Sender], Height, aect_create_tx, NewTx).
-
-%% contract_call(AsMeta, Height, _, Contract, Tx) ->
-%%     NewTx = txs_eqc:contract_call_tx(Contract, Tx),
-%%     apply_transaction(AsMeta, [], Height, aect_call_tx, NewTx).
-
-ga_attach(Height, _, Name, CompilerVersion, Tx) ->
-    NewTx = ga_attach_tx(Name, CompilerVersion, Tx),
-    ?TXS:apply_transaction(Height, aega_attach_tx, NewTx).
-
-ga_attach_tx(Name, CompilerVersion, Tx) ->
-    NewTx = txs_eqc:contract_create_tx(Name, CompilerVersion, Tx),
-    #{auth_fun := AuthFun, functions := Funs} = txs_eqc:contract(Name),
-    {_, _, _, AuthHash} = lists:keyfind(AuthFun, 1, Funs),
-    NewTx#{auth_fun => AuthHash}.
-
-%% ---------------------------------------------------------------------------
+ga_attach_pre(S, [Height, {_, Sender}, _, _, Tx]) ->
+   maps:get(accounts, S, []) =/= [] andalso
+        txs_eqc:correct_height(S, Height) andalso txs_eqc:valid_nonce(S, Sender, Tx).
 
 ga_attach_valid(S, [Height, {_, Sender}, Name, CompilerVersion, Tx]) ->
     #{gasfun := GasFun, basefee := Fixed} = txs_eqc:contract(Name),
@@ -218,29 +136,46 @@ ga_attach_valid(S, [Height, {_, Sender}, Name, CompilerVersion, Tx]) ->
                          [{aevm_sophia_3, 1}])
     andalso lists:member(CompilerVersion, [1, 2]).
 
+ga_attach_adapt(S, [Height, {STag, Sender}, Contract, CompilerVersion, Tx]) ->
+    [maps:get(height, S, Height), {STag, Sender}, Contract, CompilerVersion,
+     txs_eqc:adapt_nonce(S, Sender, Tx)].
 
-ga_attach_next(S, _V, [Height, {_, Sender}, Name, _, Tx]) ->
-    #{gasfun := GasFun} = txs_eqc:contract(Name),
-    #{ fee := Fee, gas_price := GasPrice,
-       gas := Gas, vm_version := Vm, abi_version := Abi} = Tx,
-    case Gas >= GasFun(Height) of
-        true ->
-            txs_eqc:reserve_fee(Fee + GasFun(Height) * GasPrice,
-            txs_eqc:bump_and_charge(Sender,
-                                    Fee + GasFun(Height) * GasPrice,
-                                    txs_eqc:add(gaccounts,
-                                                #gaccount{id = Sender,
-                                                          name = Name,
-                                                          vm = Vm,
-                                                          abi = Abi,
-                                                          nonce = 0,
-                                                          protocol = aec_hard_forks:protocol_effective_at_height(Height)}, S)));
-        false ->
-            %% out of gas
-            txs_eqc:reserve_fee(Fee + Gas * GasPrice,
-            txs_eqc:bump_and_charge(Sender,
-                                    Fee + Gas * GasPrice, S))
-    end.
+ga_attach(Height, _, Name, CompilerVersion, Tx) ->
+    NewTx = ga_attach_tx(Name, CompilerVersion, Tx),
+    ?TXS:apply_transaction(Height, aega_attach_tx, NewTx).
+
+ga_attach_tx(Name, CompilerVersion, Tx) ->
+    NewTx = txs_eqc:contract_create_tx(Name, CompilerVersion, Tx),
+    #{auth_fun := AuthFun, functions := Funs} = txs_eqc:contract(Name),
+    {_, _, _, AuthHash} = lists:keyfind(AuthFun, 1, Funs),
+    NewTx#{auth_fun => AuthHash}.
+
+ga_attach_next(S, _V, [Height, {_, Sender}, Name, _, Tx] = Args) ->
+     case ga_attach_valid(S, Args) of
+         false -> S;
+         true ->
+             #{gasfun := GasFun} = txs_eqc:contract(Name),
+             #{ fee := Fee, gas_price := GasPrice,
+                gas := Gas, vm_version := Vm, abi_version := Abi} = Tx,
+             case Gas >= GasFun(Height) of
+                 true ->
+                     txs_eqc:reserve_fee(Fee + GasFun(Height) * GasPrice,
+                                         txs_eqc:bump_and_charge(Sender,
+                                                                 Fee + GasFun(Height) * GasPrice,
+                                                                 txs_eqc:add(gaccounts,
+                                                                             #gaccount{id = Sender,
+                                                                                       name = Name,
+                                                                                       vm = Vm,
+                                                                                       abi = Abi,
+                                                                                       nonce = 0,
+                                                                                       protocol = aec_hard_forks:protocol_effective_at_height(Height)}, S)));
+                 false ->
+                     %% out of gas
+                     txs_eqc:reserve_fee(Fee + Gas * GasPrice,
+                                         txs_eqc:bump_and_charge(Sender,
+                                                                 Fee + Gas * GasPrice, S))
+             end
+     end.
 
 origin(F, Args) when F == extend_oracle; F == channel_create ->
     lists:nth(2, Args);
