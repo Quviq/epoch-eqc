@@ -34,17 +34,9 @@ precondition(S, {call, M, F, Args}) ->
     M:precondition(S, {call, M, F, Args}).
 
 adapt(S, {call, ?MODULE, ga_attach, Args}) ->
-    case ga_attach_adapt(S, Args) of
-        false -> false;
-        NewArgs ->
-            {call, ?MODULE, ga_attach, NewArgs}
-    end;
+    ga_attach_adapt(S, Args);
 adapt(S, {call, M, F, Args}) ->
-    case M:adapt(S, {call, M, F, Args}) of
-        false -> false;
-        NewArgs ->
-            {call, M, F, NewArgs}
-    end.
+    M:adapt(S, {call, M, F, Args}).
 
 %% We do something in next state for all basic Txs... this is where expressing
 %% as one model no longer possible.
@@ -131,14 +123,18 @@ ga_attach_valid(S, [Height, {_, Sender}, Name, CompilerVersion, Tx]) ->
     andalso txs_eqc:correct_nonce(S, Sender, Tx)
     andalso txs_eqc:check_balance(S, Sender, maps:get(fee, Tx) + GasFun(Height) * maps:get(gas_price, Tx))
     andalso txs_eqc:valid_contract_fee(Height, Fixed, Tx)
-    andalso  Protocol == 3
+    andalso Protocol == 3
     andalso lists:member({maps:get(vm_version, Tx), maps:get(abi_version, Tx)},
                          [{aevm_sophia_3, 1}])
     andalso lists:member(CompilerVersion, [1, 2]).
 
-ga_attach_adapt(S, [Height, {STag, Sender}, Contract, CompilerVersion, Tx]) ->
-    [maps:get(height, S, Height), {STag, Sender}, Contract, CompilerVersion,
-     txs_eqc:adapt_nonce(S, Sender, Tx)].
+ga_attach_adapt(S, [_, {STag, Sender}, Contract, CompilerVersion, Tx]) ->
+    case maps:get(height, S, 0) of
+        0 -> false;
+        Height ->
+            [Height, {STag, Sender}, Contract, CompilerVersion,
+             txs_eqc:adapt_nonce(S, Sender, Tx)]
+    end.
 
 ga_attach(Height, _, Name, CompilerVersion, Tx) ->
     NewTx = ga_attach_tx(Name, CompilerVersion, Tx),
