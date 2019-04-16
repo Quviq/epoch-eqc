@@ -11,8 +11,8 @@
 -eqc_group_commands(false).
 -define(PatronAmount, 100000000000001).  %% read from file?
 
--define(TXS, txs_eqc).
-%%-define(TXS, txs_ga_eqc).
+%%-define(TXS, txs_eqc).
+-define(TXS, txs_ga_eqc).
 
 -compile([export_all, nowarn_export_all]).
 
