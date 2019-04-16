@@ -24,29 +24,29 @@ initial_state() ->
 command(S) ->
     ?LET(Cmd, ?TXS:command(S),
          case Cmd of
-             {call, _, F, Args} ->
+             {call, M, F, Args} ->
                  case lists:member(F, [init, newkey, mine, multi_mine]) of
                      true -> Cmd;
-                     false -> {call, ?MODULE, F, [ ?LET(Incorrect,sublist(maps:values(maps:get(keys, S, #{}))),
+                     false -> {call, ?MODULE, F, [ M, ?LET(Incorrect,sublist(maps:values(maps:get(keys, S, #{}))),
                                                         gen_signers(signers(S, F, Args), Incorrect)) | Args]}
                  end;
              _ -> Cmd
          end).
 
 
-precondition(S, {call, ?MODULE, F, [{_, Signers} | Args]}) ->
+precondition(S, {call, ?MODULE, F, [M, {_, Signers} | Args]}) ->
     lists:all(fun(Signer) ->
                       lists:member(Signer, maps:values(maps:get(keys, S, #{})))
               end, Signers) andalso
-        ?TXS:precondition(S, {call, ?TXS, F, Args});
+        ?TXS:precondition(S, {call, M, F, Args});
 precondition(S, {call, M, F, Args}) ->
     ?TXS:precondition(S, {call, M, F, Args}).
 
 
-adapt(S, {call, ?MODULE, F, [Signers | Args]}) ->
-    case ?TXS:adapt(S, {call, ?TXS, F, Args}) of
+adapt(S, {call, ?MODULE, F, [M, Signers | Args]}) ->
+    case ?TXS:adapt(S, {call, M, F, Args}) of
         false   -> false;
-        NewArgs -> {call, ?MODULE, F, [Signers | NewArgs]}
+        NewArgs -> {call, ?MODULE, F, [M, Signers | NewArgs]}
     end;
 adapt(S, {call, M, F, Args}) ->
     case ?TXS:adapt(S, {call, M, F, Args}) of
@@ -56,72 +56,75 @@ adapt(S, {call, M, F, Args}) ->
     end.
 
 
-next_state(S, _V, {call, ?MODULE, _F, [{faulty, _Signers} | _Args]}) ->
+next_state(S, _V, {call, ?MODULE, _F, [_M, {faulty, _Signers} | _Args]}) ->
     S;
-next_state(S, V, {call, ?MODULE, F, [{correct, _Signers} | Args]}) ->
-    ?TXS:next_state(S, V, {call, ?TXS, F, Args});
+next_state(S, V, {call, ?MODULE, F, [M, {correct, _Signers} | Args]}) ->
+    ?TXS:next_state(S, V, {call, M, F, Args});
 next_state(S, V, {call, M, F, Args}) ->
     ?TXS:next_state(S, V, {call, M, F, Args}).
 
 
-postcondition(_S, {call, ?MODULE, _F, [{faulty, _Signers} | _Args]}, Res) ->
+postcondition(_S, {call, ?MODULE, _F, [_M, {faulty, _Signers} | _Args]}, Res) ->
     eq(Res, {error, signature_check_failed});
-postcondition(S, {call, ?MODULE, F, [{correct, _Signers} | Args]}, Res) ->
-    ?TXS:postcondition(S, {call, ?TXS, F, Args}, Res);
+postcondition(S, {call, ?MODULE, F, [M, {correct, _Signers} | Args]}, Res) ->
+    ?TXS:postcondition(S, {call, M, F, Args}, Res);
 postcondition(S, {call, M, F, Args}, Res) ->
     ?TXS:postcondition(S, {call, M, F, Args}, Res).
 
-call_features(S, {call, txs_eqc, F, Args}, Res) ->
-    txs_eqc:call_features(S, {call, txs_eqc, F, Args}, Res);
-call_features(S, {call, ?MODULE, F, [{correct, _Signers} | Args]}, Res) ->
-    txs_eqc:call_features(S, {call, txs_eqc, F, Args}, Res);
-call_features(_S, {call, ?MODULE, F, [{faulty, _Signers} | _Args]}, Res) ->
-    [{correct, false}, {F, Res}].
+
+call_features(S, {call, ?MODULE, F, [M, {correct, _Signers} | Args]}, Res) ->
+    ?TXS:call_features(S, {call, M, F, Args}, Res);
+call_features(_S, {call, ?MODULE, F, [_M, {faulty, _Signers} | _Args]}, Res) ->
+    [{correct, false}, {F, Res}];
+call_features(S, {call, M, F, Args}, Res) ->
+    ?TXS:call_features(S, {call, M, F, Args}, Res).
+
 
 
 all_command_names() ->
-    txs_eqc:all_command_names().
+    ?TXS:all_command_names().
 
 %% -- Operations -------------------------------------------------------------
 
-spend(Signers, Height, {_, _Sender}, _Receiver, Tx) ->
+spend(_, Signers, Height, {_, _Sender}, _Receiver, Tx) ->
     apply_transaction(Signers, Height, aec_spend_tx, Tx).
 
-register_oracle(Signers, Height, {_, _Sender}, Tx) ->
+register_oracle(_, Signers, Height, {_, _Sender}, Tx) ->
     apply_transaction(Signers, Height, aeo_register_tx, Tx).
 
-extend_oracle(Signers, Height, _Oracle, Tx) ->
+extend_oracle(_, Signers, Height, _Oracle, Tx) ->
     apply_transaction(Signers, Height, aeo_extend_tx, Tx).
 
-query_oracle(Signers, Height, {_, _Sender}, _Oracle, Tx) ->
+query_oracle(_, Signers, Height, {_, _Sender}, _Oracle, Tx) ->
     apply_transaction(Signers, Height, aeo_query_tx, Tx).
 
-response_oracle(Signers, Height, QueryId, Tx) ->
+response_oracle(_, Signers, Height, QueryId, Tx) ->
+    %% possibly use M and call M:response_oracle_tx(QueryId, Tx)
     NewTx = txs_eqc:response_oracle_tx(QueryId, Tx),
     apply_transaction(Signers, Height, aeo_response_tx, NewTx).
 
-channel_create(Signers, Height, _Initiator, _Responder, Tx) ->
+channel_create(_, Signers, Height, _Initiator, _Responder, Tx) ->
     NewTx = txs_eqc:channel_create_tx(Tx),
     apply_transaction(Signers, Height, aesc_create_tx, NewTx).
 
-channel_deposit(Signers, Height, ChannelId, Party, Tx) ->
+channel_deposit(_, Signers, Height, ChannelId, Party, Tx) ->
     NewTx = txs_eqc:channel_deposit_tx(ChannelId, Party, channel_add_id(ChannelId, Tx)),
     apply_transaction(Signers, Height, aesc_deposit_tx, NewTx).
 
-channel_withdraw(Signers, Height, ChannelId, Party, Tx) ->
+channel_withdraw(_, Signers, Height, ChannelId, Party, Tx) ->
     NewTx = txs_eqc:channel_withdraw_tx(ChannelId, Party, channel_add_id(ChannelId, Tx)),
     apply_transaction(Signers, Height, aesc_withdraw_tx, NewTx).
 
-channel_close_mutual(Signers, Height, ChannelId, _Party, Tx) ->
+channel_close_mutual(_, Signers, Height, ChannelId, _Party, Tx) ->
     NewTx = channel_add_id(ChannelId, Tx),
     apply_transaction(Signers, Height, aesc_close_mutual_tx, NewTx).
 
-channel_settle(Signers, Height, ChannelId, _Party, Tx) ->
+channel_settle(_, Signers, Height, ChannelId, _Party, Tx) ->
     NewTx = channel_add_id(ChannelId, Tx),
     apply_transaction(Signers, Height, aesc_settle_tx, NewTx).
 
 %% Describe this channel_id trick!
-channel_close_solo(Signers, Height, ChannelId, Party, Tx) ->
+channel_close_solo(_, Signers, Height, ChannelId, Party, Tx) ->
     NewTx = txs_eqc:channel_close_solo_tx(ChannelId, Party, channel_add_id(ChannelId, Tx)),
     apply_transaction(Signers, Height, aesc_close_solo_tx, NewTx).
 
@@ -129,26 +132,26 @@ channel_add_id({Initiator, N, Responder}, Tx) ->
      Tx#{channel_id =>
             aeser_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder))}.
 
-ns_preclaim(Signers, Height, _Sender, {_Name,_Salt}, Tx) ->
+ns_preclaim(_, Signers, Height, _Sender, {_Name,_Salt}, Tx) ->
     apply_transaction(Signers, Height, aens_preclaim_tx, Tx).
 
-ns_claim(Signers, Height, _Sender, Tx) ->
+ns_claim(_, Signers, Height, _Sender, Tx) ->
     apply_transaction(Signers, Height, aens_claim_tx, Tx).
 
-ns_update(Signers, Height, _Name, _Sender, _NameAccount, Tx) ->
+ns_update(_, Signers, Height, _Name, _Sender, _NameAccount, Tx) ->
     apply_transaction(Signers, Height, aens_update_tx, Tx).
 
-ns_transfer(Signers, Height, _Sender, _Receiver, _Name, Tx) ->
+ns_transfer(_, Signers, Height, _Sender, _Receiver, _Name, Tx) ->
     apply_transaction(Signers, Height, aens_transfer_tx, Tx).
 
-ns_revoke(Signers, Height, {_, _Sender}, _Name, Tx) ->
+ns_revoke(_, Signers, Height, {_, _Sender}, _Name, Tx) ->
     apply_transaction(Signers, Height, aens_revoke_tx, Tx).
 
-contract_create(Signers, Height, {_, _Sender}, Name, CompilerVersion, Tx) ->
+contract_create(_, Signers, Height, {_, _Sender}, Name, CompilerVersion, Tx) ->
     NewTx =  txs_eqc:contract_create_tx(Name, CompilerVersion, Tx),
     apply_transaction(Signers, Height, aect_create_tx, NewTx).
 
-contract_call(Signers, Height, _, Contract, Tx) ->
+contract_call(_, Signers, Height, _, Contract, Tx) ->
     NewTx = txs_eqc:contract_call_tx(Contract, Tx),
     apply_transaction(Signers, Height, aect_call_tx, NewTx).
 
@@ -162,24 +165,6 @@ gen_signers(Correct, Incorrect) ->
         false ->
            weighted_default({90, {correct, Correct}}, {10, {faulty, Incorrect}})
     end.
-
-%% origin(F, Args) when F == extend_oracle; F == channel_create ->
-%%     lists:nth(2, Args);
-%% origin(response_oracle, Args) ->
-%%     {_Sender, _Nonce, Oracle} = lists:nth(2, Args),
-%%     Oracle;
-%% origin(F, Args) when F == channel_deposit; F == channel_withdraw;
-%%                      F == channel_close_mutual; F == channel_close_solo;
-%%                      F == channel_settle ->
-%%     Party = lists:nth(3, Args),
-%%     {Initiator, _, Responder} = lists:nth(2, Args),
-%%     case Party of initiator -> Initiator; responder -> Responder end;
-%% origin(ns_update, Args) ->
-%%     {_SenderTag, Sender} = lists:nth(3, Args),
-%%     Sender;
-%% origin(_Kind, Args) ->
-%%     {_SenderTag, Sender} = lists:nth(2, Args),
-%%     Sender.
 
 signers(F, Args) when F == extend_oracle ->
     [lists:nth(2, Args)];
@@ -225,20 +210,7 @@ prop_txs(Fork) ->
     application:set_env(aecore, hard_forks,
                                    #{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
     application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
-    txs_eqc:compile_contracts(),
-    ?SETUP(fun() ->
-                   {ok, Dir} = file:get_cwd(),
-                   DataDir = application:get_env(setup, data_dir),
-                   case lists:reverse(filename:split(Dir)) of
-                       [_, "eqc" | _] ->
-                           application:set_env(setup, data_dir, "../../data");
-                       _ ->
-                           application:set_env(setup, data_dir, "data")
-                   end,
-                   fun() ->
-                           application:set_env(setup, data_dir, DataDir)
-                   end
-           end,
+    ?TXS:propsetup(
     eqc:dont_print_counterexample(
     in_parallel(
     ?FORALL(Cmds, commands(?MODULE),
