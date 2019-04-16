@@ -34,6 +34,7 @@ command(S) ->
 
 precondition(S, {call, ?MODULE, F, [M, AsMeta | Args]}) ->
     (AsMeta == false orelse lists:member(AsMeta, maps:get(gaccounts, S))) andalso
+        txs_sign_eqc:has_correct_signers(S, {call, M, F, Args}) andalso
         lists:member(F, [spend, ga_attach]) andalso
         ?TXS:precondition(S, {call, M, F, Args});
 precondition(S, {call, M, F, Args}) ->
@@ -137,10 +138,12 @@ postcondition(S, {call, M, F, Args}, Res) ->
 
 call_features(S, {call, ?MODULE, F, [M, false | Args]}, Res) ->
     ?TXS:call_features(S, {call, M, F, Args}, Res);
-call_features(S, {call, ?MODULE, F, [M, GAccount | Args]}, Res) ->
-    Correct = (txs_ga_eqc:id(GAccount) == origin(F, Args)),
-    [{correct,  if Correct -> ga_meta; true -> false end}] ++
-    [{ga_meta, {F, ?TXS:postcondition(S, {call, M, F, Args}, Res)}} || Correct];
+call_features(S, {call, ?MODULE, F, [_M, GAccount | Args]}, _Res) ->
+    Authorized = authorizes_meta(S, GAccount, F, Args),
+    Correct = (txs_ga_eqc:id(GAccount) == origin(F, Args)),  %% and more, but how?
+    [{correct,  if Authorized andalso Correct -> ga_meta; true -> false end}] ++
+    [{ga_meta, different_inner} ||  Authorized andalso txs_ga_eqc:id(GAccount) /= origin(F, Args)] ++
+    [{ga_meta, F} || Authorized andalso Correct ];  %% This is hard... cannot actually see whether inner Tx was successful or not due to Res possibly incorrect
 call_features(S, {call, M, F, Args}, Res) ->
     ?TXS:call_features(S, {call, M, F, Args}, Res).
 
@@ -316,11 +319,12 @@ auth_data(Name, Nonce) ->
 
 apply_transaction(false, Signers, Height, Kind, Tx) ->
     ?TXS:apply_transaction(Signers, Height, Kind, Tx);
-apply_transaction(GAccount, {Tag, Signers}, Height, Kind, Tx) ->
+apply_transaction(GAccount, {correct, Signers}, Height, Kind, Tx) ->
     Nonce = txs_ga_eqc:nonce(GAccount),
     Name = txs_ga_eqc:name(GAccount),
     AuthData = auth_data(Name, Nonce),
-    ActualSigners = Signers -- txs_ga_eqc:id(GAccount),
+    ActualSigners = [ <<SK:(32*8), PK/binary>> || <<SK:(32*8), PK/binary>> <- Signers,
+                                                  PK =/= txs_ga_eqc:id(GAccount)],
     TxNonce =
         case maps:get(nonce, Tx) of
             {good, _} -> 0;
