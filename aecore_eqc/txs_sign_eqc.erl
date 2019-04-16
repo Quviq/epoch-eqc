@@ -52,7 +52,6 @@ adapt(S, {call, ?MODULE, F, [M, Signers | Args]}) ->
 adapt(S, {call, M, F, Args}) ->
     ?TXS:adapt(S, {call, M, F, Args}).
 
-
 next_state(S, _V, {call, ?MODULE, _F, [_M, {faulty, _Signers} | _Args]}) ->
     S;
 next_state(S, V, {call, ?MODULE, F, [M, {correct, _Signers} | Args]}) ->
@@ -80,6 +79,11 @@ call_features(S, {call, M, F, Args}, Res) ->
 
 all_command_names() ->
     ?TXS:all_command_names().
+
+has_correct_signers(S, {call, ?MODULE, _F, [_M, {Tag, _Signers} | _Args]}) ->
+    Tag == correct;
+has_correct_signers(_S, _) ->
+    true.
 
 %% -- Operations -------------------------------------------------------------
 
