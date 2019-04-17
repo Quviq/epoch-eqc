@@ -123,6 +123,11 @@ contract_create(Height, {_, _Sender}, Name, CompilerVersion, Tx) ->
     NewTx = txs_eqc:contract_create_tx(Name, CompilerVersion, Tx),
     txs_eqc:apply_transaction(Height, aect_create_tx, NewTx).
 
+%% --- Operation: call_contract ---
+contract_call(Height, _, Contract, Tx) ->
+    NewTx = txs_eqc:contract_call_tx(Contract, Tx),
+    txs_eqc:apply_transaction(Height, aect_call_tx, NewTx).
+
 %% -- Property ---------------------------------------------------------------
 
 prop_txs() ->
@@ -146,7 +151,7 @@ prop_txs() ->
             measure(length, commands_length(Cmds),
             measure(height, Height,
             features(call_features(H),
-            aggregate_feats([atoms, correct, protocol | all_command_names()], call_features(H),
+            aggregate_feats([atoms, correct, protocol, contract_call_fun | all_command_names()], call_features(H),
                 pretty_commands(?MODULE, Cmds, {H, S, Res},
                                 Res == ok))))))
     end))).
