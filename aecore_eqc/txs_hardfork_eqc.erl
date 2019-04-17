@@ -80,8 +80,9 @@ query_oracle(Height, _Sender, _Oracle, Tx) ->
     txs_eqc:apply_transaction(Height, aeo_query_tx, Tx).
 
 %% --- Operation: response_oracle ---
-response_oracle(Height, _QueryId, Tx) ->
-    txs_eqc:apply_transaction(Height, aeo_response_tx, Tx).
+response_oracle(Height, QueryId, Tx) ->
+    NewTx = txs_eqc:response_oracle_tx(QueryId, Tx),
+    txs_eqc:apply_transaction(Height, aeo_response_tx, NewTx).
 
 %% --- Operation: channel_create ---
 channel_create(Height, _Initiator, _Responder, Tx) ->
