@@ -1162,7 +1162,7 @@ contract_create_args(#{height := Height, accounts := Accounts}) ->
                    [Height, {SenderTag, Sender#account.key}, Name,
                     frequency([{10, 1}, {30, 2}]),
                     #{owner_id => aeser_id:create(account, Sender#account.key),
-                      vm_version  => frequency([{1, elements([0,4])}, {max(10, Height), sophia_1}, {2, solidity}, {50, sophia_2}]),
+                      vm_version  => frequency([{1, elements([0,4])}, {max(10, Height), aevm_sophia_1}, {2, vm_solidity}, {50, aevm_sophia_2}]),
                       abi_version => weighted_default({49, 1}, {1, elements([0,3])}),
                       fee => gen_fee_above(Height, Fixed),
                       gas_price => frequency([{1,0}, {10, 1}, {89, minimum_gas_price(Height)}]),
