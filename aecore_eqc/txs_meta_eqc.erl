@@ -456,7 +456,7 @@ apply_transaction(GAccount, Height, Kind, Tx) ->
               gas         => 5000,
               gas_price   => 1000000,
               fee         => 500000 * 1000000,
-              tx          => txs_eqc:create_aetx(Kind, Tx#{nonce => TxNonce})
+              tx          => aetx_sign:new(txs_eqc:create_aetx(Kind, Tx#{nonce => TxNonce}), [])
              },
     txs_eqc:apply_transaction(Height, aega_meta_tx, NewTx).
 
