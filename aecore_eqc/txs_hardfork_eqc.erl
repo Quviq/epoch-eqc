@@ -86,7 +86,8 @@ response_oracle(Height, QueryId, Tx) ->
 
 %% --- Operation: channel_create ---
 channel_create(Height, _Initiator, _Responder, Tx) ->
-    txs_eqc:apply_transaction(Height, aesc_create_tx, Tx).
+    NewTx = txs_eqc:channel_create_tx(Tx),
+    txs_eqc:apply_transaction(Height, aesc_create_tx, NewTx).
 
 %% --- Operation: channel_deposit ---
 channel_deposit(Height, _Channeld, _Party, Tx) ->
