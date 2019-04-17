@@ -84,10 +84,10 @@ valid_common(contract_call, S, Args)        -> contract_call_valid(S, Args).
 instructions_callouts(_S, [Bool]) ->
     case Bool of
         true ->
-            ?MATCH({Instructions, _Ok}, ?CALLOUT(aec_tx_processor, evaluate, [?VAR], ok)),
+            ?MATCH({Instructions, _Ok}, ?CALLOUT(aeprimop, evaluate, [?VAR], ok)),
             ?APPLY(add_instructions, [Instructions]);
         false ->
-            ?OPTIONAL(?CALLOUT(aec_tx_processor, evaluate, [?WILDCARD], ok))
+            ?OPTIONAL(?CALLOUT(aeprimop, evaluate, [?WILDCARD], ok))
     end.
 
 add_instructions_next(S, _, [Instructions]) ->
@@ -135,7 +135,7 @@ mine(Height, Instructions) ->
     Env      = aetx_env:tx_env(Height),
     Trees  = get(trees),  %% with all Txs applied
     MinedTrees = get(mined_trees),  %% before applying all Txs
-    {ok, UpdatedTrees, _} = aec_tx_processor:do_eval(Instructions, MinedTrees, Env),
+    {ok, UpdatedTrees, _} = aeprimop:do_eval(Instructions, MinedTrees, Env),
     Trees1 = aec_trees:perform_pre_transformations(Trees, Height + 1),
     put(trees, Trees1),
     put(mined_trees, Trees1),
@@ -1483,7 +1483,7 @@ api_spec() ->
     #api_spec{
     language = erlang,
     modules  = [ #api_module{
-      name = aec_tx_processor, fallback = aec_tx_processor,
+      name = aeprimop, fallback = aeprimop,
       functions = [ #api_fun{ name = evaluate, arity = 1 }
                   ]
       }]}.
