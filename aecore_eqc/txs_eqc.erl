@@ -1470,7 +1470,7 @@ contract_create_tx(Name, CompilerVersion, Tx) ->
                                           (vm_solidity) -> 2;
                                           (aevm_sophia_2) -> 3;
                                           (aevm_sophia_3) -> 4;
-                                          (N) -> N
+                                          (N) when is_integer(N), N >= 0 -> N
                                        end, Tx),
     NTx#{code => Code, call_data => CallData}.
 
