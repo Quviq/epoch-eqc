@@ -1720,7 +1720,8 @@ prop_txs(Fork) ->
                                    #{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
     application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
     compile_contracts(),
-    setup_data_dir(
+    ?SETUP(
+    fun setup_data_dir/0,
     eqc:dont_print_counterexample(
     in_parallel(
     ?FORALL(Cmds, commands(?MODULE),
@@ -2319,18 +2320,16 @@ fake_contract_id() ->
                   }).
 
 
-setup_data_dir(Prop) ->
+setup_data_dir() ->
     %% make sure we can run in eqc/aecore_eqc
-    ?SETUP(fun() ->
-                   {ok, Dir} = file:get_cwd(),
-                   undefined = application:get_env(setup, data_dir),
-                   case lists:reverse(filename:split(Dir)) of
-                       [_, "eqc" | _] ->
-                           application:set_env(setup, data_dir, "../../data");
-                       _ ->
-                           application:set_env(setup, data_dir, "data")
-                   end,
-                   fun() ->
-                           ok = application:unset_env(setup, data_dir)
-                   end
-           end, Prop).
+    {ok, Dir} = file:get_cwd(),
+    undefined = application:get_env(setup, data_dir),
+    case lists:reverse(filename:split(Dir)) of
+        [_, "eqc" | _] ->
+            application:set_env(setup, data_dir, "../../data");
+        _ ->
+            application:set_env(setup, data_dir, "data")
+    end,
+    fun() ->
+            ok = application:unset_env(setup, data_dir)
+    end.
