@@ -381,17 +381,19 @@ prop_txs() ->
     prop_txs(3).
 
 prop_txs(Fork) ->
-    application:load(aecore),
-    application:set_env(aecore, hard_forks,
-                                   #{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
     application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
     txs_eqc:compile_contracts(),
     ?SETUP(
     fun() ->
+        _ = application:load(aecore),
+        HardForksTeardown = setup_hard_forks(#{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
         meck:new(aec_fork_block_settings, [passthrough]),
         meck:expect(aec_fork_block_settings, file_name,
                         fun(R) -> "../../" ++ meck:passthrough([R]) end),
-        fun() -> meck:unload(aec_fork_block_settings) end
+        fun() ->
+            meck:unload(aec_fork_block_settings),
+            HardForksTeardown
+        end
     end,
     eqc:dont_print_counterexample(
     in_parallel(
@@ -476,3 +478,11 @@ correct_nonce(GAccount, _S, Sender, _) ->
     %% Actual nonce check is done when precodition checks that this valud is in the state
     %% Possibly an adapt should be used to actually make shrinking more effective
     Sender == GAccount#gaccount.id.
+
+
+setup_hard_forks(X) ->
+    undefined = application:get_env(aecore, hard_forks),
+    ok = application:set_env(aecore, hard_forks, X),
+    fun() ->
+        ok = application:unset_env(aecore, hard_forks)
+    end.

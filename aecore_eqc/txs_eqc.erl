@@ -1715,13 +1715,18 @@ prop_txs() ->
     prop_txs(3).
 
 prop_txs(Fork) ->
-    application:load(aecore),
-    application:set_env(aecore, hard_forks,
-                                   #{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
     application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
     compile_contracts(),
     ?SETUP(
-    fun setup_data_dir/0,
+    fun() ->
+            _ = application:load(aecore),
+            HardForksTeardown = setup_hard_forks(#{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
+            DataDirTeardown = setup_data_dir(),
+            fun() ->
+                    DataDirTeardown(),
+                    HardForksTeardown()
+            end
+    end,
     eqc:dont_print_counterexample(
     in_parallel(
     ?FORALL(Cmds, commands(?MODULE),
@@ -2332,4 +2337,11 @@ setup_data_dir() ->
     end,
     fun() ->
             ok = application:unset_env(setup, data_dir)
+    end.
+
+setup_hard_forks(X) ->
+    undefined = application:get_env(aecore, hard_forks),
+    ok = application:set_env(aecore, hard_forks, X),
+    fun() ->
+            ok = application:unset_env(aecore, hard_forks)
     end.

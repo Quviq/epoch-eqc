@@ -126,14 +126,15 @@ contract_create(Height, {_, _Sender}, Name, CompilerVersion, Tx) ->
 %% -- Property ---------------------------------------------------------------
 
 prop_txs() ->
+    ?SETUP(
+    fun() ->
+            _ = application:load(aecore),
+            setup_hard_forks(#{<<"1">> => 0, <<"2">> => 3})
+    end,
    %% eqc:dont_print_counterexample(
     in_parallel(
     ?FORALL(Cmds, commands(?MODULE),
     begin
-        application:load(aecore),
-        application:set_env(aecore, hard_forks, 
-                                   #{<<"1">> => 0, <<"2">> => 3}),
-
         {H, S, Res} = run_commands(Cmds),
         Height = maps:get(height, S, 0),
         check_command_names(Cmds,
@@ -143,7 +144,7 @@ prop_txs() ->
             aggregate_feats([atoms, correct, protocol | all_command_names()], call_features(H),
                 pretty_commands(?MODULE, Cmds, {H, S, Res},
                                 Res == ok))))))
-    end)).
+    end))).
 
 aggregate_feats([], [], Prop) -> Prop;
 aggregate_feats([atoms | Kinds], Features, Prop) ->
@@ -163,4 +164,9 @@ bugs(Time, Bugs) ->
 %% -- State update and query functions ---------------------------------------
 
 
-
+setup_hard_forks(X) ->
+    undefined = application:get_env(aecore, hard_forks),
+    ok = application:set_env(aecore, hard_forks, X),
+    fun() ->
+            ok = application:unset_env(aecore, hard_forks)
+    end.
