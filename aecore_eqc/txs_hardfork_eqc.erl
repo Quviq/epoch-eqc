@@ -102,6 +102,11 @@ channel_close_mutual(Height, Channeld, Party, Tx) ->
     NewTx = txs_eqc:channel_close_mutual_tx(Channeld, Party, Tx),
     txs_eqc:apply_transaction(Height, aesc_close_mutual_tx, NewTx).
 
+%% --- Operation: channel_close_solo ---
+channel_close_solo(Height, Channeld, Party, Tx) ->
+    NewTx = txs_eqc:channel_close_solo_tx(Channeld, Party, Tx),
+    txs_eqc:apply_transaction(Height, aesc_close_solo_tx, NewTx).
+
 %% --- Operation: ns_preclaim ---
 ns_preclaim(Height, _Sender, {_Name,_Salt}, Tx) ->
     txs_eqc:apply_transaction(Height, aens_preclaim_tx, Tx).
