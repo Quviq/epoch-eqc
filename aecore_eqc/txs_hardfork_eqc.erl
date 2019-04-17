@@ -98,8 +98,9 @@ channel_withdraw(Height, _Channeld, _Party, Tx) ->
     txs_eqc:apply_transaction(Height, aesc_withdraw_tx, Tx).
 
 %% --- Operation: channel_close_mutual ---
-channel_close_mutual(Height, _Channeld, _Party, Tx) ->
-    txs_eqc:apply_transaction(Height, aesc_close_mutual_tx, Tx).
+channel_close_mutual(Height, Channeld, Party, Tx) ->
+    NewTx = txs_eqc:channel_close_mutual_tx(Channeld, Party, Tx),
+    txs_eqc:apply_transaction(Height, aesc_close_mutual_tx, NewTx).
 
 %% --- Operation: ns_preclaim ---
 ns_preclaim(Height, _Sender, {_Name,_Salt}, Tx) ->
