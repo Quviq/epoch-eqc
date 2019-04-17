@@ -2323,7 +2323,7 @@ setup_data_dir(Prop) ->
     %% make sure we can run in eqc/aecore_eqc
     ?SETUP(fun() ->
                    {ok, Dir} = file:get_cwd(),
-                   DataDir = application:get_env(setup, data_dir),
+                   undefined = application:get_env(setup, data_dir),
                    case lists:reverse(filename:split(Dir)) of
                        [_, "eqc" | _] ->
                            application:set_env(setup, data_dir, "../../data");
@@ -2331,6 +2331,6 @@ setup_data_dir(Prop) ->
                            application:set_env(setup, data_dir, "data")
                    end,
                    fun() ->
-                           application:set_env(setup, data_dir, DataDir)
+                           ok = application:unset_env(setup, data_dir)
                    end
            end, Prop).

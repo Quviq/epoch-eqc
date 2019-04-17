@@ -1432,7 +1432,7 @@ prop_txs() ->
             eqc_mocking:start_mocking(api_spec()),
             %% make sure we can run in eqc/aecore_eqc
             {ok, Dir} = file:get_cwd(),
-            DataDir = application:get_env(setup, data_dir),
+            undefined = application:get_env(setup, data_dir),
             ok = case lists:reverse(filename:split(Dir)) of
                      [_, "eqc" | _] ->
                          application:set_env(setup, data_dir, "../../data");
@@ -1441,7 +1441,7 @@ prop_txs() ->
                  end,
             fun() ->
                     eqc_mocking:stop_mocking(),
-                    ok = application:set_env(setup, data_dir, DataDir)
+                    ok = application:unset_env(setup, data_dir)
             end
     end,
     eqc:dont_print_counterexample(
