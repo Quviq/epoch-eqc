@@ -149,7 +149,7 @@ contract_create(Height, {_, _Sender}, {File, Args, _GasFun, _}, CompilerVersion,
     NTx = maps:update_with(vm_version, fun(sophia_1) -> 1;
                                           (solidity) -> 2;
                                           (sophia_2) -> 3;
-                                          (N) -> N
+                                          (N) when is_integer(N), N >= 0 -> N
                                        end, Tx),
     apply_transaction(Height, aect_create_tx, NTx#{code => Code, call_data => CallData}).
 
