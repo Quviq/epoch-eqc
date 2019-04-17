@@ -387,12 +387,10 @@ prop_txs(Fork) ->
     fun() ->
         _ = application:load(aecore),
         HardForksTeardown = setup_hard_forks(#{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
-        meck:new(aec_fork_block_settings, [passthrough]),
-        meck:expect(aec_fork_block_settings, file_name,
-                        fun(R) -> "../../" ++ meck:passthrough([R]) end),
+        DataDirTeardown = setup_data_dir(),
         fun() ->
-            meck:unload(aec_fork_block_settings),
-            HardForksTeardown
+            DataDirTeardown(),
+            HardForksTeardown()
         end
     end,
     eqc:dont_print_counterexample(
@@ -479,6 +477,20 @@ correct_nonce(GAccount, _S, Sender, _) ->
     %% Possibly an adapt should be used to actually make shrinking more effective
     Sender == GAccount#gaccount.id.
 
+
+setup_data_dir() ->
+    %% make sure we can run in eqc/aecore_eqc
+    {ok, Dir} = file:get_cwd(),
+    undefined = application:get_env(setup, data_dir),
+    case lists:reverse(filename:split(Dir)) of
+        [_, "eqc" | _] ->
+            application:set_env(setup, data_dir, "../../data");
+        _ ->
+            application:set_env(setup, data_dir, "data")
+    end,
+    fun() ->
+        ok = application:unset_env(setup, data_dir)
+    end.
 
 setup_hard_forks(X) ->
     undefined = application:get_env(aecore, hard_forks),

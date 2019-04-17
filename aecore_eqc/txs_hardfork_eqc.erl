@@ -129,7 +129,12 @@ prop_txs() ->
     ?SETUP(
     fun() ->
             _ = application:load(aecore),
-            setup_hard_forks(#{<<"1">> => 0, <<"2">> => 3})
+            HardForksTeardown = setup_hard_forks(#{<<"1">> => 0, <<"2">> => 3}),
+            DataDirTeardown = setup_data_dir(),
+            fun() ->
+                DataDirTeardown(),
+                HardForksTeardown()
+            end
     end,
    %% eqc:dont_print_counterexample(
     in_parallel(
@@ -163,6 +168,20 @@ bugs(Time, Bugs) ->
 
 %% -- State update and query functions ---------------------------------------
 
+
+setup_data_dir() ->
+    %% make sure we can run in eqc/aecore_eqc
+    {ok, Dir} = file:get_cwd(),
+    undefined = application:get_env(setup, data_dir),
+    case lists:reverse(filename:split(Dir)) of
+        [_, "eqc" | _] ->
+            application:set_env(setup, data_dir, "../../data");
+        _ ->
+            application:set_env(setup, data_dir, "data")
+    end,
+    fun() ->
+        ok = application:unset_env(setup, data_dir)
+    end.
 
 setup_hard_forks(X) ->
     undefined = application:get_env(aecore, hard_forks),
