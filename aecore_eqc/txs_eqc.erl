@@ -2328,7 +2328,7 @@ fake_contract_id() ->
 setup_data_dir() ->
     %% make sure we can run in eqc/aecore_eqc
     {ok, Dir} = file:get_cwd(),
-    undefined = application:get_env(setup, data_dir),
+    %% Not asserting that configuration parameter is undefined so to ease experimenting in Erlang shell.
     case lists:reverse(filename:split(Dir)) of
         [_, "eqc" | _] ->
             application:set_env(setup, data_dir, "../../data");
@@ -2340,7 +2340,7 @@ setup_data_dir() ->
     end.
 
 setup_hard_forks(X) ->
-    undefined = application:get_env(aecore, hard_forks),
+    %% Not asserting that configuration parameter is undefined so to ease experimenting in Erlang shell.
     ok = application:set_env(aecore, hard_forks, X),
     fun() ->
             ok = application:unset_env(aecore, hard_forks)

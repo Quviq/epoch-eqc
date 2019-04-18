@@ -1914,7 +1914,7 @@ fake_contract_id() ->
 setup_data_dir() ->
     %% make sure we can run in eqc/aecore_eqc
     {ok, Dir} = file:get_cwd(),
-    undefined = application:get_env(setup, data_dir),
+    %% Not asserting that configuration parameter is undefined so to ease experimenting in Erlang shell.
     case lists:reverse(filename:split(Dir)) of
         [_, "eqc" | _] ->
             application:set_env(setup, data_dir, "../../data");
