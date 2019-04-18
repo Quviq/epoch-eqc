@@ -35,7 +35,6 @@ command(S) ->
 precondition(S, {call, ?MODULE, F, [M, AsMeta | Args]}) ->
     (AsMeta == false orelse element(1, AsMeta) == basic orelse lists:member(AsMeta, maps:get(gaccounts, S))) andalso
         txs_sign_eqc:has_correct_signers(S, {call, M, F, Args}) andalso
-        lists:member(F, [spend, ga_attach]) andalso
         ?TXS:precondition(S, {call, M, F, Args});
 precondition(S, {call, M, F, Args}) ->
     ?TXS:precondition(S, {call, M, F, Args}).
@@ -58,7 +57,7 @@ adapt_meta(S, GAccount) ->
 
 next_state(S, V, {call, ?MODULE, F, [M, false | Args]}) ->
     ?TXS:next_state(S, V, {call, M, F, Args});
-next_state(S, V, {call, ?MODULE, F, [M, {basic, _} | Args]}) ->
+next_state(S, _V, {call, ?MODULE, _F, [_M, {basic, _} | _Args]}) ->
     S;
 next_state(S, V, {call, ?MODULE, F, [M, GAccount | Args]}) ->
     Id = txs_ga_eqc:id(GAccount),
@@ -151,13 +150,14 @@ postcondition(S, {call, M, F, Args}, Res) ->
 
 call_features(S, {call, ?MODULE, F, [M, false | Args]}, Res) ->
     ?TXS:call_features(S, {call, M, F, Args}, Res);
-call_features(S, {call, ?MODULE, F, [M, {basic, _} | Args]}, Res) ->
+call_features(_S, {call, ?MODULE, _F, [_M, {basic, _} | _Args]}, _Res) ->
     [{ga_meta, with_basic_account}];
-call_features(S, {call, ?MODULE, F, [_M, GAccount | Args]}, _Res) ->
+call_features(S, {call, ?MODULE, F, [M, GAccount | Args]}, Res) ->
     Authorized = authorizes_meta(S, GAccount, F, Args),
+    InnerPasses = (S =/= ?TXS:next_state(S, Res, {call, M, F, Args})),
     Correct = (txs_ga_eqc:id(GAccount) == origin(F, Args)),  %% and more, but how?
     [{correct,  if Authorized andalso Correct -> ga_meta; true -> false end}] ++
-    [{ga_meta, different_inner} ||  Authorized andalso txs_ga_eqc:id(GAccount) /= origin(F, Args)] ++
+    [{ga_meta, {different_inner, InnerPasses}} ||  Authorized andalso txs_ga_eqc:id(GAccount) /= origin(F, Args)] ++
     [{ga_meta, F} || Authorized andalso Correct ];  %% This is hard... cannot actually see whether inner Tx was successful or not due to Res possibly incorrect
 call_features(S, {call, M, F, Args}, Res) ->
     ?TXS:call_features(S, {call, M, F, Args}, Res).
@@ -185,59 +185,63 @@ spend(_, AsMeta, _, Signers, Height, _Sender, _Receiver, Tx) ->
 register_oracle(_, AsMeta, _, Signers, Height, _Sender, Tx) ->
     apply_transaction(AsMeta, Signers, Height, aeo_register_tx, Tx).
 
-extend_oracle(_, AsMeta, _, Signers,Height, _Oracle, Tx) ->
+extend_oracle(_, AsMeta, _, Signers, Height, _Oracle, Tx) ->
     apply_transaction(AsMeta, Signers, Height, aeo_extend_tx, Tx).
 
-query_oracle(_, AsMeta, _, Signers,Height, _Sender, _Oracle, Tx) ->
+query_oracle(_, AsMeta, _, Signers, Height, _Sender, _Oracle, Tx) ->
     apply_transaction(AsMeta, Signers, Height, aeo_query_tx, Tx).
 
-response_oracle(_, AsMeta, _, Signers,Height, QueryId, Tx) ->
+response_oracle(_, AsMeta, _, Signers, Height, QueryId, Tx) ->
     NewTx = response_oracle_tx(QueryId, Tx),
     apply_transaction(AsMeta, Signers, Height, aeo_response_tx, NewTx).
 
 
-channel_create(_, AsMeta, _, Signers,Height, _Initiator, _Responder, Tx) ->
+channel_create(_, AsMeta, _, Signers, Height, _Initiator, _Responder, Tx) ->
     NewTx = txs_eqc:channel_create_tx(Tx),
     apply_transaction(AsMeta, Signers, Height, aesc_create_tx, NewTx).
 
-channel_deposit(_, AsMeta, _, Signers,Height, ChannelId, Party, Tx) ->
+channel_deposit(_, AsMeta, _, Signers, Height, ChannelId, Party, Tx) ->
     NewTx = txs_eqc:channel_deposit_tx(ChannelId, Party, channel_add_id(AsMeta, ChannelId, Tx)),
     apply_transaction(AsMeta, Signers, Height, aesc_deposit_tx, NewTx).
 
-channel_withdraw(_, AsMeta, _, Signers,Height, ChannelId, Party, Tx) ->
+channel_withdraw(_, AsMeta, _, Signers, Height, ChannelId, Party, Tx) ->
     NewTx = txs_eqc:channel_withdraw_tx(ChannelId, Party, channel_add_id(AsMeta, ChannelId, Tx)),
     apply_transaction(AsMeta, Signers, Height, aesc_withdraw_tx, NewTx).
 
-channel_close_mutual(_, AsMeta, _, Signers,Height, ChannelId, _Party, Tx) ->
+channel_close_mutual(_, AsMeta, _, Signers, Height, ChannelId, _Party, Tx) ->
     NewTx = channel_add_id(AsMeta, ChannelId, Tx),
     apply_transaction(AsMeta, Signers, Height, aesc_close_mutual_tx, NewTx).
 
-channel_close_solo(_, AsMeta, _, Signers,Height, ChannelId, Party, Tx) ->
+channel_close_solo(_, AsMeta, _, Signers, Height, ChannelId, Party, Tx) ->
     NewTx = txs_eqc:channel_close_solo_tx(ChannelId, Party, channel_add_id(AsMeta, ChannelId, Tx)),
     apply_transaction(AsMeta, Signers, Height, aesc_close_solo_tx, NewTx).
 
+channel_settle(_, AsMeta, _, Signers, Height, ChannelId, Party, Tx) ->
+    NewTx = txs_eqc:channel_settle_tx(ChannelId, Party, channel_add_id(AsMeta, ChannelId, Tx)),
+    apply_transaction(AsMeta, Signers, Height, aesc_settle_tx, NewTx).
 
-ns_preclaim(_, AsMeta, _, Signers,Height, _Sender, {_Name,_Salt}, Tx) ->
+
+ns_preclaim(_, AsMeta, _, Signers, Height, _Sender, {_Name,_Salt}, Tx) ->
     apply_transaction(AsMeta, Signers, Height, aens_preclaim_tx, Tx).
 
-ns_claim(_, AsMeta, _, Signers,Height, _Sender, Tx) ->
+ns_claim(_, AsMeta, _, Signers, Height, _Sender, Tx) ->
     apply_transaction(AsMeta, Signers, Height, aens_claim_tx, Tx).
 
-ns_update(_, AsMeta, _, Signers,Height, _Name, _Sender, _NameAccount, Tx) ->
+ns_update(_, AsMeta, _, Signers, Height, _Name, _Sender, _NameAccount, Tx) ->
     apply_transaction(AsMeta, Signers, Height, aens_update_tx, Tx).
 
-ns_transfer(_, AsMeta, _, Signers,Height, _Sender, _Receiver, _Name, Tx) ->
+ns_transfer(_, AsMeta, _, Signers, Height, _Sender, _Receiver, _Name, Tx) ->
     apply_transaction(AsMeta, Signers, Height, aens_transfer_tx, Tx).
 
 ns_revoke(_, AsMeta, _, Signers, Height, _Sender, _Name, Tx) ->
     apply_transaction(AsMeta, Signers, Height, aens_revoke_tx, Tx).
 
 
-contract_create(_, AsMeta, _, Signers,Height, _Sender, Name, CompilerVersion, Tx) ->
+contract_create(_, AsMeta, _, Signers, Height, _Sender, Name, CompilerVersion, Tx) ->
     NewTx =  txs_eqc:contract_create_tx(Name, CompilerVersion, Tx),
     apply_transaction(AsMeta, Signers, Height, aect_create_tx, NewTx).
 
-contract_call(_, AsMeta, _, Signers,Height, _, Contract, Tx) ->
+contract_call(_, AsMeta, _, Signers, Height, _, Contract, Tx) ->
     NewTx = txs_eqc:contract_call_tx(Contract, Tx),
     apply_transaction(AsMeta, Signers, Height, aect_call_tx, NewTx).
 
@@ -299,6 +303,7 @@ prop_txs(Fork) ->
             end,
         Total = lists:sum(maps:values(TreesTotal)),
         FeeTotal =  lists:sum([ Fee || {Fee, _} <- maps:get(fees, S, [])]),
+        ?WHENFAIL(eqc:format("features: ~p\n", [call_features(H)]),
         check_command_names(Cmds,
             measure(length, commands_length(Cmds),
             measure(height, Height,
@@ -307,7 +312,7 @@ prop_txs(Fork) ->
                 ?WHENFAIL(eqc:format("Total = ~p~nFeeTotal = ~p~n", [TreesTotal, FeeTotal]),
                           pretty_commands(?MODULE, Cmds, {H, S, Res},
                               conjunction([{result, Res == ok},
-                                           {total, Total == 0 orelse equals(Total, ?PatronAmount - FeeTotal)}]))))))))
+                                           {total, Total == 0 orelse equals(Total, ?PatronAmount - FeeTotal)}])))))))))
     end)))).
 
 
@@ -358,7 +363,7 @@ apply_transaction(GAccount, {correct, Signers}, Height, Kind, Tx) ->
     if ActualSigners /= [] -> exit(nonequal); true -> ok end,
     TxNonce =
         case maps:get(nonce, Tx) of
-            {_, N} when ActualSigners /= [] -> io:format("Nonce unchanged ~p\n", [N]), N;
+            {_, _} when length(ActualSigners) == length(Signers) -> Nonce;
             {good, _} -> 0;
             {bad, _}  -> 2010102 %% one should not be able to post a signed tx with bad nonce and get fee subtracted
                          %% make a test case replay attack as well as too high nonce.
