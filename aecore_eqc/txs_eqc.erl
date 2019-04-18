@@ -1236,9 +1236,9 @@ ns_update_pre(S) ->
     maps:is_key(accounts, S).
 
 ns_update_args(#{height := Height} = S) ->
-     ?LET({{Name, {SenderTag, Sender}}, {Tag, NameAccount}},
-          {gen_name_claim(S), gen_account(1, 5, S)},
-          [Height, Name, {SenderTag, Sender#account.key}, {Tag, NameAccount#account.key},
+     ?LET({{Name, {SenderTag, Sender}}, {Kind, {_, NameAccount}}},
+          {gen_name_claim(S), oneof([{account, gen_account(1, 5, S)}, {oracle, gen_oracle_account(S)} ])},
+          [Height, Name, {SenderTag, Sender#account.key}, {Kind, NameAccount#account.key},
            #{account_id => aeser_id:create(account, Sender#account.key),
              name_id => aeser_id:create(name, aens_hash:name_hash(Name)),
              name_ttl => frequency([{10, nat()}, {1, 36000}, {10, 25000}, {1, choose(30000, 60000)}]),
@@ -1246,13 +1246,19 @@ ns_update_args(#{height := Height} = S) ->
              fee => gen_fee(Height),
              nonce => gen_nonce(Sender),
              pointers =>
-                 gen_pointers(S, aeser_id:create(account, NameAccount#account.key))
+                 gen_pointers(S, {Kind, NameAccount#account.key})
             }]).
 
-gen_pointers(S, Id) ->
+gen_pointers(S, {Kind, Key}) ->
+    %% THe names account_pubkey and oracle are kind of hardcoded somewhere it seems
+    Pointer =
+        case Kind of
+            account -> aens_pointer:new(<<"account_pubkey">>, aeser_id:create(account, Key));
+            oracle -> aens_pointer:new(<<"account_pubkey">>, aeser_id:create(oracle, Key))
+        end,
     frequency([
-        {3, [aens_pointer:new(<<"account_pubkey">>, Id)]},
-        {1, [aens_pointer:new(<<"account_pubkey">>, Id),
+        {3, [Pointer]},
+        {0, [Pointer,
              ?LET({_, Acc}, gen_account(1, 49, S),
                   aens_pointer:new(<<"account_pubkey">>, aeser_id:create(account, Acc#account.key)))]},
             %% if there are more than one accounts with same key, node seems to take the first one
@@ -1279,21 +1285,21 @@ ns_update_adapt(_, _) ->
 ns_update(Height, _Name, _Sender, _NameAccount, Tx) ->
     apply_transaction(Height, aens_update_tx, Tx).
 
-ns_update_next(S, _, [Height, Name, {_, Sender}, {_, NameAccount}, Tx] = Args) ->
+ns_update_next(S, _, [Height, Name, {_, Sender}, {Kind, NameAccount}, Tx] = Args) ->
     case ns_update_valid(S, Args) of
         false -> S;
         true  ->
             #{ fee := Fee, pointers := Pointers, name_ttl := TTL } = Tx,
             S1 = case Pointers of
                     [] -> remove_named_account(Name, S);
-                    _  -> add_named_account(Name, NameAccount, S)
+                    _  -> add_named_account(Name, {Kind, NameAccount}, S)
                  end,
             reserve_fee(Fee,
             bump_and_charge(Sender, Fee,
                 update_claim_height(Name, Height, TTL, S1)))
     end.
 
-ns_update_features(S, [_Height, _Name, _Sender, {_Tag, _NameAccount}, Tx] = Args, Res) ->
+ns_update_features(S, [_Height, _Name, _Sender, _NameAccount, Tx] = Args, Res) ->
     Correct = ns_update_valid(S, Args),
     [{correct, if Correct -> ns_update; true -> false end},
      {ns_update, Res}] ++
@@ -1794,7 +1800,8 @@ aggregate_feats([Tag | Kinds], Features, Prop) ->
 %% -- State update and query functions ---------------------------------------
 
 lookup_name(S, Name) ->
-    maps:get(Name, maps:get(named_accounts, S, #{})).
+    {Kind, Pointer} = maps:get(Name, maps:get(named_accounts, S, #{})),
+    Pointer.
 
 get_account(S, {name, Name}) ->
     lookup_name(S, Name);
