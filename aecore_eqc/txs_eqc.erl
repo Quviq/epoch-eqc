@@ -220,6 +220,10 @@ multi_mine_features(S, [H, B], _Res) ->
 spend_pre(S) ->
     maps:is_key(accounts, S).
 
+
+%% here we should add spending to oracle and contract
+%% aeser_id:specialize_type(Recv),
+%% names are always accounts, hard coded in tx_processor
 spend_args(#{height := Height} = S) ->
     ?LET({{SenderTag, Sender}, {ReceiverTag, Receiver}},
          {gen_account(1, 49, S), gen_account(2, 1, S)},
@@ -262,7 +266,7 @@ spend_valid(S, [Height, {_, Sender}, {ReceiverTag, Receiver}, Tx]) ->
                new      -> true;
                existing -> is_account(S, Receiver);
                name     -> is_valid_name_account(S, Receiver, Height)
-                           andalso correct_name_id(Receiver, maps:get(recipient_id, Tx))
+                               andalso correct_name_id(Receiver, maps:get(recipient_id, Tx))
             end.
 
 spend_adapt(#{height := Height} = S, [_, {SenderTag, Sender}, {ReceiverTag, Receiver}, Tx]) ->
@@ -274,15 +278,18 @@ spend(Height, _Sender, _Receiver, Tx) ->
     apply_transaction(Height, aec_spend_tx, Tx).
 
 
-spend_next(S, _Value, [_Height, {_SenderTag, Sender}, Receiver, Tx] = Args) ->
+spend_next(S, _Value, [_Height, {SenderTag, Sender}, Receiver, Tx] = Args) ->
     case spend_valid(S, Args) of
         false -> S;
         true  ->
             #{ amount := Amount, fee := Fee } = Tx,
-            RKey = resolve_account(S, Receiver),
-            reserve_fee(Fee,
-            bump_and_charge(Sender, Amount + Fee,
-                credit(RKey, Amount, S)))
+            case resolve_account(S, Receiver) of
+                false -> S;
+                RKey ->
+                    reserve_fee(Fee,
+                                bump_and_charge(Sender, Amount + Fee,
+                                                credit(RKey, Amount, S)))
+            end
     end.
 
 spend_features(S, [_Height, {_, Sender}, {Tag, Receiver}, _Tx] = Args, Res) ->
@@ -1236,9 +1243,9 @@ ns_update_pre(S) ->
     maps:is_key(accounts, S).
 
 ns_update_args(#{height := Height} = S) ->
-     ?LET({{Name, {SenderTag, Sender}}, {Kind, {_, NameAccount}}},
-          {gen_name_claim(S), oneof([{account, gen_account(1, 5, S)}, {oracle, gen_oracle_account(S)} ])},
-          [Height, Name, {SenderTag, Sender#account.key}, {Kind, NameAccount#account.key},
+     ?LET({{Name, {SenderTag, Sender}}, Pointers},
+          {gen_name_claim(S), gen_pointers(S)},
+          [Height, Name, {SenderTag, Sender#account.key}, Pointers,
            #{account_id => aeser_id:create(account, Sender#account.key),
              name_id => aeser_id:create(name, aens_hash:name_hash(Name)),
              name_ttl => frequency([{10, nat()}, {1, 36000}, {10, 25000}, {1, choose(30000, 60000)}]),
@@ -1246,29 +1253,26 @@ ns_update_args(#{height := Height} = S) ->
              fee => gen_fee(Height),
              nonce => gen_nonce(Sender),
              pointers =>
-                 gen_pointers(S, {Kind, NameAccount#account.key})
+                 [ case Kind of
+                       account -> aens_pointer:new(<<"account_pubkey">>, aeser_id:create(account, Key));
+                       oracle -> aens_pointer:new(<<"oracle">>, aeser_id:create(oracle, Key));
+                       fake -> aens_pointer:new(<<"fake">>, aeser_id:create(account, Key))
+                               %% We need create. Otherwise crashes for unknown types, because specialize type in aeser_id is used.
+                               %% This means that such a transaction cannot be created (which makes sense if serialization of it is undefined
+                   end || {Kind, Key} <- Pointers ]
             }]).
 
-gen_pointers(S, {Kind, Key}) ->
-    %% THe names account_pubkey and oracle are kind of hardcoded somewhere it seems
-    Pointer =
-        case Kind of
-            account -> aens_pointer:new(<<"account_pubkey">>, aeser_id:create(account, Key));
-            oracle -> aens_pointer:new(<<"account_pubkey">>, aeser_id:create(oracle, Key))
-        end,
-    frequency([
-        {3, [Pointer]},
-        {0, [Pointer,
-             ?LET({_, Acc}, gen_account(1, 49, S),
-                  aens_pointer:new(<<"account_pubkey">>, aeser_id:create(account, Acc#account.key)))]},
-            %% if there are more than one accounts with same key, node seems to take the first one
-        {1, []}]).
+gen_pointers(S) ->
+    ?LET(Pointers, [?LET({Kind, {_, NameAccount}},
+                         oneof([{account, gen_account(1, 5, S)}, {oracle, gen_oracle_account(S)}]),
+                         {Kind, NameAccount#account.key}), {fake, binary(32)}, {fake, binary(32)}],
+        sublist(Pointers)).
 
-ns_update_pre(S, [Height, Name, {_, Sender}, _NameAccount, Tx]) ->
+ns_update_pre(S, [Height, Name, {_, Sender}, _Pointers, Tx]) ->
     aeser_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx)
         andalso correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
 
-ns_update_valid(S, [Height, Name, {_, Sender}, _, Tx]) ->
+ns_update_valid(S, [Height, Name, {_, Sender}, _Pointers, Tx]) ->
     is_account(S, Sender)
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx) + aec_governance:name_claim_locked_fee())
@@ -1277,33 +1281,33 @@ ns_update_valid(S, [Height, Name, {_, Sender}, _, Tx]) ->
     andalso owns_name(S, Sender, Name)
     andalso is_valid_name(S, Name, Height).
 
-ns_update_adapt(#{height := Height} = S, [_Height, Name, {SenderTag, Sender}, NameAccount, Tx]) ->
-    [Height, Name, {SenderTag, Sender}, NameAccount, adapt_nonce(S, Sender, Tx)];
+ns_update_adapt(#{height := Height} = S, [_Height, Name, {SenderTag, Sender}, Pointers, Tx]) ->
+    [Height, Name, {SenderTag, Sender}, Pointers, adapt_nonce(S, Sender, Tx)];
 ns_update_adapt(_, _) ->
     false.
 
-ns_update(Height, _Name, _Sender, _NameAccount, Tx) ->
+ns_update(Height, _Name, _Sender, _Pointers, Tx) ->
     apply_transaction(Height, aens_update_tx, Tx).
 
-ns_update_next(S, _, [Height, Name, {_, Sender}, {Kind, NameAccount}, Tx] = Args) ->
+ns_update_next(S, _, [Height, Name, {_, Sender}, Pointers, Tx] = Args) ->
     case ns_update_valid(S, Args) of
         false -> S;
         true  ->
-            #{ fee := Fee, pointers := Pointers, name_ttl := TTL } = Tx,
+            #{ fee := Fee, name_ttl := TTL } = Tx,
             S1 = case Pointers of
                     [] -> remove_named_account(Name, S);
-                    _  -> add_named_account(Name, {Kind, NameAccount}, S)
+                    _  -> add_named_account(Name, Pointers, S)
                  end,
             reserve_fee(Fee,
             bump_and_charge(Sender, Fee,
                 update_claim_height(Name, Height, TTL, S1)))
     end.
 
-ns_update_features(S, [_Height, _Name, _Sender, _NameAccount, Tx] = Args, Res) ->
+ns_update_features(S, [_Height, _Name, _Sender, Pointers, _Tx] = Args, Res) ->
     Correct = ns_update_valid(S, Args),
     [{correct, if Correct -> ns_update; true -> false end},
      {ns_update, Res}] ++
-        [{ns_update, double_pointer} || length(maps:get(pointers, Tx)) > 1 ].
+        [{ns_update, [ Kind || {Kind, _} <- Pointers]}].
 
 %% --- Operation: ns_revoke ---
 ns_revoke_pre(S) ->
@@ -1800,15 +1804,17 @@ aggregate_feats([Tag | Kinds], Features, Prop) ->
 %% -- State update and query functions ---------------------------------------
 
 lookup_name(S, Name) ->
-    {Kind, Pointer} = maps:get(Name, maps:get(named_accounts, S, #{})),
-    Pointer.
+    case lists:keyfind(account, 1, maps:get(Name, maps:get(named_accounts, S, #{}))) of
+        {_, Key} -> Key;
+        false -> false
+    end.
 
-get_account(S, {name, Name}) ->
-    lookup_name(S, Name);
-get_account(_, {new, Acc}) ->
-    #account{ key = Acc, amount = 0, nonce = 1 };
-get_account(#{ accounts := Accounts }, {existing, Acc}) ->
-    lists:keyfind(Acc, #account.key, Accounts).
+%% get_account(S, {name, Name}) ->
+%%     lookup_name(S, Name);
+%% get_account(_, {new, Acc}) ->
+%%     #account{ key = Acc, amount = 0, nonce = 1 };
+%% get_account(#{ accounts := Accounts }, {existing, Acc}) ->
+%%     lists:keyfind(Acc, #account.key, Accounts).
 
 resolve_account(S, {name, Name})    -> lookup_name(S, Name);
 resolve_account(_, {new, Key})      -> Key;
@@ -1956,9 +1962,12 @@ is_valid_name(#{claims := Names}, Name, Height) ->
 is_valid_name_account(#{claims := Names} = S, Name, Height) ->
     case lists:keyfind(Name, #claim.name, Names) of
         false -> false;
-        _ ->
-            is_valid_name(S, Name, Height)
-            andalso maps:is_key(Name, maps:get(named_accounts, S, #{}))
+        Claim ->
+            Height =< Claim#claim.expires_by andalso
+                case maps:get(Name, maps:get(named_accounts, S, #{}), undefined) of
+                    undefined -> false;
+                    Pointers -> lists:keyfind(account, 1, Pointers) /= false
+                end
     end.
 
 owns_name(#{claims := Names, height := Height}, Who, Name) ->
