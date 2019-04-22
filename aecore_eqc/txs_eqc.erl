@@ -172,7 +172,7 @@ multi_mine_pre(S) ->
     maps:is_key(accounts, S).
 
 multi_mine_args(#{height := Height}) ->
-    [Height, elements([10, 100, 1000, 10000])].
+    [Height, elements([10, 100, 1000, 10000, 25000])].
 
 multi_mine_pre(#{height := Height}, [H, _]) ->
     Height == H.
@@ -2052,7 +2052,7 @@ adapt_poi(Channel, Tx) ->
     case maps:get(poi, Tx) of
         {valid, _} ->
             Tx#{poi => Channel#channel.trees};
-        Invalid ->
+        _Invalid ->
             Tx
     end.
 
