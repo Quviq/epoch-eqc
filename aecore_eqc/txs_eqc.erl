@@ -225,34 +225,43 @@ spend_pre(S) ->
 %% aeser_id:specialize_type(Recv),
 %% names are always accounts, hard coded in tx_processor
 spend_args(#{height := Height} = S) ->
-    ?LET({{SenderTag, Sender}, {ReceiverTag, Receiver}},
-         {gen_account(1, 49, S), gen_account(2, 1, S)},
-         ?LET(To,
-               oneof([account,
-                      {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++ [<<"ta.test">>])}]),
-              [Height, {SenderTag, Sender#account.key},
-               case To of
-                   account -> {ReceiverTag, Receiver#account.key};
-                   {name, Name} -> {name, Name}
-               end,
-               #{sender_id => aeser_id:create(account, Sender#account.key),  %% The sender is asserted to never be a name.
-                 recipient_id =>
-                     case To of
-                         account ->
-                             aeser_id:create(account, Receiver#account.key);
-                         {name, Name} ->
-                             aeser_id:create(name, aens_hash:name_hash(Name))
-                     end,
-                 amount => gen_spend_amount(Sender),
-                 fee => gen_fee(Height),
-                 nonce => gen_nonce(Sender),
-                 payload => utf8()}])).
+    ?LET([{SenderTag, Sender}, To], [gen_account(1, 49, S),
+                                     frequency([{10, {account,  gen_account(2, 1, S)}},
+                                                {2, {oracle, gen_oracle_account(S)}},
+                                                 {0, {contract, gen_contract_id(1, 100, maps:get(contracts, S))}},
+                                                 {2, {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++ [<<"ta.test">>])}}])],
+         [Height, {SenderTag, Sender#account.key},
+          case To of
+              {account, {ReceiverTag, Receiver}} -> {ReceiverTag, Receiver#account.key};
+              {oracle, {ReceiverTag, Receiver}} -> {ReceiverTag, Receiver#account.key};
+              {contract, {valid, Contract}} -> {contract, Contract#contract.id};
+              {contract, {invalid, Contract}} -> {no_contract, Contract#contract.id};
+              {name, Name} -> {name, Name}
+          end,
+          #{sender_id => aeser_id:create(account, Sender#account.key),  %% The sender is asserted to never be a name.
+            recipient_id =>
+                case To of
+                    {account, {_, Receiver}} ->
+                        aeser_id:create(account, Receiver#account.key);
+                    {oracle, {_, Receiver}} ->
+                        aeser_id:create(oracle, Receiver#account.key);
+                    {contract, {_, Contract}} ->
+                        aeser_id:create(contract, Contract#contract.id);
+                    {name, Name} ->
+                        aeser_id:create(name, aens_hash:name_hash(Name))
+                end,
+            amount => gen_spend_amount(Sender),
+            fee => gen_fee(Height),
+            nonce => gen_nonce(Sender),
+            payload => utf8()}]).
 
 spend_pre(#{accounts := Accounts} = S, [Height, {_, Sender}, {RTag, Receiver}, Tx]) ->
     ReceiverOk =
         case RTag of
             new      -> lists:keyfind(Receiver, #account.key, Accounts) == false;
             existing -> lists:keyfind(Receiver, #account.key, Accounts) =/= false;
+            contract -> true;
+            no_contract -> true;
             name     -> maps:is_key(Receiver, maps:get(named_accounts, S, #{}))
         end,
     ReceiverOk andalso correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
@@ -265,6 +274,8 @@ spend_valid(S, [Height, {_, Sender}, {ReceiverTag, Receiver}, Tx]) ->
     andalso case ReceiverTag of
                new      -> true;
                existing -> is_account(S, Receiver);
+               contract -> true;
+               no_contract -> true;
                name     -> is_valid_name_account(S, Receiver, Height)
                                andalso correct_name_id(Receiver, maps:get(recipient_id, Tx))
             end.
@@ -278,7 +289,7 @@ spend(Height, _Sender, _Receiver, Tx) ->
     apply_transaction(Height, aec_spend_tx, Tx).
 
 
-spend_next(S, _Value, [_Height, {SenderTag, Sender}, Receiver, Tx] = Args) ->
+spend_next(S, _Value, [_Height, {_SenderTag, Sender}, Receiver, Tx] = Args) ->
     case spend_valid(S, Args) of
         false -> S;
         true  ->
@@ -292,11 +303,12 @@ spend_next(S, _Value, [_Height, {SenderTag, Sender}, Receiver, Tx] = Args) ->
             end
     end.
 
-spend_features(S, [_Height, {_, Sender}, {Tag, Receiver}, _Tx] = Args, Res) ->
+spend_features(S, [_Height, {_, Sender}, {Tag, Receiver}, Tx] = Args, Res) ->
     Correct = spend_valid(S, Args),
     [{correct,  if Correct -> spend; true -> false end}] ++
         [ {spend, to_self, Tag} || Sender == Receiver andalso Correct] ++
-        [ {spend, Tag} ||  Correct] ++
+        [ {spend, element(2, maps:get(recipient_id, Tx))} ||  Correct] ++
+        [ {spend, name} || Correct andalso Tag == name] ++
         [{spend, Res}].
 
 
@@ -1809,16 +1821,8 @@ lookup_name(S, Name) ->
         false -> false
     end.
 
-%% get_account(S, {name, Name}) ->
-%%     lookup_name(S, Name);
-%% get_account(_, {new, Acc}) ->
-%%     #account{ key = Acc, amount = 0, nonce = 1 };
-%% get_account(#{ accounts := Accounts }, {existing, Acc}) ->
-%%     lists:keyfind(Acc, #account.key, Accounts).
-
-resolve_account(S, {name, Name})    -> lookup_name(S, Name);
-resolve_account(_, {new, Key})      -> Key;
-resolve_account(_, {existing, Key}) -> Key.
+resolve_account(S, {name, Name}) -> lookup_name(S, Name);
+resolve_account(_, {_, Key})     -> Key.
 
 account_key(#account{key = Key}) ->
     Key.
