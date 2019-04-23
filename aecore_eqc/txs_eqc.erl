@@ -598,7 +598,6 @@ channel_create_features(S, [_Height, _, _, _Tx] = Args, Res) ->
 channel_deposit_pre(S) ->
     maps:is_key(channels, S).
 
-
 channel_deposit_args(#{height := Height} = S) ->
      ?LET({CId = {Initiator, N, Responder}, Party},
           {gen_state_channel_id(S), gen_party()},
@@ -624,7 +623,11 @@ channel_deposit_pre(S, [Height, {I, _, R} = ChannelId, Party, Tx]) ->
     From = case Party of initiator -> I; responder -> R end,
     correct_height(S, Height) andalso valid_nonce(S, From, Tx) andalso
         case maps:get(state_hash, Tx) of
-            {valid, _} = Ts -> (channel(S, ChannelId))#channel.trees == Ts;
+            {valid, _} = Ts ->
+                case channel(S, ChannelId) of
+                    #channel{trees = Trees} -> Trees == Ts;
+                    _ -> true %% invalid channel id filtered later
+                end;
             _ -> true
         end.
 
