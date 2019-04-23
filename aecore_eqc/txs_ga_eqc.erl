@@ -218,12 +218,8 @@ prop_txs() ->
     prop_txs(3).
 
 prop_txs(Fork) ->
-    application:load(aecore),
-    application:set_env(aecore, hard_forks,
-                                   #{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
     application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
-    eqc:dont_print_counterexample(
-    propsetup(
+    propsetup(Fork,
     in_parallel(
     ?FORALL(Cmds, commands(?MODULE),
     begin
@@ -246,7 +242,7 @@ prop_txs(Fork) ->
                           pretty_commands(?MODULE, Cmds, {H, S, Res},
                               conjunction([{result, Res == ok},
                                            {total, Total == 0 orelse equals(Total, ?PatronAmount - FeeTotal)}]))))))))
-    end)))).
+    end))).
 
 
 %% -----
@@ -254,5 +250,7 @@ prop_txs(Fork) ->
 basic_account(S, Sender) ->
     not lists:keymember(Sender, #gaccount.id, maps:get(gaccounts, S)).
 
-propsetup(Prop) ->
-    ?TXS:propsetup(Prop).
+%% Keep this as separate function to make it possiblke to run
+%% txs_sign_eqc both on top of txs_eqc and txs_ga_eqc
+propsetup(Fork, Prop) ->
+    ?TXS:propsetup(Fork, Prop).
