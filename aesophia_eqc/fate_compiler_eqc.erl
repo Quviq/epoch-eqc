@@ -10,9 +10,12 @@
 
 %% -- Compiling and running --------------------------------------------------
 
-run(Chain, Contract, Function, Arguments) ->
+run(Code, Contract, Function, Arguments) ->
     try
-        {ok, #{ accumulator := Result }} = aefa_fate:run(make_call(Contract, Function, Arguments), Chain),
+        Cache = cache(Code),
+        Call  = make_call(Contract, Function, Arguments),
+        Spec  = dummy_spec(),
+        {ok, #{ accumulator := Result }} = aefa_fate:run_with_cache(Call, Spec, Cache),
         Result
     catch _:{error, op_not_implemented_yet} ->
         {error, abort}
@@ -27,14 +30,27 @@ compile_contract(Code, Options) ->
     FCode     = aeso_ast_to_fcode:ast_to_fcode(TypedAst, Options),
     aeso_fcode_to_fate:compile(FCode, Options).
 
-setup_chain(Code) ->
-    #{ contracts => #{<<"test">> => Code} }.
+dummy_spec() ->
+    #{ trees     => aec_trees:new_without_backend(),
+       caller    => <<123:256>>,
+       origin    => <<123:256>>,
+       gas_price => 1,
+       tx_env    => aetx_env:tx_env(1) }.
+
+cache(Code) ->
+    Key = aeb_fate_data:make_address(pad_contract_name(<<"test">>)),
+    #{Key => Code}.
 
 make_call(Contract, Function, Arguments) ->
-    EncArgs  = list_to_tuple([aeb_fate_data:encode(A) || A <- Arguments]),
+    EncArgs  = list_to_tuple([aefate_test_utils:encode(A) || A <- Arguments]),
     Calldata = {tuple, {Function, {tuple, EncArgs}}},
-    #{ contract => Contract,
-       call => aeb_fate_encoding:serialize(Calldata) }.
+    #{ contract => pad_contract_name(Contract),
+       gas      => 1000000,
+       call     => aeb_fate_encoding:serialize(Calldata) }.
+
+pad_contract_name(Name) ->
+    PadSize = 32 - byte_size(Name),
+    iolist_to_binary([Name, lists:duplicate(PadSize, "_")]).
 
 %% -- Generators -------------------------------------------------------------
 
@@ -323,9 +339,8 @@ prop_compile() ->
                 begin
                     Type1    = expand_defs(Defs, Type),
                     Subtype1 = expand_defs(Defs, Subtype),
-                    Chain    = setup_chain(Compiled),
                     Expect   = [ interpret(Pats, Type1, Subtype1, Val) || Val <- Vals ],
-                    Results  = [ untup(run(Chain, <<"test">>, <<"test">>, [Val])) || Val <- Vals ],
+                    Results  = [ untup(run(Compiled, <<"test">>, <<"test">>, [Val])) || Val <- Vals ],
                     Tag = fun({error, _}) -> error; (_) -> value end,
                     aggregate(lists:map(Tag, Results),
                         equals(Results, Expect))
