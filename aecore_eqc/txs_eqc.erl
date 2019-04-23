@@ -1766,17 +1766,7 @@ prop_txs() ->
 
 prop_txs(Fork) ->
     application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
-    compile_contracts(),
-    ?SETUP(
-    fun() ->
-            _ = application:load(aecore),
-            HardForksTeardown = setup_hard_forks(#{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
-            DataDirTeardown = setup_data_dir(),
-            fun() ->
-                    DataDirTeardown(),
-                    HardForksTeardown()
-            end
-    end,
+    propsetup(Fork,
     eqc:dont_print_counterexample(
     in_parallel(
     ?FORALL(Cmds, commands(?MODULE),
@@ -2375,6 +2365,18 @@ fake_contract_id() ->
                    vm = nat()
                   }).
 
+propsetup(Fork, Prop) ->
+    ?SETUP(
+    fun() ->
+            _ = application:load(aecore),
+            compile_contracts(),
+            HardForksTeardown = setup_hard_forks(#{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
+            DataDirTeardown = setup_data_dir(),
+            fun() ->
+                    DataDirTeardown(),
+                    HardForksTeardown()
+            end
+    end, Prop).
 
 setup_data_dir() ->
     %% make sure we can run in eqc/aecore_eqc
