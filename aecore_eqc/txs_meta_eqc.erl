@@ -381,17 +381,17 @@ prop_txs() ->
     prop_txs(3).
 
 prop_txs(Fork) ->
-    application:load(aecore),
-    application:set_env(aecore, hard_forks,
-                                   #{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
     application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
     txs_eqc:compile_contracts(),
     ?SETUP(
     fun() ->
-        meck:new(aec_fork_block_settings, [passthrough]),
-        meck:expect(aec_fork_block_settings, file_name,
-                        fun(R) -> "../../" ++ meck:passthrough([R]) end),
-        fun() -> meck:unload(aec_fork_block_settings) end
+        _ = application:load(aecore),
+        HardForksTeardown = setup_hard_forks(#{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
+        DataDirTeardown = setup_data_dir(),
+        fun() ->
+            DataDirTeardown(),
+            HardForksTeardown()
+        end
     end,
     eqc:dont_print_counterexample(
     in_parallel(
@@ -476,3 +476,25 @@ correct_nonce(GAccount, _S, Sender, _) ->
     %% Actual nonce check is done when precodition checks that this valud is in the state
     %% Possibly an adapt should be used to actually make shrinking more effective
     Sender == GAccount#gaccount.id.
+
+
+setup_data_dir() ->
+    %% make sure we can run in eqc/aecore_eqc
+    {ok, Dir} = file:get_cwd(),
+    %% Not asserting that configuration parameter is undefined so to ease experimenting in Erlang shell.
+    case lists:reverse(filename:split(Dir)) of
+        [_, "eqc" | _] ->
+            application:set_env(setup, data_dir, "../../data");
+        _ ->
+            application:set_env(setup, data_dir, "data")
+    end,
+    fun() ->
+        ok = application:unset_env(setup, data_dir)
+    end.
+
+setup_hard_forks(X) ->
+    %% Not asserting that configuration parameter is undefined so to ease experimenting in Erlang shell.
+    ok = application:set_env(aecore, hard_forks, X),
+    fun() ->
+        ok = application:unset_env(aecore, hard_forks)
+    end.

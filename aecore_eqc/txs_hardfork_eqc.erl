@@ -118,27 +118,38 @@ ns_revoke(Height, _Sender, _Name, Tx) ->
 ns_transfer(Height, _Sender, _Receiver, _Name, Tx) ->
     txs_eqc:apply_transaction(Height, aens_transfer_tx, Tx).
 
+%% --- Operation: create_contract ---
+contract_create(Height, {_, _Sender}, Name, CompilerVersion, Tx) ->
+    NewTx = txs_eqc:contract_create_tx(Name, CompilerVersion, Tx),
+    txs_eqc:apply_transaction(Height, aect_create_tx, NewTx).
+
 %% -- Property ---------------------------------------------------------------
 
 prop_txs() ->
+    ?SETUP(
+    fun() ->
+            _ = application:load(aecore),
+            HardForksTeardown = setup_hard_forks(#{<<"1">> => 0, <<"2">> => 3}),
+            DataDirTeardown = setup_data_dir(),
+            fun() ->
+                DataDirTeardown(),
+                HardForksTeardown()
+            end
+    end,
    %% eqc:dont_print_counterexample(
     in_parallel(
     ?FORALL(Cmds, commands(?MODULE),
     begin
-        application:load(aecore),
-        application:set_env(aecore, hard_forks, 
-                                   #{<<"1">> => 0, <<"2">> => 3}),
-
         {H, S, Res} = run_commands(Cmds),
         Height = maps:get(height, S, 0),
         check_command_names(Cmds,
             measure(length, commands_length(Cmds),
             measure(height, Height,
             features(call_features(H),
-            aggregate_feats([atoms, correct | all_command_names()], call_features(H),
+            aggregate_feats([atoms, correct, protocol | all_command_names()], call_features(H),
                 pretty_commands(?MODULE, Cmds, {H, S, Res},
                                 Res == ok))))))
-    end)).
+    end))).
 
 aggregate_feats([], [], Prop) -> Prop;
 aggregate_feats([atoms | Kinds], Features, Prop) ->
@@ -158,4 +169,23 @@ bugs(Time, Bugs) ->
 %% -- State update and query functions ---------------------------------------
 
 
+setup_data_dir() ->
+    %% make sure we can run in eqc/aecore_eqc
+    {ok, Dir} = file:get_cwd(),
+    %% Not asserting that configuration parameter is undefined so to ease experimenting in Erlang shell.
+    case lists:reverse(filename:split(Dir)) of
+        [_, "eqc" | _] ->
+            application:set_env(setup, data_dir, "../../data");
+        _ ->
+            application:set_env(setup, data_dir, "data")
+    end,
+    fun() ->
+        ok = application:unset_env(setup, data_dir)
+    end.
 
+setup_hard_forks(X) ->
+    %% Not asserting that configuration parameter is undefined so to ease experimenting in Erlang shell.
+    ok = application:set_env(aecore, hard_forks, X),
+    fun() ->
+            ok = application:unset_env(aecore, hard_forks)
+    end.

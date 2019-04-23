@@ -1715,12 +1715,18 @@ prop_txs() ->
     prop_txs(3).
 
 prop_txs(Fork) ->
-    application:load(aecore),
-    application:set_env(aecore, hard_forks,
-                                   #{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
     application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
     compile_contracts(),
-    setup_data_dir(
+    ?SETUP(
+    fun() ->
+            _ = application:load(aecore),
+            HardForksTeardown = setup_hard_forks(#{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
+            DataDirTeardown = setup_data_dir(),
+            fun() ->
+                    DataDirTeardown(),
+                    HardForksTeardown()
+            end
+    end,
     eqc:dont_print_counterexample(
     in_parallel(
     ?FORALL(Cmds, commands(?MODULE),
@@ -2319,18 +2325,23 @@ fake_contract_id() ->
                   }).
 
 
-setup_data_dir(Prop) ->
+setup_data_dir() ->
     %% make sure we can run in eqc/aecore_eqc
-    ?SETUP(fun() ->
-                   {ok, Dir} = file:get_cwd(),
-                   DataDir = application:get_env(setup, data_dir),
-                   case lists:reverse(filename:split(Dir)) of
-                       [_, "eqc" | _] ->
-                           application:set_env(setup, data_dir, "../../data");
-                       _ ->
-                           application:set_env(setup, data_dir, "data")
-                   end,
-                   fun() ->
-                           application:set_env(setup, data_dir, DataDir)
-                   end
-           end, Prop).
+    {ok, Dir} = file:get_cwd(),
+    %% Not asserting that configuration parameter is undefined so to ease experimenting in Erlang shell.
+    case lists:reverse(filename:split(Dir)) of
+        [_, "eqc" | _] ->
+            application:set_env(setup, data_dir, "../../data");
+        _ ->
+            application:set_env(setup, data_dir, "data")
+    end,
+    fun() ->
+            ok = application:unset_env(setup, data_dir)
+    end.
+
+setup_hard_forks(X) ->
+    %% Not asserting that configuration parameter is undefined so to ease experimenting in Erlang shell.
+    ok = application:set_env(aecore, hard_forks, X),
+    fun() ->
+            ok = application:unset_env(aecore, hard_forks)
+    end.

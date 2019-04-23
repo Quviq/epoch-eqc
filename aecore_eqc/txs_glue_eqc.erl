@@ -1430,18 +1430,10 @@ prop_txs() ->
     ?SETUP(
     fun() ->
             eqc_mocking:start_mocking(api_spec()),
-            %% make sure we can run in eqc/aecore_eqc
-            {ok, Dir} = file:get_cwd(),
-            DataDir = application:get_env(setup, data_dir),
-            ok = case lists:reverse(filename:split(Dir)) of
-                     [_, "eqc" | _] ->
-                         application:set_env(setup, data_dir, "../../data");
-                     _ ->
-                         application:set_env(setup, data_dir, "data")
-                 end,
+            DataDirTeardown = setup_data_dir(),
             fun() ->
                     eqc_mocking:stop_mocking(),
-                    ok = application:set_env(setup, data_dir, DataDir)
+                    DataDirTeardown()
             end
     end,
     eqc:dont_print_counterexample(
@@ -1918,3 +1910,17 @@ fake_contract_id() ->
                    abi = nat(),
                    vm = nat()
                   }).
+
+setup_data_dir() ->
+    %% make sure we can run in eqc/aecore_eqc
+    {ok, Dir} = file:get_cwd(),
+    %% Not asserting that configuration parameter is undefined so to ease experimenting in Erlang shell.
+    case lists:reverse(filename:split(Dir)) of
+        [_, "eqc" | _] ->
+            application:set_env(setup, data_dir, "../../data");
+        _ ->
+            application:set_env(setup, data_dir, "data")
+    end,
+    fun() ->
+            ok = application:unset_env(setup, data_dir)
+    end.
