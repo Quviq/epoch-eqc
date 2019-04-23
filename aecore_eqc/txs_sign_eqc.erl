@@ -211,11 +211,8 @@ prop_txs() ->
     prop_txs(3).
 
 prop_txs(Fork) ->
-    application:load(aecore),
-    application:set_env(aecore, hard_forks,
-                                   #{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
     application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
-    ?TXS:propsetup(
+    ?TXS:propsetup(Fork,
     eqc:dont_print_counterexample(
     in_parallel(
     ?FORALL(Cmds, commands(?MODULE),
