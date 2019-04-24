@@ -228,14 +228,13 @@ spend_args(#{height := Height} = S) ->
     ?LET([{SenderTag, Sender}, To], [gen_account(1, 49, S),
                                      frequency([{10, {account,  gen_account(2, 1, S)}},
                                                 {2, {oracle, gen_oracle_account(S)}},
-                                                 {0, {contract, gen_contract_id(1, 100, maps:get(contracts, S))}},
-                                                 {2, {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++ [<<"ta.test">>])}}])],
+                                                {1, {contract, gen_contract_id(1, 100, maps:get(contracts, S))}},
+                                                {2, {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++ [<<"ta.test">>])}}])],
          [Height, {SenderTag, Sender#account.key},
           case To of
               {account, {ReceiverTag, Receiver}} -> {ReceiverTag, Receiver#account.key};
               {oracle, {ReceiverTag, Receiver}} -> {ReceiverTag, Receiver#account.key};
-              {contract, {valid, Contract}} -> {contract, Contract#contract.id};
-              {contract, {invalid, Contract}} -> {no_contract, Contract#contract.id};
+              {contract, {_, Contract}} -> {contract, Contract#contract.id};
               {name, Name} -> {name, Name}
           end,
           #{sender_id => aeser_id:create(account, Sender#account.key),  %% The sender is asserted to never be a name.
@@ -260,8 +259,9 @@ spend_pre(#{accounts := Accounts} = S, [Height, {_, Sender}, {RTag, Receiver}, T
         case RTag of
             new      -> lists:keyfind(Receiver, #account.key, Accounts) == false;
             existing -> lists:keyfind(Receiver, #account.key, Accounts) =/= false;
-            contract -> true;
-            no_contract -> true;
+            contract ->
+                %% only allow valid contracts, otherwise it's just a new account without secret key to sign
+                lists:keyfind(Receiver, #contract.id, maps:get(contracts, S, [])) =/= false;
             name     -> maps:is_key(Receiver, maps:get(named_accounts, S, #{}))
         end,
     ReceiverOk andalso correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
@@ -275,7 +275,6 @@ spend_valid(S, [Height, {_, Sender}, {ReceiverTag, Receiver}, Tx]) ->
                new      -> true;
                existing -> is_account(S, Receiver);
                contract -> true;
-               no_contract -> true;
                name     -> is_valid_name_account(S, Receiver, Height)
                                andalso correct_name_id(Receiver, maps:get(recipient_id, Tx))
             end.
@@ -296,6 +295,10 @@ spend_next(S, _Value, [_Height, {_SenderTag, Sender}, Receiver, Tx] = Args) ->
             #{ amount := Amount, fee := Fee } = Tx,
             case resolve_account(S, Receiver) of
                 false -> S;
+                {contract, ContractId} ->
+                     reserve_fee(Fee,
+                                bump_and_charge(Sender, Amount + Fee,
+                                                credit_amount(ContractId, Amount, S)));
                 RKey ->
                     reserve_fee(Fee,
                                 bump_and_charge(Sender, Amount + Fee,
@@ -1812,6 +1815,7 @@ lookup_name(S, Name) ->
     end.
 
 resolve_account(S, {name, Name}) -> lookup_name(S, Name);
+resolve_account(_, {contract, Key}) -> {contract, Key};
 resolve_account(_, {_, Key})     -> Key.
 
 account_key(#account{key = Key}) ->
@@ -1847,6 +1851,10 @@ add(Tag, X, S) ->
 update_contract_id(OldId, NewId, S) ->
     Fun = fun(C) -> C#contract{id = NewId} end,
     on_contract(OldId, Fun, S).
+
+credit_amount(Id, Credit, S) ->
+    Fun = fun(C) -> C#contract{amount = C#contract.amount + Credit} end,
+    on_contract(Id, Fun, S).
 
 on_contract(Id, Fun, S = #{contracts := Contracts}) ->
     Upd = fun(C = #contract{ id = I }) when I == Id -> Fun(C);
