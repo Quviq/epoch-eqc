@@ -54,6 +54,17 @@ pad_contract_name(Name) ->
 
 %% -- Generators -------------------------------------------------------------
 
+-record(env, {types = [], constrs = []}).
+
+bind_type(X, Env) -> Env#env{ types = [X | Env#env.types] }.
+bind_type(X, Def, Env) -> bind_type(X, bind_constrs(def_con_names(Def), Env)).
+
+bind_constr(C, Env) -> bind_constrs([C], Env).
+bind_constrs(Cs, Env) -> Env#env{ constrs = Cs ++ Env#env.constrs }.
+
+is_type(#env{types = Ts}, T) -> lists:member(T, Ts).
+is_constr(#env{constrs = Cs}, C) -> lists:member(C, Cs).
+
 ulist(Key, Val) ->
     ?LET(Xs, list({Key, seal(Val)}),
     begin
@@ -64,51 +75,75 @@ ulist(Key, Val) ->
 
 gen_field_name() -> elements(["x", "y", "z"]).
 
-gen_typedef(X, TEnv) ->
+gen_typedef(X, TEnv = #env{}) ->
     oneof([{alias_t, ?SIZED(N, gen_type(TEnv, N div 10))},
-           % variant_t
+           {variant_t, X, gen_constrs(TEnv)},
            {record_t, X, gen_fields(TEnv)}]).
 
 gen_typename() ->
     gen_typename([]).
 
 gen_typename(TEnv) ->
+    gen_name(TEnv#env.types, ["r", "s", "t"]).
+
+gen_conname(TEnv) ->
+    gen_name(TEnv#env.constrs, ["A", "B", "C", "D"]).
+
+gen_name(Taken, Names) ->
     ?SUCHTHAT(Name,
-    ?LET({X, Suf}, {elements(["r", "s", "t"]),
+    ?LET({X, Suf}, {elements(Names),
                     choose(0, 5)},
         return(lists:concat([X] ++ [Suf || Suf > 0]))),
-    not lists:member(Name, TEnv)).
+    not lists:member(Name, Taken)).
 
 gen_typedefs() ->
     ?LET(I, weighted_default({3, 0}, {1, choose(1, 3)}),
-         gen_typedefs(I, [])).
+         gen_typedefs(I, #env{})).
 
 gen_typedefs(0, _) -> [];
 gen_typedefs(I, TEnv) ->
     ?LET(X, gen_typename(TEnv),
-    [{type_def, X, gen_typedef(X, TEnv)}|
-     gen_typedefs(I - 1, [X | TEnv])]).
+    ?LET(Def, gen_typedef(X, TEnv),
+    [{type_def, X, Def}|
+     gen_typedefs(I - 1, bind_type(X, Def, TEnv))])).
+
+def_con_names({variant_t, _, Cons}) -> [C || {C, _} <- Cons];
+def_con_names(_) -> [].
 
 gen_fields(TEnv) ->
     ulist(gen_field_name(), ?SIZED(N, gen_type(TEnv, N div 20))).
 
-gen_type() -> gen_type([]).
+gen_constrs(TEnv) ->
+    ?LET(N, choose(1, 4),
+    gen_constrs(TEnv, N)).
+
+gen_constrs(_, 0) -> [];
+gen_constrs(TEnv, N) ->
+    ?LET(C, gen_conname(TEnv),
+         [{C, ?SIZED(Size, gen_types(TEnv, Size div 20))} |
+          gen_constrs(bind_constr(C, TEnv), N - 1)]).
+
+gen_type() -> gen_type(#env{}).
 gen_type(TEnv) ->
     ?SIZED(N, gen_type(TEnv, N div 5)).
 
-gen_type(_, 0) -> elements([bool, int]);
-gen_type(TEnv, N) ->
+gen_type(_, 0) -> elements([bool, int, string]);
+gen_type(Env = #env{types = TEnv}, N) ->
     ?LAZY(frequency(
       [{1, {id, elements(TEnv)}} || [] /= TEnv] ++
-      [{1, gen_type(TEnv, 0)},
-       {1, ?LETSHRINK([T], [gen_type(TEnv, N div 2)],
+      [{1, gen_type(Env, 0)},
+       {1, ?LETSHRINK([T], [gen_type(Env, N div 2)],
              {list, T})},
-       {3, ?LET(I, choose(2, 3),
-           ?LETSHRINK(Ts, vector(I, gen_type(TEnv, N div I)),
-             {tuple, Ts}))}])).
+       {3, ?LETSHRINK(Ts, gen_types(Env, N),
+             {tuple, Ts})}])).
+
+gen_types(TEnv, N) ->
+    ?LET(I, choose(2, 3),
+    vector(I, gen_type(TEnv, N div I))).
 
 gen_subtype(bool) -> bool;
 gen_subtype(int) -> int;
+gen_subtype(string) -> string;
 gen_subtype(T = {id, _}) -> T;
 gen_subtype({list, T}) ->
     weighted_default({3, gen_subtype(T)}, {1, return(T)});
@@ -126,8 +161,12 @@ gen_pat(Defs, Type) ->
 gen_pat1(Defs, N, Type) ->
     weighted_default( {1, gen_var()}, {2, gen_pat2(Defs, N, Type)}).
 
+strings() ->
+    [<<"">>, <<"x">>, <<"foo">>, <<"bar">>,
+     << <<C>> || _ <- lists:seq(1, 4), C <- lists:seq($a, $z) >>].
 
 gen_pat2(_, _, int) -> {int, nat()};
+gen_pat2(_, _, string) -> {string, elements(strings())};
 gen_pat2(_, _, bool) -> {bool, bool()};
 gen_pat2(Defs, N, {id, X}) ->
     {type_def, _, Def} = lists:keyfind(X, 2, Defs),
@@ -138,6 +177,9 @@ gen_pat2(Defs, N, {record_t, _, Fields}) ->
     ?LET(Fs, non_empty(sublist(Fields)),
     ?LET(Fs1, shuffle(Fs),
         {record, [ {Y, gen_pat1(Defs, N, T)} || {Y, T} <- Fs1 ]}));
+gen_pat2(Defs, N, {variant_t, _, Cons}) ->
+    ?LET({Con, Args}, elements(Cons),
+         {con, Con, [gen_pat2(Defs, N, T) || T <- Args]});
 gen_pat2(Defs, N, {list, T}) ->
     ?LAZY(weighted_default({1, nil},
                            {2, {'::', gen_pat1(Defs, N div 3, T), gen_pat1(Defs, 2 * N div 2, {list, T})}}));
@@ -152,21 +194,28 @@ freshen(Taken, {var, X}) ->
     {Taken1, {var, Y}};
 freshen(Taken, {bool, _} = P)   -> {Taken, P};
 freshen(Taken, {int, _} = P)    -> {Taken, P};
+freshen(Taken, {string, _} = P)    -> {Taken, P};
 freshen(Taken, nil = P)         -> {Taken, P};
-freshen(Taken, {record, []} = P) -> {Taken, P};
-freshen(Taken, {record, [{X, P} | Fs]}) ->
-    {Taken1, P1} = freshen(Taken, P),
-    {Taken2, {record, Fs1}} = freshen(Taken1, {record, Fs}),
-    {Taken2, {record, [{X, P1} | Fs1]}};
-freshen(Taken, {tuple, []} = P) -> {Taken, P};
-freshen(Taken, {tuple, [P | Ps]}) ->
-    {Taken1, P1}           = freshen(Taken, P),
-    {Taken2, {tuple, Ps1}} = freshen(Taken1, {tuple, Ps}),
-    {Taken2, {tuple, [P1 | Ps1]}};
+freshen(Taken, {con, C, Ps}) ->
+    {Taken1, Ps1} = freshen(Taken, Ps),
+    {Taken1, {con, C, Ps1}};
+freshen(Taken, {record, Fs}) ->
+    {Xs, Ps}      = lists:unzip(Fs),
+    {Taken1, Ps1} = freshen(Taken, Ps),
+    {Taken1, {record, lists:zip(Xs, Ps1)}};
+freshen(Taken, {tuple, Ps}) ->
+    {Taken1, Ps1} = freshen(Taken, Ps),
+    {Taken1, {tuple, Ps1}};
 freshen(Taken, {'::', P, Q}) ->
     {Taken1, P1} = freshen(Taken, P),
     {Taken2, Q1} = freshen(Taken1, Q),
-    {Taken2, {'::', P1, Q1}}.
+    {Taken2, {'::', P1, Q1}};
+freshen(Taken, [H | T]) ->
+    {Taken1, H1} = freshen(Taken, H),
+    {Taken2, T1} = freshen(Taken1, T),
+    {Taken2, [H1 | T1]};
+freshen(Taken, []) -> {Taken, []}.
+
 
 fresh(Taken, "_") -> {Taken, "_"};
 fresh(Taken, X)   -> fresh(Taken, X, 0).
@@ -179,14 +228,15 @@ fresh(Taken, X, Suf) ->
     end.
 
 gen_fun(Defs) ->
-    TEnv = [X || {type_def, X, _} <- Defs],
+    TEnv = #env{types = [X || {type_def, X, _} <- Defs]},
     ?LET(TypeBox, seal(gen_type(TEnv)),
     ?LET({Type, Pats}, {open(TypeBox), non_empty(eqc_gen:list(5, gen_pat(Defs, peek(TypeBox))))},
         {Type, [prune(Defs, Type, Pat) || Pat <- Pats]})).
 
-prune(_, _,    {var, _}  = P) -> P;
-prune(_, bool, {bool, _} = P) -> P;
-prune(_, int,  {int,  _} = P) -> P;
+prune(_, _,      {var, _}     = P) -> P;
+prune(_, bool,   {bool, _}    = P) -> P;
+prune(_, int,    {int,  _}    = P) -> P;
+prune(_, string, {string,  _} = P) -> P;
 prune(_, {list, _}, nil = P) -> P;
 prune(Defs, {list, T}, {'::', P, Q}) ->
     {'::', prune(Defs, T, P), prune(Defs, {list, T}, Q)};
@@ -208,15 +258,30 @@ prune(Defs, {record_t, _, Ts}, {record, Ps}) ->
         [] -> {var, "_"};
         Ps1 -> {record, Ps1}
     end;
+prune(Defs, {variant_t, _, Cons}, {con, C, Ps}) ->
+    case lists:keyfind(C, 1, Cons) of
+        {C, Ts} ->
+            {tuple, Ps1} = prune(Defs, {tuple, Ts}, {tuple, Ps}),
+            {con, C, Ps1};
+        _ -> {var, "_"}
+    end;
 prune(_, _, _) -> {var, "_"}.
 
 gen_value(_, bool) -> bool();
 gen_value(_, int)  -> int();
+gen_value(_, string) -> elements(strings());
 gen_value(Defs, {id, X}) ->
     {type_def, _, Def} = lists:keyfind(X, 2, Defs),
     case Def of
         {alias_t, Type}       -> gen_value(Defs, Type);
-        {record_t, _, Fields} -> gen_value(Defs, {tuple, [T || {_, T} <- Fields]})
+        {record_t, _, Fields} -> gen_value(Defs, {tuple, [T || {_, T} <- Fields]});
+        {variant_t, _, Cons}  ->
+            ?LET(I, choose(0, length(Cons) - 1),
+            begin
+                Arities   = [length(As) || {_, As} <- Cons],
+                {_, Args} = lists:nth(I + 1, Cons),
+                {variant, Arities, I, gen_value(Defs, {tuple, Args})}
+            end)
     end;
 gen_value(Defs, {list, T}) -> list(gen_value(Defs, T));
 gen_value(Defs, {tuple, Ts}) ->
@@ -226,6 +291,7 @@ gen_value(Defs, {tuple, Ts}) ->
 
 pp_type(bool)        -> "bool";
 pp_type(int)         -> "int";
+pp_type(string)      -> "string";
 pp_type({id, X})     -> X;
 pp_type({list, T})   -> "list(" ++ pp_type(T) ++ ")";
 pp_type({tuple, Ts}) -> "(" ++ string:join([pp_type(T) || T <- Ts], ", ") ++ ")".
@@ -233,15 +299,21 @@ pp_type({tuple, Ts}) -> "(" ++ string:join([pp_type(T) || T <- Ts], ", ") ++ ")"
 pp_pat({var, X})    -> X;
 pp_pat({bool, B})   -> atom_to_list(B);
 pp_pat({int, N})    -> integer_to_list(N);
+pp_pat({string, <<>>}) -> "\"\"";
+pp_pat({string, S}) -> io_lib:format("~p", [binary_to_list(S)]);
 pp_pat(nil)         -> "[]";
 pp_pat({'::', P, Q}) -> "(" ++ pp_pat(P) ++ " :: " ++ pp_pat(Q) ++ ")";
 pp_pat({tuple, Ps}) -> "(" ++ string:join([pp_pat(P) || P <- Ps], ", ") ++ ")";
+pp_pat({con, C, []}) -> C;
+pp_pat({con, C, Ps}) -> C ++ pp_pat({tuple, Ps});
 pp_pat({record, Ps}) -> "{" ++ string:join([[X, " = ", pp_pat(P)] || {X, P} <- Ps], ", ") ++ "}".
 
 pp_def({type_def, Name, {alias_t, Type}}) ->
     ["type ", Name, " = ", pp_type(Type)];
 pp_def({type_def, Name, {record_t, _, Fields}}) ->
-    ["record ", Name, " = {", string:join([[X, " : ", pp_type(T)] || {X, T} <- Fields], ", "), "}"].
+    ["record ", Name, " = {", string:join([[X, " : ", pp_type(T)] || {X, T} <- Fields], ", "), "}"];
+pp_def({type_def, Name, {variant_t, _, Cons}}) ->
+    ["datatype ", Name, " = ", string:join([[Con, [pp_type({tuple, Args}) || Args /= []]] || {Con, Args} <- Cons], " | ")].
 
 body(Defs, Type, Subtype, I, Pat) ->
     Type1    = expand_defs(Defs, Type),
@@ -249,6 +321,7 @@ body(Defs, Type, Subtype, I, Pat) ->
     lists:concat(["(", I, ", a, [", string:join(vars_of_type(Subtype1, Type1, Pat), ", "), "])"]).
 
 expand_defs(_, int) -> int;
+expand_defs(_, string) -> string;
 expand_defs(_, bool) -> bool;
 expand_defs(Defs, {id, X}) ->
     {type_def, _, Def} = lists:keyfind(X, 2, Defs),
@@ -256,6 +329,8 @@ expand_defs(Defs, {id, X}) ->
 expand_defs(Defs, {alias_t, Type}) -> expand_defs(Defs, Type);
 expand_defs(Defs, {record_t, R, Fields}) ->
     {record_t, R, [{X, expand_defs(Defs, T)} || {X, T} <- Fields]};
+expand_defs(Defs, {variant_t, D, Cons}) ->
+    {variant_t, D, [{C, [expand_defs(Defs, T) || T <- Args]} || {C, Args} <- Cons]};
 expand_defs(Defs, {list, T}) -> {list, expand_defs(Defs, T)};
 expand_defs(Defs, {tuple, Ts}) ->
     {tuple, [expand_defs(Defs, T) || T <- Ts]}.
@@ -264,12 +339,18 @@ vars_of_type(T, T, {var, X}) when X /= "_" -> [X];
 vars_of_type(_, _, {var, _})               -> [];
 vars_of_type(_, _, {bool, _})              -> [];
 vars_of_type(_, _, {int, _})               -> [];
+vars_of_type(_, _, {string, _})            -> [];
 vars_of_type(_, _, nil)                    -> [];
 vars_of_type(S, {list, T}, {'::', P, Q}) ->
     vars_of_type(S, T, P) ++ vars_of_type(S, {list, T}, Q);
 vars_of_type(S, {tuple, Ts}, {tuple, Ps})  ->
     [ X || {T, P} <- lists:zip(Ts, Ps),
            X      <- vars_of_type(S, T, P) ];
+vars_of_type(S, {variant_t, _, Cons}, {con, C, Ps}) ->
+    case lists:keyfind(C, 1, Cons) of
+        {_, Ts} -> vars_of_type(S, {tuple, Ts}, {tuple, Ps});
+        false -> error({wtf, Cons, C, Ps})
+    end;
 vars_of_type(S, {record_t, _, Ts}, {record, Ps}) ->
     [Z || {X, P} <- Ps, {Y, T} <- Ts, X == Y,
           Z      <- vars_of_type(S, T, P)].
@@ -293,9 +374,15 @@ match1(_, {var, "_"}, _)  -> [];
 match1(T, {var, _}, V)    -> [{V, T}];
 match1(_, {bool, B}, B)   -> [];
 match1(_, {int,  N}, N)   -> [];
-match1(_, nil, [])           -> [];
+match1(_, {string, S}, S) -> [];
+match1(_, nil, [])        -> [];
 match1({list, Type}, {'::', P, Q}, [H | T]) ->
     match1(Type, P, H) ++ match1({list, Type}, Q, T);
+match1({variant_t, _, Cons}, {con, C, Ps}, {variant, _, I, Vs}) ->
+    case lists:nth(I + 1, Cons) of
+        {C, Ts} -> match1({tuple, Ts}, {tuple, Ps}, Vs);
+        _ -> throw(no_match)
+    end;
 match1({tuple, Ts}, {tuple, Ps}, V) ->
     lists:append(lists:zipwith3(fun match1/3, Ts, Ps, tuple_to_list(V)));
 match1({record_t, _, Fs}, {record, Ps}, V) ->
@@ -317,6 +404,8 @@ interpret(I, Type, Subtype, [Pat | Pats], Val) ->
 
 untup({tuple, T}) ->
     list_to_tuple(untup(tuple_to_list(T)));
+untup({variant, Ar, I, Args}) ->
+    {variant, Ar, I, list_to_tuple(untup(tuple_to_list(Args)))};
 untup([H | T]) ->
     [untup(H) | untup(T)];
 untup(X) -> X.
