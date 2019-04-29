@@ -1500,7 +1500,9 @@ contract_create_valid(S, [Height, {_, Sender}, Name, CompilerVersion, Tx]) ->
                     lists:member({maps:get(vm_version, Tx), maps:get(abi_version, Tx)},
                                  [{aevm_sophia_3, 1}, {aevm_sophia_2, 1}])
             end
-    andalso lists:member(CompilerVersion, [1, 2]).
+    andalso lists:member(CompilerVersion,
+                             [ 1 || Protocol >= 1] ++
+                             [ 2 || Protocol >= 2]).
 
 contract_create_adapt(#{height := Height} = S, [_, {STag, Sender}, Contract, CompilerVersion, Tx]) ->
     [Height, {STag, Sender}, Contract, CompilerVersion, adapt_nonce(S, Sender, Tx)];
