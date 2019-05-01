@@ -24,6 +24,7 @@
 -record(preclaim,{name, salt, height, claimer, protocol}).
 -record(claim,{name, height, expires_by, protected_height,  claimer, protocol}).
 -record(query, {sender, id, fee, response_ttl, query_ttl}).
+-record(oracle, {id, qfee, oracle_ttl}).
 -record(channel, {id, round = 1, amount = 0, reserve = 0, trees, closed = false, lock_period}).
 -record(contract, {name, id, amount, deposit, vm, abi, compiler_version, protocol, src, functions}).
 
@@ -356,11 +357,12 @@ register_oracle_next(S, _Value, [_Height, {_, Sender}, Tx] = Args) ->
         false -> S;
         true  ->
             #{ fee := Fee, query_fee := QFee, oracle_ttl := {delta, D} } = Tx,
-            Oracle = {Sender, QFee, D + maps:get(height, S)},
+            Oracle =  #oracle{id = Sender, qfee = QFee,
+	    	     	     oracle_ttl = D + maps:get(height, S)},
             reserve_fee(Fee,
             bump_and_charge(Sender, Fee,
                 add(oracles, Oracle,
-                remove(oracles, Sender, 1, S))))
+                remove(oracles, Sender, #oracle.id, S))))
     end.
 
 register_oracle_features(S, [_Height, {_, _Sender}, _Tx] = Args, Res) ->
@@ -426,7 +428,7 @@ query_oracle_args(#{height := Height} = S) ->
           begin
               QFee = case oracle(S, Oracle#account.key) of
                        false -> 100;
-                       {_, QFee0, _} -> QFee0
+                       O -> O#oracle.qfee
                      end,
               [Height, {SenderTag, Sender#account.key}, Oracle#account.key,
                #{sender_id => aeser_id:create(account, Sender#account.key),
@@ -1864,16 +1866,16 @@ on_contract(Id, Fun, S = #{contracts := Contracts}) ->
     S#{ contracts => lists:map(Upd, Contracts) }.
 
 oracle_ext(Id, Delta, S) ->
-    {Id, QFee, TTL} = oracle(S, Id),
-    add(oracles, {Id, QFee, TTL + Delta}, remove(oracles, Id, 1, S)).
+    Fun = fun(O) -> O#oracle{oracle_ttl = O#oracle.oracle_ttl + Delta} end,
+    on_oracle(Id, Fun, S).
 remove(Tag, X, I, S) ->
     S#{ Tag := lists:keydelete(X, I, maps:get(Tag, S)) }.
 
 update_oracle_id(OldId, NewId, S) ->
-    on_oracle(OldId, fun({_, Fee, TTL}) -> {NewId, Fee, TTL} end, S).
+    on_oracle(OldId, fun(O) -> O#oracle{id = NewId} end, S).
 
 on_oracle(Id, Fun, S = #{ oracles := Oracles }) ->
-    Upd = fun(C = {I, _, _}) when I == Id -> Fun(C);
+    Upd = fun(C = #oracle{id = I}) when I == Id -> Fun(C);
              (C) -> C end,
     S#{ oracles => lists:map(Upd, Oracles) }.
 
@@ -1993,19 +1995,17 @@ valid_account(S, {Tag, Key}) ->
     IsA = is_account(S, Key),
     (IsA andalso Tag == existing) orelse (not IsA andalso Tag == new).
 
-is_oracle(#{oracles := Oracles}, Oracle) ->
-    lists:keymember(Oracle, 1, Oracles).
+is_oracle(#{oracles := Oracles}, OracleId) ->
+    lists:keymember(OracleId, #oracle.id, Oracles).
+oracle(#{oracles := Oracles}, OracleId) ->
+    lists:keyfind(OracleId, #oracle.id, Oracles).
+oracle_query_fee(#{oracles := Oracles}, OracleId) ->
+    Oracle = lists:keyfind(OracleId, #oracle.id, Oracles),
+    Oracle#oracle.qfee.
 
-oracle(#{oracles := Oracles}, Oracle) ->
-    lists:keyfind(Oracle, 1, Oracles).
-
-oracle_query_fee(#{oracles := Oracles}, Oracle) ->
-    {_, QFee, _} = lists:keyfind(Oracle, 1, Oracles),
-    QFee.
-
-oracle_ttl(#{oracles := Oracles}, Oracle) ->
-    {_, _, TTL} = lists:keyfind(Oracle, 1, Oracles),
-    TTL.
+oracle_ttl(#{oracles := Oracles}, OracleId) ->
+    Oracle = lists:keyfind(OracleId, #oracle.id, Oracles),
+    Oracle#oracle.oracle_ttl.
 
 query_response_ttl(#{queries := Queries}, QueryId) ->
     Query = lists:keyfind(QueryId, #query.id, Queries),
@@ -2169,7 +2169,7 @@ gen_oracle_account(#{oracles := []} = S) ->
     gen_account(1, 1, S);
 gen_oracle_account(#{accounts := As, oracles := Os} = S) ->
     weighted_default(
-        {39, ?LET({O, _, _}, elements(Os), {existing, lists:keyfind(O, #account.key, As)})},
+        {39, ?LET(#oracle{id = O}, elements(Os), {existing, lists:keyfind(O, #account.key, As)})},
         {1,  gen_account(9, 1, S)}).
 
 
