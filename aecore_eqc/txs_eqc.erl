@@ -24,7 +24,7 @@
 -record(preclaim,{name, salt, height, claimer, protocol}).
 -record(claim,{name, height, expires_by, protected_height,  claimer, protocol}).
 -record(query, {sender, id, fee, response_ttl, query_ttl}).
--record(oracle, {id, qfee, oracle_ttl}).
+-record(oracle, {id, qfee, oracle_ttl, amount}).
 -record(channel, {id, round = 1, amount = 0, reserve = 0, trees, closed = false, lock_period}).
 -record(contract, {name, id, amount, deposit, vm, abi, compiler_version, protocol, src, functions}).
 
@@ -358,7 +358,8 @@ register_oracle_next(S, _Value, [_Height, {_, Sender}, Tx] = Args) ->
         true  ->
             #{ fee := Fee, query_fee := QFee, oracle_ttl := {delta, D} } = Tx,
             Oracle =  #oracle{id = Sender, qfee = QFee,
-	    	     	     oracle_ttl = D + maps:get(height, S)},
+	    	     	     oracle_ttl = D + maps:get(height, S),
+	    		amount = account_amount(S, Sender) - Fee},
             reserve_fee(Fee,
             bump_and_charge(Sender, Fee,
                 add(oracles, Oracle,
@@ -482,10 +483,19 @@ query_oracle_next(S, _Value, [Height, {_, Sender}, Oracle, Tx] = Args) ->
                 add(queries, Query, S)))
     end.
 
-query_oracle_features(S, [_Height, _, _, _Tx] = Args, Res) ->
+query_oracle_features(S, [_Height, _, Oracle, Tx] = Args, Res) ->
     Correct = query_oracle_valid(S, Args),
     [{correct, if Correct -> query_oracle; true -> false end},
-     {query_oracle, Res}].
+     {query_oracle, Res}] ++
+     [{query_oracle, spend_before_query}
+           || Correct
+	   andalso oracle_amount(S, Oracle) - account_amount(S, Oracle) > 0] ++
+     [{query_oracle, receive_before_query}
+           || Correct
+	   andalso oracle_amount(S, Oracle) - account_amount(S, Oracle) < 0] ++
+     [{query_oracle, same_amount_register}
+           || Correct
+	   andalso oracle_amount(S, Oracle) - account_amount(S, Oracle) == 0].
 
 %% --- Operation: response_oracle ---
 response_oracle_pre(S) ->
@@ -2006,7 +2016,9 @@ oracle_query_fee(#{oracles := Oracles}, OracleId) ->
 oracle_ttl(#{oracles := Oracles}, OracleId) ->
     Oracle = lists:keyfind(OracleId, #oracle.id, Oracles),
     Oracle#oracle.oracle_ttl.
-
+oracle_amount(#{oracles := Oracles}, OracleId) ->
+    Oracle = lists:keyfind(OracleId, #oracle.id, Oracles),
+    Oracle#oracle.amount.
 query_response_ttl(#{queries := Queries}, QueryId) ->
     Query = lists:keyfind(QueryId, #query.id, Queries),
     Query#query.response_ttl.
@@ -2079,7 +2091,9 @@ check_balance(S, Key, Amount) ->
 
 account(#{accounts := Accounts}, Key) ->
     lists:keyfind(Key, #account.key, Accounts).
-
+account_amount(S, Key) ->
+    (account(S, Key))#account.amount.
+    
 is_channel(S, CId) ->
     channel(S, CId) /= false.
 
