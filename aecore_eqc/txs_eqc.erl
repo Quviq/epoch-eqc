@@ -352,13 +352,13 @@ register_oracle(Height, _Sender, Tx) ->
     apply_transaction(Height, aeo_register_tx, Tx).
 
 
-register_oracle_next(S, _Value, [_Height, {_, Sender}, Tx] = Args) ->
+register_oracle_next(S, _Value, [Height, {_, Sender}, Tx] = Args) ->
     case register_oracle_valid(S, Args) of
         false -> S;
         true  ->
             #{ fee := Fee, query_fee := QFee, oracle_ttl := {delta, D} } = Tx,
-            Oracle =  #oracle{id = Sender, qfee = QFee,
-	    	     	     oracle_ttl = D + maps:get(height, S)},
+            Oracle = #oracle{id = Sender, qfee = QFee,
+	    	     	     oracle_ttl = D + Height},
             reserve_fee(Fee,
             bump_and_charge(Sender, Fee,
                 add(oracles, Oracle,
@@ -426,15 +426,16 @@ query_oracle_args(#{height := Height} = S) ->
      ?LET({{SenderTag, Sender}, {_, Oracle}},
           {gen_account(1, 49, S), gen_oracle_account(S)},
           begin
-              QFee = case oracle(S, Oracle#account.key) of
-                       false -> 100;
-                       O -> O#oracle.qfee
-                     end,
+              QueryFee =
+                  case oracle(S, Oracle#account.key) of
+                      false -> 100;
+                      #oracle{qfee = QFee} -> QFee
+                  end,
               [Height, {SenderTag, Sender#account.key}, Oracle#account.key,
                #{sender_id => aeser_id:create(account, Sender#account.key),
                  oracle_id => aeser_id:create(oracle, Oracle#account.key),
                  query => oneof([<<"{foo: bar}"/utf8>>, <<"any string"/utf8>>, <<>>]),
-                 query_fee => gen_query_fee(QFee),
+                 query_fee => gen_query_fee(QueryFee),
                  query_ttl => {delta, choose(1,5)},
                  response_ttl => {delta, choose(1,5)},
                  fee => gen_fee(Height),
@@ -1997,14 +1998,16 @@ valid_account(S, {Tag, Key}) ->
 
 is_oracle(#{oracles := Oracles}, OracleId) ->
     lists:keymember(OracleId, #oracle.id, Oracles).
+
 oracle(#{oracles := Oracles}, OracleId) ->
     lists:keyfind(OracleId, #oracle.id, Oracles).
-oracle_query_fee(#{oracles := Oracles}, OracleId) ->
-    Oracle = lists:keyfind(OracleId, #oracle.id, Oracles),
+
+oracle_query_fee(S, OracleId) ->
+    Oracle = oracle(S, OracleId),
     Oracle#oracle.qfee.
 
-oracle_ttl(#{oracles := Oracles}, OracleId) ->
-    Oracle = lists:keyfind(OracleId, #oracle.id, Oracles),
+oracle_ttl(S, OracleId) ->
+    Oracle = oracle(S, OracleId),
     Oracle#oracle.oracle_ttl.
 
 query_response_ttl(#{queries := Queries}, QueryId) ->
@@ -2169,7 +2172,7 @@ gen_oracle_account(#{oracles := []} = S) ->
     gen_account(1, 1, S);
 gen_oracle_account(#{accounts := As, oracles := Os} = S) ->
     weighted_default(
-        {39, ?LET(#oracle{id = O}, elements(Os), {existing, lists:keyfind(O, #account.key, As)})},
+        {39, ?LET(#oracle{id = Id}, elements(Os), {existing, lists:keyfind(Id, #account.key, As)})},
         {1,  gen_account(9, 1, S)}).
 
 
