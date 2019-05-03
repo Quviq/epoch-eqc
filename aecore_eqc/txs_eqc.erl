@@ -2060,19 +2060,18 @@ adapt_poi(Channel, Tx) ->
     end.
 
 
-adapt_state_hash(Channel, From, Amount, Tx) ->
+adapt_state_hash(Channel, _From, _Amount, Tx) ->
     case maps:get(state_hash, Tx) of
         {valid, _} ->
-            {valid, Accounts} = Channel#channel.trees,
-            Tx#{state_hash => {valid, adapt_account(Accounts, From, Amount)}};
-        Invalid ->
-            Tx#{state_hash => Invalid}
+            Tx#{state_hash => Channel#channel.trees};
+        _Invalid ->
+            Tx
     end.
 
 adapt_account(Accounts, From, Amount) ->
     [ {account, Key,
        case Key == From of
-           true -> min(0, Amt + Amount);   %% Amount can ne negative, but result always >= 0
+           true -> max(0, Amt + Amount);   %% Amount can ne negative, but result always >= 0
            false -> Amt
        end} || {account, Key, Amt} <- Accounts].
 
