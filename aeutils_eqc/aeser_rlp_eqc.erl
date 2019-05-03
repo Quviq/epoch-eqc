@@ -1,8 +1,7 @@
-%%% File        : aeu_rlp_eqc.erl
 %%% Author      : Hans Svensson
 %%% Description :
 %%% Created     : 19 Jan 2018 by Hans Svensson
--module(aeu_rlp_eqc).
+-module(aeser_rlp_eqc).
 
 -compile(export_all).
 
