@@ -647,13 +647,13 @@ channel_deposit_pre(S) ->
     maps:is_key(channels, S).
 
 channel_deposit_args(#{height := Height} = S) ->
-     ?LET({CId = {Initiator, N, Responder}, Party},
-          {gen_state_channel_id(S), gen_party()},
+     ?LET({CId = {Initiator, N, Responder}, Party, Amount},
+          {gen_state_channel_id(S), gen_party(), ?LET(A, gen_channel_amount(Height), A div 3)},
      begin
           From = case Party of initiator -> Initiator; responder -> Responder end,  %% Add someone else as From as well!
           [Height, {Initiator, N, Responder}, Party,
                 #{from_id => aeser_id:create(account, From),
-                  amount => gen_channel_amount(Height),
+                  amount => Amount,
                   round => gen_channel_round(S, CId),
                   fee => gen_fee(Height),
                   state_hash => case channel(S, CId) of
@@ -661,23 +661,16 @@ channel_deposit_args(#{height := Height} = S) ->
                                         {invalid, []};
                                     Channel ->
                                         %% Here we can change the state!
-                                        Channel#channel.trees
+                                        frequency([{9, state_hash_from_channel(Channel, From, Amount)},
+                                                   {1, state_hash_from_channel(Channel, From, Amount + 10000, invalid)}])
                                 end,
                   nonce => gen_nonce(account(S, From))
                  }]
      end).
 
-channel_deposit_pre(S, [Height, {I, _, R} = ChannelId, Party, Tx]) ->
+channel_deposit_pre(S, [Height, {I, _, R}, Party, Tx]) ->
     From = case Party of initiator -> I; responder -> R end,
-    correct_height(S, Height) andalso valid_nonce(S, From, Tx) andalso
-        case maps:get(state_hash, Tx) of
-            {valid, _} = Ts ->
-                case channel(S, ChannelId) of
-                    #channel{trees = Trees} -> Trees == Ts;
-                    _ -> true %% invalid channel id filtered later
-                end;
-            _ -> true
-        end.
+    correct_height(S, Height) andalso valid_nonce(S, From, Tx).
 
 channel_deposit_valid(S, [Height, {Initiator, _, Responder} = ChannelId, Party, Tx]) ->
     From = case Party of initiator -> Initiator; responder -> Responder end,
@@ -723,10 +716,12 @@ channel_deposit_next(S, _Value, [_Height, {Initiator, _, Responder} = ChannelId,
                    end,
             #{ fee    := Fee,
                amount := Amount,
-               round  := Round } = Tx,
+               round  := Round,
+               state_hash := Trees} = Tx,
             reserve_fee(Fee,
             bump_and_charge(From, Fee + Amount,
-                credit_channel(ChannelId, Round, Amount, S)))
+            credit_channel(ChannelId, Round, Amount,
+            update_trees_channel(ChannelId, Trees, S))))
     end.
 
 channel_deposit_features(S, [_Height, _Channeld, _Party, _Tx] = Args, Res) ->
@@ -749,20 +744,21 @@ channel_withdraw_args(#{height := Height} = S) ->
                  amount => Amount,
                  round => gen_channel_round(S, CId),
                  fee => gen_fee(Height),
-                 state_hash =>case channel(S, CId) of
-                                    false ->
-                                        {invalid, []};
-                                    Channel ->
-                                        %% Here we can change the state!
-                                        case Channel#channel.trees of
-                                            {valid, Accounts} ->
-                                                weighted_default(
-                                                  {9, {valid, gen_state_hash_account_keys(adapt_account(Accounts, From, -Amount))}},
-                                                  {if Amount == 0 -> 0; true -> 1 end, {invalid, Accounts}});
-                                            Invalid ->
-                                                Invalid
-                                        end
-                                end,
+                 state_hash =>
+                     case channel(S, CId) of
+                         false ->
+                             {invalid, []};
+                         Channel ->
+                             %% Here we can change the state!
+                             case state_hash_from_channel(Channel, From, -Amount) of
+                                 {valid, Accounts} ->
+                                     weighted_default(
+                                       {9, {valid, Accounts}},
+                                       {if Amount == 0 -> 0; true -> 1 end, {invalid, []}});
+                                 Invalid ->
+                                     Invalid
+                             end
+                     end,
                  nonce => gen_nonce(account(S, From))
                 }]
     end).
@@ -822,10 +818,12 @@ channel_withdraw_next(S, _Value, [_Height, {Initiator, _, Responder} = ChannelId
                    end,
             #{ fee    := Fee,
                amount := Amount,
-               round  := Round } = Tx,
+               round  := Round,
+               state_hash := Trees } = Tx,
             reserve_fee(Fee,
             bump_and_charge(From, Fee - Amount,
-                credit_channel(ChannelId, Round, -Amount, S)))
+                credit_channel(ChannelId, Round, -Amount,
+                update_trees_channel(ChannelId, Trees, S))))
     end.
 
 channel_withdraw_features(S, [_Height, _Channeld, _Party, _Tx] = Args, Res) ->
@@ -1924,6 +1922,9 @@ credit_channel(Id, Round, Amount, S) ->
                                         round = Round }
                    end, S).
 
+update_trees_channel(Id, Trees, S) ->
+        on_channel(Id, fun(C) -> C#channel{ trees = Trees } end, S).
+
 close_channel(CId, mutual, S) ->
     on_channel(CId, fun(C) -> C#channel{closed = mutual} end, S);
 close_channel(CId, solo, S) ->
@@ -2059,21 +2060,41 @@ adapt_poi(Channel, Tx) ->
     end.
 
 
-adapt_state_hash(Channel, _From, _Amount, Tx) ->
-    case maps:get(state_hash, Tx) of
-        {valid, _} ->
-            Tx#{state_hash => Channel#channel.trees};
-        _Invalid ->
-            Tx
+%% The state hash, if valid, represents the changes we make to the
+%% initiator and responder amount
+%% If we deposit and deposit again and shrink away the first deposit,
+%% the the state hash becomes invalid. One cannot agree upon more money
+%% in both accounts than there actually is. Hence the second deposit must
+%% return a different state hash.
+%%
+%% We try to produce a valid value (even if Tx says invalid...)
+%% Without adapt, the value is most likely invalid anyway
+adapt_state_hash(Channel, From, Amount, Tx) ->
+    Tx#{state_hash =>
+            state_hash_from_channel(Channel, From, Amount)}.
+
+state_hash_from_channel(Channel, From, Amount) ->
+    %% Try generating a valid one
+    state_hash_from_channel(Channel, From, Amount, valid).
+
+
+
+%% If we are certain update results in invalid Accounts,
+%% we can use the Tag invalid
+state_hash_from_channel(Channel, From, Amount, Tag) ->
+    case Channel#channel.trees of
+        {valid, Accounts} ->
+            %% Need to produce a valid value.
+            case lists:keyfind(From, 2, Accounts) of
+                {account, From, Total} when Total + Amount >= 0 ->
+                    {Tag, lists:keyreplace(From, 2, Accounts, {account, From, Total + Amount})};
+                _ ->
+                    {invalid, Accounts}
+            end;
+        {invalid, _Accounts} ->
+            %% Need to make sure it stays invalid
+            {invalid, []}
     end.
-
-adapt_account(Accounts, From, Amount) ->
-    [ {account, Key,
-       case Key == From of
-           true -> max(0, Amt + Amount);   %% Amount can ne negative, but result always >= 0
-           false -> Amt
-       end} || {account, Key, Amt} <- Accounts].
-
 
 check_balance(S, Key, Amount) ->
      (account(S, Key))#account.amount >= Amount.
