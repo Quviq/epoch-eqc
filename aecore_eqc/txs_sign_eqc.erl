@@ -34,20 +34,32 @@ command(S) ->
          end).
 
 
-precondition(S, {call, ?MODULE, F, [M, {_, Signers} | Args]}) ->
+precondition(S, {call, ?MODULE, F, [M, {correct, Signers} | Args]}) ->
     lists:all(fun(Signer) ->
                       lists:member(Signer, maps:values(maps:get(keys, S, #{})))
               end, Signers) andalso
+        lists:sort(signers(S, F, Args)) == lists:sort(Signers) andalso
         ?TXS:precondition(S, {call, M, F, Args});
-precondition(S, {call, M, F, Args}) ->
+precondition(S, {call, ?MODULE, F, [M, {_, Signers} | Args]}) ->  %% faulty signers
+    lists:all(fun(Signer) ->
+                      lists:member(Signer, maps:values(maps:get(keys, S, #{})))
+              end, Signers) andalso
+        lists:sort(signers(S, F, Args)) /= lists:sort(Signers) andalso
+        ?TXS:precondition(S, {call, M, F, Args});
+precondition(S, {call, M, F, Args}) when M /= ?MODULE ->
     ?TXS:precondition(S, {call, M, F, Args}).
 
 
-adapt(S, {call, ?MODULE, F, [M, Signers | Args]}) ->
+adapt(S, {call, ?MODULE, F, [M, {Tag, Signers} | Args]}) ->
     case ?TXS:adapt(S, {call, M, F, Args}) of
         false -> false;
         NewArgs ->
-            [ M, Signers | NewArgs]
+            case Tag of
+                correct ->
+                    [ M, {correct, signers(S, F, NewArgs)} | NewArgs];
+                _ ->
+                    [ M, {Tag, Signers} | NewArgs]
+            end
     end;
 adapt(S, {call, M, F, Args}) ->
     ?TXS:adapt(S, {call, M, F, Args}).
@@ -80,8 +92,8 @@ call_features(S, {call, M, F, Args}, Res) ->
 all_command_names() ->
     ?TXS:all_command_names().
 
-has_correct_signers(S, {call, ?MODULE, _F, [_M, {Tag, _Signers} | _Args]}) ->
-    Tag == correct;
+has_correct_signers(S, {call, ?MODULE, F, [_M, {_Tag, Signers} | Args]}) ->
+    lists:sort(signers(S, F, Args)) == lists:sort(Signers);
 has_correct_signers(_S, _) ->
     true.
 
