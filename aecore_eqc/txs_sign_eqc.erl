@@ -38,13 +38,11 @@ precondition(S, {call, ?MODULE, F, [M, {correct, Signers} | Args]}) ->
     lists:all(fun(Signer) ->
                       lists:member(Signer, maps:values(maps:get(keys, S, #{})))
               end, Signers) andalso
-        lists:sort(signers(S, F, Args)) == lists:sort(Signers) andalso
         ?TXS:precondition(S, {call, M, F, Args});
 precondition(S, {call, ?MODULE, F, [M, {_, Signers} | Args]}) ->  %% faulty signers
     lists:all(fun(Signer) ->
                       lists:member(Signer, maps:values(maps:get(keys, S, #{})))
               end, Signers) andalso
-        lists:sort(signers(S, F, Args)) /= lists:sort(Signers) andalso
         ?TXS:precondition(S, {call, M, F, Args});
 precondition(S, {call, M, F, Args}) when M /= ?MODULE ->
     ?TXS:precondition(S, {call, M, F, Args}).
@@ -74,8 +72,13 @@ next_state(S, V, {call, M, F, Args}) ->
 
 postcondition(_S, {call, ?MODULE, _F, [_M, {faulty, _Signers} | _Args]}, Res) ->
     eq(Res, {error, signature_check_failed});
-postcondition(S, {call, ?MODULE, F, [M, {correct, _Signers} | Args]}, Res) ->
-    ?TXS:postcondition(S, {call, M, F, Args}, Res);
+postcondition(S, {call, ?MODULE, F, [M, {correct, Signers} | Args]}, Res) ->
+    case lists:all(fun(Signer) -> txs_ga_eqc:basic_account(S, Signer) end, Signers) of
+        true ->
+            ?TXS:postcondition(S, {call, M, F, Args}, Res);
+        false ->
+            eq(Res, {error, signature_check_failed})
+    end;
 postcondition(S, {call, M, F, Args}, Res) ->
     ?TXS:postcondition(S, {call, M, F, Args}, Res).
 
@@ -216,7 +219,10 @@ signers(_Kind, Args) ->
 
 
 signers(S, F, Args) ->
-    [maps:get(Signer, maps:get(keys, S)) || Signer <- signers(F, Args)].
+    %%TODO check that non of the signers is a GA account, because they need to sign differently
+    [maps:get(Signer, maps:get(keys, S)) || Signer <- signers(F, Args),
+                                            maps:get(Signer, maps:get(keys, S), undefined) =/= undefined
+                                            ].
 
 
 %% -- Property ---------------------------------------------------------------
