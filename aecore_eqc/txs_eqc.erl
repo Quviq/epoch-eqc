@@ -173,13 +173,13 @@ multi_mine_pre(S) ->
     maps:is_key(accounts, S).
 
 multi_mine_args(#{height := Height}) ->
-    [Height, elements([10, 100, 1000, 10000, 25000])].
+    [Height, frequency([{10, 1}, {1, 10}, {1, 100}, {1, 1000}, {1, 10000}, {1, 25000}])].
 
 multi_mine_pre(#{height := Height}, [H, _]) ->
     Height == H.
 
 multi_mine_adapt(#{height := Height}, [_, Blocks]) ->
-    [Height, Blocks];
+    [Height, choose(1, Blocks)];
 multi_mine_adapt(_, _) ->
     false.
 
@@ -1519,7 +1519,7 @@ contract_create(Height, {_, _Sender}, Name, CompilerVersion, Tx) ->
 
 contract_create_tx(Name, CompilerVersion, Tx) ->
     #{src := Contract, args := Args} = CompiledContract = contract(Name),
-    {ok, CallData} = aect_sophia:encode_call_data(Contract, <<"init">>, Args),
+    {ok, CallData} = aect_test_utils:encode_call_data(Contract, <<"init">>, Args),
     Code = maps:get({code, CompilerVersion}, CompiledContract),
     NTx = maps:update_with(vm_version, fun(aevm_sophia_1) -> 1;
                                           (vm_solidity) -> 2;
@@ -1637,7 +1637,7 @@ contract_call_tx({invalid, _Contract}, Tx) ->
 contract_call_tx({valid, Contract}, #{call_data := {Func, As, _}} = Tx) ->
     ContractSrc = Contract#contract.src,
     BinaryAs = [ to_binary(A) || A <- As],
-    {ok, CallData} = aect_sophia:encode_call_data(ContractSrc, Func, BinaryAs),
+    {ok, CallData} = aect_test_utils:encode_call_data(ContractSrc, Func, BinaryAs),
     Tx#{call_data => CallData}.
 
 to_binary(B) when is_binary(B) ->
@@ -2043,7 +2043,6 @@ valid_nonce(_S, _Key, #{nonce := {bad, _N}}) ->
     true. %% Bad nonces are always valid to test
 
 adapt_nonce(S, A, Tx = #{nonce := {good, _}}) ->
-    %% io:format("Adaptnonce ~p ~p\n", [maps:get(nonce, Tx),account(S, A)]),
     case account(S, A) of
         #account{nonce = N} -> Tx#{nonce := {good, N}};
         _                   -> Tx
