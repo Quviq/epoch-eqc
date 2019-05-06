@@ -141,6 +141,10 @@ channel_close_solo(_, Signers, Height, ChannelId, Party, Tx) ->
     NewTx = txs_eqc:channel_close_solo_tx(ChannelId, Party, channel_add_id(ChannelId, Tx)),
     apply_transaction(Signers, Height, aesc_close_solo_tx, NewTx).
 
+channel_slash(_, Signers, Height, ChannelId, Party, Tx) ->
+    NewTx = txs_eqc:channel_slash_tx(ChannelId, Party, channel_add_id(ChannelId, Tx)),
+    apply_transaction(Signers, Height, aesc_slash_tx, NewTx).
+
 channel_add_id({Initiator, N, Responder}, Tx) ->
      Tx#{channel_id =>
             aeser_id:create(channel, aesc_channels:pubkey(Initiator, N, Responder))}.
@@ -192,12 +196,13 @@ signers(response_oracle, Args) ->
     [Oracle];
 signers(F, Args) when F == channel_deposit; F == channel_withdraw;
                      F == channel_close_mutual; F == channel_close_solo;
-                     F == channel_settle ->
+                     F == channel_settle; F == channel_slash ->
     Party = lists:nth(3, Args),
     {Initiator, _, Responder} = lists:nth(2, Args),
     Sender = case Party of initiator -> Initiator; responder -> Responder end,
     case F of
         channel_close_solo -> [Sender];
+        channel_slash -> [Sender];
         channel_settle -> [Sender];
         _ -> [Initiator, Responder]
     end;

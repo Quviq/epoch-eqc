@@ -185,7 +185,7 @@ origin(response_oracle, Args) ->
     Oracle;
 origin(F, Args) when F == channel_deposit; F == channel_withdraw;
                      F == channel_close_mutual; F == channel_close_solo;
-                     F == channel_settle ->
+                     F == channel_settle; F == channel_slash ->
     Party = lists:nth(3, Args),
     {Initiator, _, Responder} = lists:nth(2, Args),
     case Party of initiator -> Initiator; responder -> Responder end;
