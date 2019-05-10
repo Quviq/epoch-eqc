@@ -53,16 +53,13 @@ gen_beneficiary_reward() ->
     choose(0, 123456789 * 1000000000000000000).
 
 gen_beneficiaries_map() ->
-    ?SUCHTHAT(
-       BeneficiariesMap,
-       non_empty(map(gen_beneficiary_pubkey(), gen_beneficiary_share())),
-       allocated_shares(maps:to_list(BeneficiariesMap)) > 0).
+    non_empty(map(gen_beneficiary_pubkey(), gen_beneficiary_share())).
 
 gen_beneficiary_pubkey() ->
     binary(32).
 
 gen_beneficiary_share() ->
-    choose(0, 100000).
+    choose(1, 100000).
 
 gen_unallocated_shares() ->
     choose(0, 1000000).
@@ -73,7 +70,7 @@ allocated_shares(Beneficiaries) ->
 beneficiary_pubkey({K, _}) when is_binary(K) ->
     K.
 
-beneficiary_share({_, S}) when is_integer(S), S >= 0 ->
+beneficiary_share({_, S}) when is_integer(S), S > 0 ->
     S.
 
 is_reward(X) ->
