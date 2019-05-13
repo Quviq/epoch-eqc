@@ -31,8 +31,6 @@ prop_split() ->
                          (AdjustedReward1 =< BeneficiaryReward1)
                          andalso (AdjustedReward2 =< BeneficiaryReward2)},
                         {all_beneficiaries_rewarded,
-                         length(DevRewards) =:= length(Beneficiaries)},
-                        {keys_correct,
                          lists:sort(
                            lists:map(fun({K, _}) -> K end, DevRewards))
                          =:=
