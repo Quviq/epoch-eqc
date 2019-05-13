@@ -5,6 +5,7 @@
 -compile([export_all, nowarn_export_all]).
 
 prop_split() ->
+    in_parallel(
     ?FORALL(PubKeys, non_empty(list(gen_beneficiary_pubkey())),
     ?FORALL(
        {BeneficiaryReward1,
@@ -57,7 +58,7 @@ prop_split() ->
                          =:=
                              (BeneficiaryReward1
                               + BeneficiaryReward2)}]))))
-       end)).
+       end))).
 
 gen_beneficiary_reward() ->
     choose(0, 10000).
