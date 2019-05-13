@@ -26,27 +26,31 @@ prop_split() ->
                  AllocatedShares,
                  TotalShares,
                  Beneficiaries),
-           is_reward(AdjustedReward1)
-               andalso is_reward(AdjustedReward2)
-               andalso (AdjustedReward1 =< BeneficiaryReward1)
-               andalso (AdjustedReward2 =< BeneficiaryReward2)
-               andalso (length(DevRewards) =:= length(Beneficiaries))
-               andalso (lists:sort(
-                          lists:map(fun({K, _}) -> K end, DevRewards))
-                        =:=
-                            lists:sort(
-                              lists:map(fun beneficiary_pubkey/1, Beneficiaries)))
-               andalso ([] =:= lists:filter(
-                                 fun({_, R}) -> not is_reward(R) end,
-                                 DevRewards))
-               andalso ((AdjustedReward1
-                         + AdjustedReward2
-                         + lists:sum(
-                             lists:map(fun({_, R}) -> R end, DevRewards)))
-                        =:=
-                            (BeneficiaryReward1
-                             + BeneficiaryReward2))
-       end).
+           conjunction([{reward, is_reward(AdjustedReward1)
+                         andalso is_reward(AdjustedReward2)},
+                        {adjusted,
+                         (AdjustedReward1 =< BeneficiaryReward1)
+                         andalso (AdjustedReward2 =< BeneficiaryReward2)},
+                        {all_beneficiaries_rewarded,
+                         length(DevRewards) =:= length(Beneficiaries)},
+                        {keys_correct,
+                         lists:sort(
+                           lists:map(fun({K, _}) -> K end, DevRewards))
+                         =:=
+                             lists:sort(
+                               lists:map(fun beneficiary_pubkey/1, Beneficiaries))},
+                        {all_rewards_valid,
+                         [] =:= lists:filter(
+                                  fun({_, R}) -> not is_reward(R) end,
+                                  DevRewards)},
+                        {total, (AdjustedReward1
+                                 + AdjustedReward2
+                                 + lists:sum(
+                                     lists:map(fun({_, R}) -> R end, DevRewards)))
+                         =:=
+                             (BeneficiaryReward1
+                              + BeneficiaryReward2)}])
+       end)).
 
 gen_beneficiary_reward() ->
     choose(0, 123456789 * 1000000000000000000).
