@@ -5,6 +5,7 @@
 -compile([export_all, nowarn_export_all]).
 
 prop_split() ->
+    ?FORALL(PubKeys, non_empty(list(gen_beneficiary_pubkey())),
     ?FORALL(
        {BeneficiaryReward1,
         BeneficiaryReward2,
@@ -12,7 +13,7 @@ prop_split() ->
         UnallocatedShares},
        {gen_beneficiary_reward(),
         gen_beneficiary_reward(),
-        gen_beneficiaries(),
+        gen_beneficiaries(PubKeys),
         gen_unallocated_shares()},
        begin
            AllocatedShares = allocated_shares(Beneficiaries),
@@ -55,9 +56,10 @@ prop_split() ->
 gen_beneficiary_reward() ->
     choose(0, 123456789 * 1000000000000000000).
 
-gen_beneficiaries() ->
-    ?LET(Beneficiaries, non_empty(list({gen_beneficiary_pubkey(), gen_beneficiary_share()})),
-         lists:sort(Beneficiaries)).
+gen_beneficiaries(PubKeys) ->
+    %% Make duplicates likely
+    ?LET(Keys, non_empty(sublist(PubKeys ++ PubKeys)),
+         [ {PubKey, gen_beneficiary_share()} || PubKey <- Keys ]).
 
 gen_beneficiary_pubkey() ->
     noshrink(binary(32)).
