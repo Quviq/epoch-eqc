@@ -8,14 +8,13 @@ prop_split() ->
     ?FORALL(
        {BeneficiaryReward1,
         BeneficiaryReward2,
-        BeneficiariesMap,
+        Beneficiaries,
         UnallocatedShares},
        {gen_beneficiary_reward(),
         gen_beneficiary_reward(),
-        gen_beneficiaries_map(),
+        gen_beneficiaries(),
         gen_unallocated_shares()},
        begin
-           Beneficiaries = lists:sort(maps:to_list(BeneficiariesMap)),
            AllocatedShares = allocated_shares(Beneficiaries),
            TotalShares = AllocatedShares + UnallocatedShares,
            {{AdjustedReward1,
@@ -52,8 +51,9 @@ prop_split() ->
 gen_beneficiary_reward() ->
     choose(0, 123456789 * 1000000000000000000).
 
-gen_beneficiaries_map() ->
-    non_empty(map(gen_beneficiary_pubkey(), gen_beneficiary_share())).
+gen_beneficiaries() ->
+    ?LET(Beneficiaries, non_empty(list({gen_beneficiary_pubkey(), gen_beneficiary_share()})),
+         lists:sort(Beneficiaries)).
 
 gen_beneficiary_pubkey() ->
     binary(32).
