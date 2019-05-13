@@ -50,7 +50,7 @@ prop_split() ->
                         %% {got_rewarded, equals(Beneficiaries, DevRewards)},
                         {paid_out,
                          %% some have to be paid
-                         (BeneficiaryReward1 + BeneficiaryReward2 =< TotalShares) orelse
+                         (BeneficiaryReward1 + BeneficiaryReward2 < TotalShares) orelse
                          lists:sum(lists:map(fun({_, R}) -> R end, DevRewards)) > 0
                          },
                         {total, (AdjustedReward1
