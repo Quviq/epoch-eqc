@@ -60,7 +60,7 @@ gen_beneficiaries() ->
          lists:sort(Beneficiaries)).
 
 gen_beneficiary_pubkey() ->
-    binary(32).
+    noshrink(binary(32)).
 
 gen_beneficiary_share() ->
     choose(1, 100000).
