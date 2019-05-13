@@ -17,6 +17,7 @@ prop_split() ->
         gen_unallocated_shares()},
        begin
            AllocatedShares = allocated_shares(Beneficiaries),
+           BeneficiaryKeys = lists:map(fun beneficiary_pubkey/1, Beneficiaries),
            TotalShares = AllocatedShares + UnallocatedShares,
            {{AdjustedReward1,
              AdjustedReward2},
@@ -27,6 +28,10 @@ prop_split() ->
                  AllocatedShares,
                  TotalShares,
                  Beneficiaries),
+           measure(nr_beneficiaries, length(Beneficiaries),
+           measure(dup_beneficiaries, length(BeneficiaryKeys) - length(lists:usort(BeneficiaryKeys)),
+           ?WHENFAIL(eqc:format("split: ~p with adjusted rewards ~p + ~p\n",
+                                [DevRewards, AdjustedReward1, AdjustedReward2]),
            conjunction([{adjusted,
                          (AdjustedReward1 =< BeneficiaryReward1)
                          andalso (AdjustedReward2 =< BeneficiaryReward2)},
@@ -34,8 +39,7 @@ prop_split() ->
                          lists:sort(
                            lists:map(fun({K, _}) -> K end, DevRewards))
                          =:=
-                             lists:sort(
-                               lists:map(fun beneficiary_pubkey/1, Beneficiaries))},
+                             lists:sort(BeneficiaryKeys)},
                         {all_rewards_valid,
                          [] =:= lists:filter(
                                   fun({_, R}) -> not is_reward(R) end,
@@ -46,7 +50,7 @@ prop_split() ->
                                      lists:map(fun({_, R}) -> R end, DevRewards)))
                          =:=
                              (BeneficiaryReward1
-                              + BeneficiaryReward2)}])
+                              + BeneficiaryReward2)}]))))
        end)).
 
 gen_beneficiary_reward() ->
