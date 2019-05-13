@@ -33,7 +33,9 @@ prop_split() ->
            measure(dup_beneficiaries, length(BeneficiaryKeys) - length(lists:usort(BeneficiaryKeys)),
            ?WHENFAIL(eqc:format("split: ~p with adjusted rewards ~p + ~p\n",
                                 [DevRewards, AdjustedReward1, AdjustedReward2]),
-           conjunction([{adjusted,
+           conjunction([{reward, is_reward(AdjustedReward1)
+                         andalso is_reward(AdjustedReward2)},
+                        {adjusted,
                          (AdjustedReward1 =< BeneficiaryReward1)
                          andalso (AdjustedReward2 =< BeneficiaryReward2)},
                         {all_beneficiaries_rewarded,
