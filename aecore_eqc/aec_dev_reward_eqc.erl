@@ -44,6 +44,12 @@ prop_split() ->
                          [] =:= lists:filter(
                                   fun({_, R}) -> not is_reward(R) end,
                                   DevRewards)},
+                        %% {got_rewarded, equals(Beneficiaries, DevRewards)},
+                        {paid_out,
+                         %% some have to be paid
+                         (BeneficiaryReward1 + BeneficiaryReward2 =< length(BeneficiaryKeys))  orelse
+                         lists:sum(lists:map(fun({_, R}) -> R end, DevRewards)) > 0
+                         },
                         {total, (AdjustedReward1
                                  + AdjustedReward2
                                  + lists:sum(
@@ -54,7 +60,8 @@ prop_split() ->
        end)).
 
 gen_beneficiary_reward() ->
-    choose(0, 123456789 * 1000000000000000000).
+    choose(0, 10000).
+    %% choose(0, 123456789 * 1000000000000000000).
 
 gen_beneficiaries(PubKeys) ->
     %% Make duplicates likely
