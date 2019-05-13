@@ -27,9 +27,7 @@ prop_split() ->
                  AllocatedShares,
                  TotalShares,
                  Beneficiaries),
-           conjunction([{reward, is_reward(AdjustedReward1)
-                         andalso is_reward(AdjustedReward2)},
-                        {adjusted,
+           conjunction([{adjusted,
                          (AdjustedReward1 =< BeneficiaryReward1)
                          andalso (AdjustedReward2 =< BeneficiaryReward2)},
                         {all_beneficiaries_rewarded,
