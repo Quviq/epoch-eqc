@@ -310,10 +310,10 @@ spend_next(S, _Value, [_Height, {_SenderTag, Sender}, Receiver, Tx] = Args) ->
 spend_features(S, [_Height, {_, Sender}, {Tag, Receiver}, Tx] = Args, Res) ->
     Correct = spend_valid(S, Args),
     [{correct,  if Correct -> spend; true -> false end}] ++
-        [ {spend, to_self, Tag} || Sender == Receiver andalso Correct] ++
-        [ {spend, element(2, maps:get(recipient_id, Tx))} ||  Correct] ++
-        [ {spend, name} || Correct andalso Tag == name] ++
-        [{spend, Res}].
+        [ {spend_to, self} || Sender == Receiver andalso Correct] ++
+        [ {spend_to, element(2, maps:get(recipient_id, Tx))} || Sender =/= Receiver andalso Correct] ++
+        [ {spend_to, name} || Correct andalso Tag == name] ++
+        [ {spend, Res}].
 
 
 %% --- Operation: register_oracle ---
@@ -1792,7 +1792,8 @@ prop_txs(Fork) ->
             measure(length, commands_length(Cmds),
             measure(height, Height,
             features(call_features(H),
-            aggregate_feats([atoms, correct, protocol, contract_call_fun | all_command_names()], call_features(H),
+            aggregate_feats([atoms, correct, protocol, contract_call_fun, spend_to | all_command_names()],
+                            call_features(H),
                 ?WHENFAIL(eqc:format("Total = ~p~nFeeTotal = ~p~n", [TreesTotal, FeeTotal]),
                           pretty_commands(?MODULE, Cmds, {H, S, Res},
                               conjunction([{result, Res == ok},
