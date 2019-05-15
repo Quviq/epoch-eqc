@@ -1594,7 +1594,7 @@ contract_call_args(#{height := Height, contracts := Contracts} = S) ->
                           _ -> aeser_id:create(contract, Contract#contract.id)   %% handles symbolic calls!
                       end,
                   abi_version => weighted_default({49, Contract#contract.abi}, {1, elements([0,3])}),
-                  fee => gen_fee_above(Height, call_base_fee(As)),
+                  fee => gen_fee_above(Height, call_base_fee(As, Height)),
                   gas_price => frequency([{1,0}, {10, 1}, {89, minimum_gas_price(Height)}]),
                   gas => frequency([{7, UseGas},
                                     %% {1, UseGas-1},
@@ -1604,8 +1604,9 @@ contract_call_args(#{height := Height, contracts := Contracts} = S) ->
                   call_data => {Func, As, UseGas}
                  }])).
 
-call_base_fee(As) ->
-    aec_governance:tx_base_gas(contract_call_tx) + 5000 + 32 * length(As).
+call_base_fee(As, Height) ->
+    Protocol = aec_hard_forks:protocol_effective_at_height(Height),
+    aec_governance:tx_base_gas(contract_call_tx, Protocol) + 5000 + 32 * length(As).
 
 contract_call_pre(S, [Height, {_, Sender}, {ContractTag, Contract}, Tx]) ->
     correct_height(S, Height) andalso valid_nonce(S, Sender, Tx) andalso
@@ -1617,7 +1618,7 @@ contract_call_valid(S, [Height, {_, Sender}, {ContractTag, _Contract}, Tx]) ->
     andalso ContractTag == valid
     andalso correct_nonce(S, Sender, Tx)
     andalso check_balance(S, Sender, maps:get(fee, Tx) + maps:get(gas, Tx) * maps:get(gas_price, Tx))
-    andalso valid_contract_fee(Height, call_base_fee(As), Tx)
+    andalso valid_contract_fee(Height, call_base_fee(As, Height), Tx)
     andalso maps:get(abi_version, Tx) == 1.
 
 contract_call_adapt(#{height := Height} = S, [_, {STag, Sender}, Contract, Tx]) ->
