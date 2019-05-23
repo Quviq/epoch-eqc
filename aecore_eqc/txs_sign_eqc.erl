@@ -27,8 +27,10 @@ command(S) ->
              {call, M, F, Args} ->
                  case lists:member(F, [init, newkey, mine, multi_mine]) of
                      true -> Cmd;
-                     false -> {call, ?MODULE, F, [ M, ?LET(Incorrect,sublist(maps:values(maps:get(keys, S, #{}))),
-                                                        gen_signers(signers(S, F, Args), Incorrect)) | Args]}
+                     false ->
+                         ?LET(As, Args,
+                              {call, ?MODULE, F, [ M, ?LET(Incorrect, sublist(maps:values(maps:get(keys, S, #{}))),
+                                                           gen_signers(signers(S, F, As), Incorrect)) | As]})
                  end;
              _ -> Cmd
          end).
