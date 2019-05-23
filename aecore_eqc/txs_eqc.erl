@@ -1778,7 +1778,10 @@ prop_txs_minerva() ->
     Fork = 3,
     prop_txs_in_forks(#{<<"1">> => 0, <<"2">> => Fork}).
 
-prop_txs_in_forks(HardForks = #{<<"1">> := _, <<"2">> := _}) ->
+prop_txs_roma() ->
+    prop_txs_in_forks(#{<<"1">> => 0}).
+
+prop_txs_in_forks(HardForks = #{<<"1">> := _}) ->
     application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
     propsetup(HardForks,
     eqc:dont_print_counterexample(
