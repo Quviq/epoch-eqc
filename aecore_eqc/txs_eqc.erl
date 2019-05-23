@@ -212,6 +212,7 @@ multi_mine_next(#{height := Height, accounts := Accounts} = S, _Value, [_H, Bloc
       }.
 
 multi_mine_features(S, [H, B], _Res) ->
+    [{mine, name_expired} || expired_claims(S, H+B-1) =/= [] ] ++
     [{mine, solo_close_unlocked} || expired_solo_close(S, H+B) =/= [] ] ++
     [{mine, response_ttl} || expired_queries(S, H+B) =/= [] ] ++
     [multi_mine].
@@ -1236,7 +1237,7 @@ ns_claim_next(#{height := Height} = S, _, [_Height, {_, Sender}, Tx] = Args) ->
             #{ fee := Fee, name := Name } = Tx,
             Claim = #claim{ name         = Name,
                             height       = Height,
-                            expires_by   = Height + aec_governance:name_claim_max_expiration() + 1,
+                            expires_by   = Height + aec_governance:name_claim_max_expiration(),
                             claimer      = Sender,
 			    protocol = aec_hard_forks:protocol_effective_at_height(Height) },
             remove_preclaim(Tx,
