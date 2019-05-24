@@ -33,8 +33,8 @@ command(S) ->
 
 
 precondition(S, {call, ?MODULE, F, [M, AsMeta | Args]}) ->
-    (AsMeta == false orelse element(1, AsMeta) == basic orelse lists:member(AsMeta, maps:get(gaccounts, S))) andalso
-        txs_sign_eqc:has_correct_signers(S, {call, M, F, Args}) andalso
+    %% (AsMeta == false orelse element(1, AsMeta) == basic orelse lists:member(AsMeta, maps:get(gaccounts, S))) andalso
+    %%     txs_sign_eqc:has_correct_signers(S, {call, M, F, Args}) andalso
         ?TXS:precondition(S, {call, M, F, Args});
 precondition(S, {call, M, F, Args}) ->
     ?TXS:precondition(S, {call, M, F, Args}).
@@ -324,7 +324,7 @@ auth_data(Name, Nonce) ->
 
 apply_transaction(false, Signers, Height, Kind, Tx) ->
     ?TXS:apply_transaction(Signers, Height, Kind, Tx);
-apply_transaction({basic, PK}, {correct, Signers}, Height, Kind, Tx) ->
+apply_transaction({basic, PK}, {_, Signers}, Height, Kind, Tx) ->
     AeTx       = txs_eqc:create_aetx(Kind, txs_eqc:untag_nonce(Tx)),
     BinTx      = aec_governance:add_network_id(aetx:serialize_to_binary(AeTx)),
     Signatures = [ enacl:sign_detached(BinTx, Signer) || Signer <- Signers ],
@@ -339,7 +339,7 @@ apply_transaction({basic, PK}, {correct, Signers}, Height, Kind, Tx) ->
               tx          => SignedTx
              },
     txs_eqc:apply_transaction(Height, aega_meta_tx, NewTx);
-apply_transaction(GAccount, {correct, Signers}, Height, Kind, Tx) ->
+apply_transaction(GAccount, {_, Signers}, Height, Kind, Tx) ->
     Nonce = txs_ga_eqc:nonce(GAccount),
     Name = txs_ga_eqc:name(GAccount),
     AuthData = auth_data(Name, Nonce),
