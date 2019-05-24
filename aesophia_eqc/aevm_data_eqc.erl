@@ -1,8 +1,8 @@
-%%% File        : aeso_data_eqc.erl
+%%% File        : aevm_data_eqc.erl
 %%% Author      : Ulf Norell
 %%% Description :
 %%% Created     : 28 May 2018 by Ulf Norell
--module(aeso_data_eqc).
+-module(aevm_data_eqc).
 
 -compile([export_all, nowarn_export_all]).
 -include_lib("eqc/include/eqc.hrl").
@@ -29,7 +29,7 @@ type(Depth, TypeRep) ->
     [ ?LETSHRINK([T], [type(Depth - 1, TypeRep)], {list, T})       || Depth > 0 ] ++
     [ ?LETSHRINK([T], [type(Depth - 1, TypeRep)], {option, T})     || Depth > 0 ] ++
     [ ?LETSHRINK(Ts,  list(type(Depth - 1, TypeRep)), {tuple, Ts}) || Depth > 0 ] ++
-    [ ?LETSHRINK([K, V], vector(2, type(Depth - 1, TypeRep)), {map, K, V}) || Depth > 0 ] ++
+    %[ ?LETSHRINK([K, V], vector(2, type(Depth - 1, TypeRep)), {map, K, V}) || Depth > 0 ] ++
     []
     ).
 
@@ -99,15 +99,15 @@ prop_binary_to_heap() ->
     ?FORALL(Offs, choose(0, 16),
     begin
       BaseAddr = Offs * 32,
-      Binary = aeso_data:to_binary(Value),
+      Binary = aeb_heap:to_binary(Value),
       Typerep = typerep(Type),
-      case aeso_data:binary_to_heap(Typerep, Binary, BaseAddr) of
+      case aevm_data:binary_to_heap(Typerep, Binary, 0, BaseAddr) of
         {ok, HeapValue} ->
-          Ptr  = aeso_data:heap_value_pointer(HeapValue),
-          Heap = aeso_data:heap_value_heap(HeapValue),
-          FromHeap = aeso_data:from_heap(Type, <<0:BaseAddr/unit:8, Heap/binary>>, Ptr),
-          Binary1  = aeso_data:heap_to_binary(Typerep, HeapValue),
-          ?WHENFAIL(io:format("Ptr = ~p\nHeap = ~p\n", [Ptr, aeso_test_utils:dump_words(Heap)]),
+          Ptr  = aeb_heap:heap_value_pointer(HeapValue),
+          Heap = aeb_heap:heap_value_heap(HeapValue),
+          FromHeap = aeb_heap:from_heap(Type, <<0:BaseAddr/unit:8, Heap/binary>>, Ptr),
+          Binary1  = aevm_data:heap_to_binary(Typerep, aect_contracts_store:new(), HeapValue),
+          ?WHENFAIL(io:format("Ptr = ~p\nHeap = ~p\n", [Ptr, aevm_test_utils:dump_words(Heap)]),
           conjunction(
             [ {from_heap, equals(FromHeap, {ok, Value})},
               {heap_to_binary, equals(Binary1, {ok, Binary}) }]));
@@ -122,13 +122,13 @@ prop_heap_to_binary() ->
     begin
       BaseAddr = Offs * 32,
       Typerep  = typerep(Type),
-      <<Ptr:256, _/binary>> = Heap = aeso_data:to_binary(Value, BaseAddr),
-      HeapValue = aeso_data:heap_value(Ptr, Heap, BaseAddr),
-      ?WHENFAIL(io:format("Heap = ~p\n", [aeso_test_utils:dump_words(Heap)]),
-      case aeso_data:heap_to_binary(Typerep, HeapValue) of
+      <<Ptr:256, _/binary>> = Heap = aeb_heap:to_binary(Value, BaseAddr),
+      HeapValue = aeb_heap:heap_value({maps, #{}, 0}, Ptr, Heap, BaseAddr),
+      ?WHENFAIL(io:format("Heap = ~p\n", [aevm_test_utils:dump_words(Heap)]),
+      case aevm_data:heap_to_binary(Typerep, aect_contracts_store:new(), HeapValue) of
         {ok, Binary} ->
-          ?WHENFAIL(io:format("Binary = ~p\n", [aeso_test_utils:dump_words(Binary)]),
-          equals(aeso_data:from_binary(Type, Binary),
+          ?WHENFAIL(io:format("Binary = ~p\n", [aevm_test_utils:dump_words(Binary)]),
+          equals(aeb_heap:from_binary(Type, Binary),
                  {ok, Value}));
         Err = {error, _} -> equals(Err, ok)
       end)
