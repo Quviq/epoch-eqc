@@ -1,8 +1,8 @@
-%%% File        : aeso_heap_eqc.erl
+%%% File        : aeb_heap_eqc.erl
 %%% Author      : Ulf Norell
 %%% Description :
 %%% Created     : 28 May 2018 by Ulf Norell
--module(aeso_heap_eqc).
+-module(aeb_heap_eqc).
 
 -compile([export_all, nowarn_export_all]).
 -include_lib("eqc/include/eqc.hrl").
@@ -25,7 +25,7 @@ prop_from_binary() ->
     ?FORALL({T, Bin}, {type(), blob()},
     begin
     Tag = fun(X) when is_atom(X) -> X; (X) when is_tuple(X) -> element(1, X) end,
-    case ?SANDBOX(aeso_heap:from_binary(T, Bin)) of
+    case ?SANDBOX(aeb_heap:from_binary(T, Bin)) of
         {ok, Res} -> collect({Tag(T), element(1, Res)}, true);
         Err       -> equals(Err, {ok, '_'})
     end end).
@@ -104,6 +104,6 @@ prop_roundtrip() ->
     ?FORALL(T, type(),
     ?FORALL(V, value(T),
     ?FORALL(B, choose(0, 4),
-    equals(aeso_heap:from_binary(T, aeso_heap:to_binary(V, B * 32), B * 32),
+    equals(aeb_heap:from_binary(T, aeb_heap:to_binary(V, B * 32), B * 32),
            {ok, V})))).
 
