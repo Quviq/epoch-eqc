@@ -13,8 +13,8 @@
 -include_lib("eqc/include/eqc.hrl").
 %%-include_lib("eqc/include/eqc_merge_statem.hrl").
 -import(eqc_statem, [more_commands/2, run_commands/1, check_command_names/2,
-                     commands_length/1, call_features/1,
-                     pretty_commands/4  %% Overwrite with specific pretty_commands
+                     commands_length/1, call_features/1 ]).
+-import(eqc_merge_statem, [ pretty_commands/4  %% Overwrite with specific pretty_commands
                     ]).
 
 -compile([export_all, nowarn_export_all]).
