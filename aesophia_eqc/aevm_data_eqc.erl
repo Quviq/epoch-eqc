@@ -22,14 +22,16 @@ sandbox(Code) ->
     end.
 
 
-type() -> ?LET(Depth, choose(0, 2), type(Depth, true)).
-type(Depth, TypeRep) ->
+type() -> type(true).
+type(Map) -> ?LET(Depth, choose(0, 2), type(Depth, true, Map)).
+type(Depth, TypeRep) -> type(Depth, TypeRep, true).
+type(Depth, TypeRep, Map) ->
     oneof(
     [ elements([word, string] ++ [typerep || TypeRep]) ] ++
-    [ ?LETSHRINK([T], [type(Depth - 1, TypeRep)], {list, T})       || Depth > 0 ] ++
-    [ ?LETSHRINK([T], [type(Depth - 1, TypeRep)], {option, T})     || Depth > 0 ] ++
-    [ ?LETSHRINK(Ts,  list(type(Depth - 1, TypeRep)), {tuple, Ts}) || Depth > 0 ] ++
-    %[ ?LETSHRINK([K, V], vector(2, type(Depth - 1, TypeRep)), {map, K, V}) || Depth > 0 ] ++
+    [ ?LETSHRINK([T], [type(Depth - 1, TypeRep, Map)], {list, T})       || Depth > 0 ] ++
+    [ ?LETSHRINK([T], [type(Depth - 1, TypeRep, Map)], {option, T})     || Depth > 0 ] ++
+    [ ?LETSHRINK(Ts,  list(type(Depth - 1, TypeRep, Map)), {tuple, Ts}) || Depth > 0 ] ++
+    [ ?LETSHRINK([K, V], vector(2, type(Depth - 1, TypeRep, Map)), {map, K, V}) || Map, Depth > 0 ] ++
     []
     ).
 
@@ -66,7 +68,7 @@ typerep({tuple, Ts})   -> {tuple, typerep(Ts)};
 typerep({list, T})     -> {list, typerep(T)};
 typerep({variant, Cs}) -> {variant, typerep(Cs)};
 typerep({option, T})   -> {variant, [[], [typerep(T)]]};
-typerep({map, K, V})   -> {list, typerep({tuple, [K, V]})};
+typerep({map, K, V})   -> {map, typerep(K), typerep(V)};
 typerep([])            -> [];
 typerep([T | Ts])      -> [typerep(T) | typerep(Ts)].
 
@@ -109,14 +111,14 @@ prop_binary_to_heap() ->
           Binary1  = aevm_data:heap_to_binary(Typerep, aect_contracts_store:new(), HeapValue),
           ?WHENFAIL(io:format("Ptr = ~p\nHeap = ~p\n", [Ptr, aevm_test_utils:dump_words(Heap)]),
           conjunction(
-            [ {from_heap, equals(FromHeap, {ok, Value})},
-              {heap_to_binary, equals(Binary1, {ok, Binary}) }]));
+            [ {from_heap, equals(FromHeap, {ok, Value})} || not aevm_data:has_maps(Typerep)] ++
+            [ {heap_to_binary, equals(Binary1, {ok, Binary}) }]));
         Err = {error, _} -> equals(Err, ok)
       end
     end))).
 
 prop_heap_to_binary() ->
-    ?FORALL(Type,  type(),
+    ?FORALL(Type,  type(false),
     ?FORALL(Value, value(Type),
     ?FORALL(Offs,  choose(0, 16),
     begin
