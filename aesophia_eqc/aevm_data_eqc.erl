@@ -1,8 +1,8 @@
-%%% File        : aeso_data_eqc.erl
+%%% File        : aevm_data_eqc.erl
 %%% Author      : Ulf Norell
 %%% Description :
 %%% Created     : 28 May 2018 by Ulf Norell
--module(aeso_data_eqc).
+-module(aevm_data_eqc).
 
 -compile([export_all, nowarn_export_all]).
 -include_lib("eqc/include/eqc.hrl").
@@ -22,14 +22,16 @@ sandbox(Code) ->
     end.
 
 
-type() -> ?LET(Depth, choose(0, 2), type(Depth, true)).
-type(Depth, TypeRep) ->
+type() -> type(true).
+type(Map) -> ?LET(Depth, choose(0, 2), type(Depth, true, Map)).
+type(Depth, TypeRep) -> type(Depth, TypeRep, true).
+type(Depth, TypeRep, Map) ->
     oneof(
     [ elements([word, string] ++ [typerep || TypeRep]) ] ++
-    [ ?LETSHRINK([T], [type(Depth - 1, TypeRep)], {list, T})       || Depth > 0 ] ++
-    [ ?LETSHRINK([T], [type(Depth - 1, TypeRep)], {option, T})     || Depth > 0 ] ++
-    [ ?LETSHRINK(Ts,  list(type(Depth - 1, TypeRep)), {tuple, Ts}) || Depth > 0 ] ++
-    [ ?LETSHRINK([K, V], vector(2, type(Depth - 1, TypeRep)), {map, K, V}) || Depth > 0 ] ++
+    [ ?LETSHRINK([T], [type(Depth - 1, TypeRep, Map)], {list, T})       || Depth > 0 ] ++
+    [ ?LETSHRINK([T], [type(Depth - 1, TypeRep, Map)], {option, T})     || Depth > 0 ] ++
+    [ ?LETSHRINK(Ts,  list(type(Depth - 1, TypeRep, Map)), {tuple, Ts}) || Depth > 0 ] ++
+    [ ?LETSHRINK([K, V], vector(2, type(Depth - 1, TypeRep, Map)), {map, K, V}) || Map, Depth > 0 ] ++
     []
     ).
 
@@ -66,7 +68,7 @@ typerep({tuple, Ts})   -> {tuple, typerep(Ts)};
 typerep({list, T})     -> {list, typerep(T)};
 typerep({variant, Cs}) -> {variant, typerep(Cs)};
 typerep({option, T})   -> {variant, [[], [typerep(T)]]};
-typerep({map, K, V})   -> {list, typerep({tuple, [K, V]})};
+typerep({map, K, V})   -> {map, typerep(K), typerep(V)};
 typerep([])            -> [];
 typerep([T | Ts])      -> [typerep(T) | typerep(Ts)].
 
@@ -99,36 +101,36 @@ prop_binary_to_heap() ->
     ?FORALL(Offs, choose(0, 16),
     begin
       BaseAddr = Offs * 32,
-      Binary = aeso_data:to_binary(Value),
+      Binary = aeb_heap:to_binary(Value),
       Typerep = typerep(Type),
-      case aeso_data:binary_to_heap(Typerep, Binary, BaseAddr) of
+      case aevm_data:binary_to_heap(Typerep, Binary, 0, BaseAddr) of
         {ok, HeapValue} ->
-          Ptr  = aeso_data:heap_value_pointer(HeapValue),
-          Heap = aeso_data:heap_value_heap(HeapValue),
-          FromHeap = aeso_data:from_heap(Type, <<0:BaseAddr/unit:8, Heap/binary>>, Ptr),
-          Binary1  = aeso_data:heap_to_binary(Typerep, HeapValue),
-          ?WHENFAIL(io:format("Ptr = ~p\nHeap = ~p\n", [Ptr, aeso_test_utils:dump_words(Heap)]),
+          Ptr  = aeb_heap:heap_value_pointer(HeapValue),
+          Heap = aeb_heap:heap_value_heap(HeapValue),
+          FromHeap = aeb_heap:from_heap(Type, <<0:BaseAddr/unit:8, Heap/binary>>, Ptr),
+          Binary1  = aevm_data:heap_to_binary(Typerep, aect_contracts_store:new(), HeapValue),
+          ?WHENFAIL(io:format("Ptr = ~p\nHeap = ~p\n", [Ptr, aevm_test_utils:dump_words(Heap)]),
           conjunction(
-            [ {from_heap, equals(FromHeap, {ok, Value})},
-              {heap_to_binary, equals(Binary1, {ok, Binary}) }]));
+            [ {from_heap, equals(FromHeap, {ok, Value})} || not aevm_data:has_maps(Typerep)] ++
+            [ {heap_to_binary, equals(Binary1, {ok, Binary}) }]));
         Err = {error, _} -> equals(Err, ok)
       end
     end))).
 
 prop_heap_to_binary() ->
-    ?FORALL(Type,  type(),
+    ?FORALL(Type,  type(false),
     ?FORALL(Value, value(Type),
     ?FORALL(Offs,  choose(0, 16),
     begin
       BaseAddr = Offs * 32,
       Typerep  = typerep(Type),
-      <<Ptr:256, _/binary>> = Heap = aeso_data:to_binary(Value, BaseAddr),
-      HeapValue = aeso_data:heap_value(Ptr, Heap, BaseAddr),
-      ?WHENFAIL(io:format("Heap = ~p\n", [aeso_test_utils:dump_words(Heap)]),
-      case aeso_data:heap_to_binary(Typerep, HeapValue) of
+      <<Ptr:256, _/binary>> = Heap = aeb_heap:to_binary(Value, BaseAddr),
+      HeapValue = aeb_heap:heap_value({maps, #{}, 0}, Ptr, Heap, BaseAddr),
+      ?WHENFAIL(io:format("Heap = ~p\n", [aevm_test_utils:dump_words(Heap)]),
+      case aevm_data:heap_to_binary(Typerep, aect_contracts_store:new(), HeapValue) of
         {ok, Binary} ->
-          ?WHENFAIL(io:format("Binary = ~p\n", [aeso_test_utils:dump_words(Binary)]),
-          equals(aeso_data:from_binary(Type, Binary),
+          ?WHENFAIL(io:format("Binary = ~p\n", [aevm_test_utils:dump_words(Binary)]),
+          equals(aeb_heap:from_binary(Type, Binary),
                  {ok, Value}));
         Err = {error, _} -> equals(Err, ok)
       end)
