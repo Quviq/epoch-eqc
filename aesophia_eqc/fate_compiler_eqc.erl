@@ -10,13 +10,14 @@
 
 %% -- Compiling and running --------------------------------------------------
 
-run(Code, Contract, Function, Arguments) ->
+run(Code, Contract, Function0, Arguments) ->
     try
+        Function = aeb_fate_code:symbol_identifier(Function0),
         Cache = cache(Code),
         Call  = make_call(Contract, Function, Arguments),
         Spec  = dummy_spec(),
-        {ok, #{ accumulator := Result }} = aefa_fate:run_with_cache(Call, Spec, Cache),
-        Result
+        {ok, ES} = aefa_fate:run_with_cache(Call, Spec, Cache),
+        aefa_engine_state:accumulator(ES)
     catch _:{error, op_not_implemented_yet} ->
         {error, abort}
     end.
@@ -38,7 +39,7 @@ dummy_spec() ->
        tx_env    => aetx_env:tx_env(1) }.
 
 cache(Code) ->
-    Key = aeb_fate_data:make_address(pad_contract_name(<<"test">>)),
+    Key = pad_contract_name(<<"test">>),
     #{Key => Code}.
 
 make_call(Contract, Function, Arguments) ->
@@ -46,6 +47,7 @@ make_call(Contract, Function, Arguments) ->
     Calldata = {tuple, {Function, {tuple, EncArgs}}},
     #{ contract => pad_contract_name(Contract),
        gas      => 1000000,
+       value    => 0,
        call     => aeb_fate_encoding:serialize(Calldata) }.
 
 pad_contract_name(Name) ->
@@ -179,10 +181,10 @@ gen_pat2(_, {record_t, _, []})  -> {var, "_"};
 gen_pat2(N, {record_t, _, Fields}) ->
     ?LET(Fs, non_empty(sublist(Fields)),
     ?LET(Fs1, shuffle(Fs),
-        {record, [ {Y, gen_pat1(N, T)} || {Y, T} <- Fs1 ]}));
+        {record, [ {Y, gen_pat1(N div length(Fs1), T)} || {Y, T} <- Fs1 ]}));
 gen_pat2(N, {variant_t, _, Cons}) ->
     ?LET({Con, Args}, elements(Cons),
-         {con, Con, [gen_pat2(N, T) || T <- Args]});
+         {con, Con, [gen_pat2(N div length(Args), T) || T <- Args]});
 gen_pat2(N, {list, T}) ->
     ?LAZY(weighted_default({1, {list, []}},
                            {2, {'::', gen_pat1(N div 3, T), gen_pat1(2 * N div 2, {list, T})}}));
