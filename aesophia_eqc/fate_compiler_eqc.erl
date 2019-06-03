@@ -29,7 +29,9 @@ compile_contract(Code, Options) ->
     {ok, Ast} = aeso_parser:string(Code),
     TypedAst  = aeso_ast_infer_types:infer(Ast, Options),
     FCode     = aeso_ast_to_fcode:ast_to_fcode(TypedAst, Options),
-    aeso_fcode_to_fate:compile(FCode, Options).
+    Fate      = aeso_fcode_to_fate:compile(FCode, Options),
+    Bin       = aeb_fate_code:serialize(Fate),
+    aeb_fate_code:deserialize(Bin).
 
 dummy_spec() ->
     #{ trees     => aec_trees:new_without_backend(),
@@ -516,14 +518,15 @@ prop_fun() ->
         ?WHENFAIL(eqc:format("// Contract\n~s\n", [Contract]),
         ?TIMEOUT(5000,
         case catch compile_contract(Contract, [{debug, all} || Verbose]) of
-            Compiled when is_map(Compiled) ->
+            Compiled when is_tuple(Compiled), element(1, Compiled) == fcode ->
+                ?WHENFAIL([eqc:format("// Compiled\n~s\n", [aeb_fate_asm:pp(Compiled)]) || Verbose],
                 begin
                     Expect   = [ interpret_fun(Defs, Fun, Val) || Val <- Vals ],
                     Results  = [ untup(run(Compiled, <<"test">>, <<"test">>, Val)) || Val <- Vals ],
                     Tag = fun({error, _}) -> error; (_) -> value end,
                     aggregate(lists:map(Tag, Results),
                         equals(Results, Expect))
-                end;
+                end);
             Err -> equals(Err, ok)
         end))
     end))))).
