@@ -435,12 +435,13 @@ minimum_gas_price(H) ->
 gen_nonce() ->
     weighted_default({49, good}, {1, {bad, elements([-1, 1, -5, 5, 10000])}}).
 
-gen_oracle_account(_New, _Existing, #{oracles := []} = S) ->
-    txs_spend_eqc:gen_account_key(1, 1, S);
-gen_oracle_account(New, Existing, #{oracles := Os} = S) ->
-    weighted_default(
-        {Existing, elements([ Id || #oracle{id = Id} <- Os])},
-        {New,  txs_spend_eqc:gen_account_key(1, 49, S)}).
+gen_oracle_account(New, Existing, S) ->
+    case maps:get(oracles, S, []) of
+         [] -> txs_spend_eqc:gen_account_key(1, 1, S);
+         Os -> weighted_default(
+                  {Existing, elements([ Id || #oracle{id = Id} <- Os])},
+                  {New,  txs_spend_eqc:gen_account_key(1, 49, S)})
+        end.
 
 gen_non_oracle_account(New, Existing, #{oracles := Os} = S) ->
     %% remove Oracles from accounts before searching
