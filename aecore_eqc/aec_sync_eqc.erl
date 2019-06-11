@@ -6,6 +6,9 @@
 %%%      Try to make the software in aehttp to add the local peer, such that we
 %%%      don't need the admin here.
 %%%
+%%%       TODO:
+%%%          - This test is known not to work. It requires at least update from http to noise.
+%%%
 %%% @end
 %%% Created : 12 Dec 2017 by Thomas Arts <thomas@ThomasComputer.local>
 
