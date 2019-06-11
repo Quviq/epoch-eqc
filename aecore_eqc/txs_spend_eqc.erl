@@ -11,7 +11,7 @@
 
 -compile([export_all, nowarn_export_all]).
 
--record(account, {key, amount, nonce, names_owned = []}).
+-record(account, {key, amount, nonce}).
 
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
@@ -21,6 +21,7 @@ initial_state() ->
 
 %% --- Operation: spend ---
 spend_pre(S) ->
+    io:format("SPEND State ~p~n", [S]),
     maps:is_key(accounts, S).
 
 %% here we should add spending to oracle and contract
@@ -183,6 +184,9 @@ account_keys(#{accounts := Accounts}) ->
 
 is_account(#{accounts := Accounts}, Key) ->
     lists:keymember(Key, #account.key, Accounts).
+
+existing_account(#{accounts := Accounts}, Key) ->
+    lists:keyfind(Key, #account.key, Accounts).
 
 account_key(#account{key = Key}) ->
     Key.
