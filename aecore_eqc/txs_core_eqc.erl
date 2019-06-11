@@ -18,7 +18,7 @@
 -compile([export_all, nowarn_export_all]).
 -define(PatronAmount, 100000000000001).  %% read from file
 
--record(account,  {key, amount, nonce, names_owned = []}).
+-record(account,  {key, amount, nonce}).
 
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
