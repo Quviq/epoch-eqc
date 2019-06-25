@@ -268,7 +268,8 @@ authorizes_meta(S, GAccount, _F, _Args) ->
 %% weight for adding a new command should be organized in frequency in command generator
 
 prop_txs() ->
-    prop_txs(3).
+    Fork = 3,
+    prop_txs(#{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork, <<"4">> => 3*Fork}).
 
 prop_txs(Fork) ->
     application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
@@ -317,9 +318,9 @@ auth_fee(Name) ->
 
 auth_data(Name, Nonce) ->
     #{src := Contract, auth_fun := AuthFun} = txs_eqc:contract(Name),
-    {ok, CallData, _, _} = aeso_compiler:create_calldata(binary_to_list(Contract),
-                                                         binary_to_list(AuthFun),
-                                                         [integer_to_list(Nonce)]),
+    {ok, CallData} = aeso_compiler:create_calldata(binary_to_list(Contract),
+                                                   binary_to_list(AuthFun),
+                                                   [integer_to_list(Nonce)]),
     CallData.
 
 apply_transaction(false, Signers, Height, Kind, Tx) ->

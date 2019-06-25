@@ -233,7 +233,8 @@ signers(S, F, Args) ->
 %% weight for adding a new command should be organized in frequency in command generator
 
 prop_txs() ->
-    prop_txs(3).
+    Fork = 3,
+    prop_txs(#{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork, <<"4">> => 3*Fork}).
 
 prop_txs(Fork) ->
     application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler

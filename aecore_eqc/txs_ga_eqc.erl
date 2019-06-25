@@ -120,7 +120,7 @@ ga_attach_valid(S, [Height, {_, Sender}, Name, CompilerVersion, Tx]) ->
     andalso txs_eqc:correct_nonce(S, Sender, Tx)
     andalso txs_eqc:check_balance(S, Sender, maps:get(fee, Tx) + GasFun(Height) * maps:get(gas_price, Tx))
     andalso txs_eqc:valid_contract_fee(Height, Fixed, Tx)
-    andalso Protocol == 3
+    andalso Protocol >= 3
     andalso lists:member({maps:get(vm_version, Tx), maps:get(abi_version, Tx)},
                          [{aevm_sophia_3, 1}])
     andalso lists:member(CompilerVersion, [1, 2]).
@@ -215,7 +215,9 @@ ga_bump_and_charge(#gaccount{id = Key, nonce = Nonce} = GAccount, Fee, S) ->
 %% weight for adding a new command should be organized in frequency in command generator
 
 prop_txs() ->
-    prop_txs(3).
+    Fork = 3,
+    prop_txs(#{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork, <<"4">> => 3*Fork}).
+
 
 prop_txs(Fork) ->
     application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler

@@ -1500,7 +1500,10 @@ contract_create_valid(S, [Height, {_, Sender}, Name, CompilerVersion, Tx]) ->
                                  [{aevm_sophia_2, 1}]);
                Protocol == 3 ->
                     lists:member({maps:get(vm_version, Tx), maps:get(abi_version, Tx)},
-                                 [{aevm_sophia_3, 1}, {aevm_sophia_2, 1}])
+                                 [{aevm_sophia_3, 1}, {aevm_sophia_2, 1}]);
+               Protocol == 4 ->
+                   lists:member({maps:get(vm_version, Tx), maps:get(abi_version, Tx)},
+                                [{aevm_sophia_3, 1}, {fate_sophia_1, 1}])
             end
     andalso lists:member(CompilerVersion,
                              [ 1 || Protocol >= 1] ++
@@ -1773,7 +1776,7 @@ prop_txs() ->
     prop_txs(3).
 
 prop_txs(Fork) ->
-    prop_txs_in_forks(#{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}).
+    prop_txs_in_forks(#{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork, <<"4">> => 3*Fork}).
 
 prop_txs_minerva() ->
     Fork = 3,
