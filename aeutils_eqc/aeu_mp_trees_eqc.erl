@@ -44,7 +44,10 @@ gen_subtree_key(Existing) ->
 
 gen_value() ->
     frequency([{1, <<>>},
-               {9, weighted_default({5, gen_decodable()}, {1, binary(36)})}]).
+               {9, gen_non_empty_value()}]).
+
+gen_non_empty_value() ->
+    weighted_default({5, gen_decodable()}, {1, binary(36)}).
 
 gen_decodable() -> ?SIZED(Size, gen_decodable(Size)).
 
@@ -71,7 +74,7 @@ gen_ops(NOps) ->
 gen_ops(0, _Keys, Ops) -> return(lists:reverse(Ops));
 gen_ops(N, Keys, Ops) ->
     frequency(
-        [{2, ?LET({K, V}, {gen_put_key(Keys), gen_value()}, gen_ops(N-1, lists:umerge(Keys, [K]), [{put, K, V} | Ops]))},
+        [{2, ?LET({K, V}, {gen_put_key(Keys), gen_non_empty_value()}, gen_ops(N-1, lists:umerge(Keys, [K]), [{put, K, V} | Ops]))},
          {1, ?LET(K, gen_delete_key(Keys), gen_ops(N-1, Keys -- [K], [{delete, K} | Ops]))}]).
 
 gen_scrambled_lists(N, Ls) ->
