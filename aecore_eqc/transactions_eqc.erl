@@ -33,7 +33,7 @@ call(S, {call, M, Cmd, Args}) ->
   CmdCall = list_to_atom(lists:concat([Cmd, "_call"])),
   case lists:member({CmdTx, 2}, M:module_info(exports)) of
     true ->
-      %% io:format("calling ~p ", [CmdCall]),
+      %% io:format("calling ~p ", [CmdTx]),
       case apply(M, CmdTx, [S, Args]) of
         {ok, Tx} ->
           %% io:format("-> ~p\n", [Tx]),
@@ -44,6 +44,7 @@ call(S, {call, M, Cmd, Args}) ->
     false ->
       case lists:member({CmdCall, 2}, M:module_info(exports)) of
         true ->
+          %% io:format("calling ~p ", [CmdCall]),
           apply(M, CmdCall, [S, Args]);
         false ->
           %% io:format("calling ~p\n", [Cmd]),
@@ -111,7 +112,7 @@ propsetup(Fork, Prop) ->
             _ = application:load(aecore),
             application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
             %% compile_contracts(),
-            HardForksTeardown = setup_hard_forks(#{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork}),
+            HardForksTeardown = setup_hard_forks(#{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork, <<"4">> => 3*Fork}),
             DataDirTeardown = setup_data_dir(),
             fun() ->
                     DataDirTeardown(),
