@@ -2358,7 +2358,7 @@ gen_ttl() ->
 
 %% Generate a contract
 gen_contract() ->
-    elements(["identity", "authorize_nonce"]).
+    elements([identity, authorize_nonce]).
 
 contract(Name) ->
     [{_, Map}] = ets:lookup(contracts, Name),
@@ -2367,13 +2367,13 @@ contract(Name) ->
 %% Add srcs dynamically for the compilers available
 contracts() ->
     Static =
-        [#{name => "identity",
+        [#{name => identity,
            args => [],
            gasfun => fun(_) -> 193 end,
            basefee => 75000 + 24000,
            functions => [{<<"main">>, [nat()], 192, <<>>}]
           },
-         #{name => "authorize_nonce",
+         #{name => authorize_nonce,
            args => [],
            gasfun => fun(_) -> 275 end,
            basefee => 75000 + 30000,
@@ -2384,13 +2384,13 @@ contracts() ->
           }
         ],
     [ begin
-          File = filename:join("contracts", maps:get(name, C)),
+          File = maps:get(name, C),
           {ok, ContractSrc} = aect_test_utils:read_contract(File),
           CompiledCode =
               [ begin
                     {ok, Code} = aect_test_utils:compile_contract(CompilerVersion, File),
                     {{code, CompilerVersion}, Code}
-                end || CompilerVersion <- [1, 2] ],
+                end || CompilerVersion <- [1, 2, 3, 4] ],
           maps:merge(C#{src => ContractSrc}, maps:from_list(CompiledCode))
       end || C <- Static ].
 
