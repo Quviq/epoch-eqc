@@ -2162,11 +2162,18 @@ hash_equal(X, Y) ->
 
 
 apply_transaction(Height, TxMod, TxArgs) ->
-    Env      = aetx_env:tx_env(Height),
-    Trees    = get(trees),
-    Tx       = create_aetx(TxMod, TxArgs),
+    Env   = aetx_env:tx_env(Height),
+    Trees = get(trees),
+    Tx    = create_aetx(TxMod, TxArgs),
 
-    case aetx:process(Tx, Trees, Env) of
+    Env2  = case TxMod of
+                aesc_create_tx ->
+                    aetx_env:set_signed_tx(Env, {value, aetx_sign:new(Tx, [])});
+                _ ->
+                    Env
+            end,
+
+    case aetx:process(Tx, Trees, Env2) of
         {ok, NewTrees, _NewEnv} ->
             put(trees, NewTrees),
             ok;
