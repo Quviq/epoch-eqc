@@ -42,6 +42,7 @@ patron() ->
 %% -- Operations -------------------------------------------------------------
 
 %% This should be generated automatically!
+%% and in fact is not necessary here at all if we just remove _call from mine.
 
 wrap_call(S, {call, ?MODULE, mine, Args}) ->
     try {ok, mine_call(S, Args)}

@@ -1,106 +1,42 @@
 %%% @author Thomas Arts
-%%% @doc Sign transactions
+%%% @doc Model to introduce a state variable defining the fault injection on the next signing.
 %%%
+%%%      Not ethat Generalized accounts have no signature, thus dropping it woud not be an error
+%%%      signing it actually would
+%%%       This needs to be compenstated for in ???
 %%% @end
-%%% Created : 27 Mar 2019 by Thomas Arts
+%%% Created : 2 Aug 2019 by Thomas Arts
 
 -module(txs_sign_eqc).
 
 -include_lib("eqc/include/eqc.hrl").
 -include_lib("eqc/include/eqc_statem.hrl").
--eqc_group_commands(false).
--define(PatronAmount, 100000000000001).  %% read from file?
-
-%%-define(TXS, txs_eqc).
--define(TXS, txs_ga_eqc).
 
 -compile([export_all, nowarn_export_all]).
 
 
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
-    ?TXS:initial_state().
+    #{next_signing => correct}.
 
-command(S) ->
-    ?LET(Cmd, ?TXS:command(S),
-         case Cmd of
-             {call, M, F, Args} ->
-                 case lists:member(F, [init, newkey, mine, multi_mine]) of
-                     true -> Cmd;
-                     false ->
-                         ?LET(As, Args,
-                              {call, ?MODULE, F, [ M, ?LET(Incorrect, sublist(maps:values(maps:get(keys, S, #{}))),
-                                                           gen_signers(signers(S, F, As), Incorrect)) | As]})
-                 end;
-             _ -> Cmd
-         end).
+signing_args(_S) ->
+    [frequency([{99, correct},
+                {1, drop_first_signature},
+                {1, drop_last_signature},
+                {1, replace_first},
+                {1, replace_last}
+               ])].
 
+signing(Injection) ->
+    Injection.
 
-precondition(S, {call, ?MODULE, F, [M, {correct, Signers} | Args]}) ->
-    lists:all(fun(Signer) ->
-                      lists:member(Signer, maps:values(maps:get(keys, S, #{})))
-              end, Signers) andalso
-        ?TXS:precondition(S, {call, M, F, Args});
-precondition(S, {call, ?MODULE, F, [M, {_, Signers} | Args]}) ->  %% faulty signers
-    lists:all(fun(Signer) ->
-                      lists:member(Signer, maps:values(maps:get(keys, S, #{})))
-              end, Signers) andalso
-        ?TXS:precondition(S, {call, M, F, Args});
-precondition(S, {call, M, F, Args}) when M /= ?MODULE ->
-    ?TXS:precondition(S, {call, M, F, Args}).
+signing_next(S, _, [Injection]) ->
+    S#{next_signing => Injection}.
+
+signing_features(_S, [Injection], _Res) ->
+    [{signing, Injection}].
 
 
-adapt(S, {call, ?MODULE, F, [M, {Tag, Signers} | Args]}) ->
-    case ?TXS:adapt(S, {call, M, F, Args}) of
-        false -> false;
-        NewArgs ->
-            case Tag of
-                correct ->
-                    [ M, {correct, signers(S, F, NewArgs)} | NewArgs];
-                _ ->
-                    [ M, {Tag, Signers} | NewArgs]
-            end
-    end;
-adapt(S, {call, M, F, Args}) ->
-    ?TXS:adapt(S, {call, M, F, Args}).
-
-next_state(S, _V, {call, ?MODULE, _F, [_M, {faulty, _Signers} | _Args]}) ->
-    S;
-next_state(S, V, {call, ?MODULE, F, [M, {correct, _Signers} | Args]}) ->
-    ?TXS:next_state(S, V, {call, M, F, Args});
-next_state(S, V, {call, M, F, Args}) ->
-    ?TXS:next_state(S, V, {call, M, F, Args}).
-
-
-postcondition(_S, {call, ?MODULE, _F, [_M, {faulty, _Signers} | _Args]}, Res) ->
-    eq(Res, {error, signature_check_failed});
-postcondition(S, {call, ?MODULE, F, [M, {correct, Signers} | Args]}, Res) ->
-    case lists:all(fun(Signer) -> txs_ga_eqc:basic_account(S, Signer) end, Signers) of
-        true ->
-            ?TXS:postcondition(S, {call, M, F, Args}, Res);
-        false ->
-            eq(Res, {error, signature_check_failed})
-    end;
-postcondition(S, {call, M, F, Args}, Res) ->
-    ?TXS:postcondition(S, {call, M, F, Args}, Res).
-
-
-call_features(S, {call, ?MODULE, F, [M, {correct, _Signers} | Args]}, Res) ->
-    ?TXS:call_features(S, {call, M, F, Args}, Res);
-call_features(_S, {call, ?MODULE, F, [_M, {faulty, _Signers} | _Args]}, Res) ->
-    [{correct, false}, {F, Res}];
-call_features(S, {call, M, F, Args}, Res) ->
-    ?TXS:call_features(S, {call, M, F, Args}, Res).
-
-
-
-all_command_names() ->
-    ?TXS:all_command_names().
-
-has_correct_signers(S, {call, ?MODULE, F, [_M, {_Tag, Signers} | Args]}) ->
-    lists:sort(signers(S, F, Args)) == lists:sort(Signers);
-has_correct_signers(_S, _) ->
-    true.
 
 %% -- Operations -------------------------------------------------------------
 
@@ -178,7 +114,7 @@ contract_call(_, Signers, Height, _, Contract, Tx) ->
     apply_transaction(Signers, Height, aect_call_tx, NewTx).
 
 ga_attach(_, Signers, Height, _, Name, CompilerVersion, Tx) ->
-    NewTx = ?TXS:ga_attach_tx(Name, CompilerVersion, Tx),
+    NewTx = txs_ga_eqc:ga_attach_tx(Name, CompilerVersion, Tx),
     apply_transaction(Signers, Height, aega_attach_tx, NewTx).
 
 
@@ -228,45 +164,6 @@ signers(S, F, Args) ->
 
 
 %% -- Property ---------------------------------------------------------------
-
-%% NOte that weight for sub model is still computed by that weight function.
-%% weight for adding a new command should be organized in frequency in command generator
-
-prop_txs() ->
-    Fork = 3,
-    prop_txs(#{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork, <<"4">> => 3*Fork}).
-
-prop_txs(Fork) ->
-    application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
-    ?TXS:propsetup(Fork,
-    eqc:dont_print_counterexample(
-    in_parallel(
-    ?FORALL(Cmds, commands(?MODULE),
-    begin
-        put(trees, undefined),
-        {H, S, Res} = run_commands(Cmds),
-        Height = maps:get(height, S, 0),
-        TreesTotal =
-            case get(trees) of
-                undefined -> #{};
-                Trees -> aec_trees:sum_total_coin(Trees)
-            end,
-        Total = lists:sum(maps:values(TreesTotal)),
-        FeeTotal =  lists:sum([ Fee || {Fee, _} <- maps:get(fees, S, [])]),
-        check_command_names(Cmds,
-            measure(length, commands_length(Cmds),
-            measure(height, Height,
-            features(call_features(H),
-            txs_eqc:aggregate_feats([atoms, correct, protocol, contract_call_fun, spend_to | all_command_names()],
-                                    call_features(H),
-                ?WHENFAIL(eqc:format("Total = ~p~nFeeTotal = ~p~n", [TreesTotal, FeeTotal]),
-                          pretty_commands(?MODULE, Cmds, {H, S, Res},
-                              conjunction([{result, Res == ok},
-                                           {total, Total == 0 orelse equals(Total, ?PatronAmount - FeeTotal)}]))))))))
-    end)))).
-
-
-%% -----
 
 apply_transaction({_Tag, Signers}, Height, Kind, Tx) ->
     Env      = aetx_env:tx_env(Height),
