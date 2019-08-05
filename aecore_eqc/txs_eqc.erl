@@ -865,7 +865,10 @@ channel_close_mutual_valid(S, [Height, {Initiator, _, Responder} = ChannelId, Pa
     andalso valid_fee(Height, Tx)
     andalso maps:get(initiator_amount_final, Tx) >= 0
     andalso maps:get(responder_amount_final, Tx) >= 0
-    andalso (channel(S, ChannelId))#channel.closed == false
+    andalso (case aec_hard_forks:protocol_effective_at_height(Height) < 4 of
+                 true -> (channel(S, ChannelId))#channel.closed == false;
+                 false -> (channel(S, ChannelId))#channel.closed =/= mutual
+             end)
     andalso (channel(S, ChannelId))#channel.amount >=
                 maps:get(initiator_amount_final, Tx) + maps:get(responder_amount_final, Tx) + maps:get(fee, Tx).
 
