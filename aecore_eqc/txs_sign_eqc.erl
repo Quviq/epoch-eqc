@@ -27,6 +27,10 @@ signing_args(_S) ->
                 {1, replace_last}
                ])].
 
+signing_pre(S, [Fault]) ->
+    lists:member(Fault, [correct, drop_first_signature, drop_last_signature]) orelse
+        maps:size(maps:get(keys, S, #{})) > 1.
+
 signing(Injection) ->
     Injection.
 

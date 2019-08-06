@@ -15,7 +15,6 @@
 
 -compile([export_all, nowarn_export_all]).
 
-%% Possibly make this into a parameterized module
 models() ->
   [ txs_core_eqc, txs_oracles_eqc, txs_spend_eqc, txs_sign_eqc ].
 
@@ -32,17 +31,26 @@ call(S, {call, M, Cmd, Args}) ->
               false ->
                   apply_transaction(maps:get(height, S), Tx);
               true ->
-                  io:format("Tx: ~p\n", [Tx]),
-                  io:format("Accounts: ~p\n", [catch aetx:accounts(Tx)]),
-                  io:format("Origin: ~p\n", [catch aetx:origin(Tx)]),
-                  io:format("Signers: ~p\n", [catch aetx:signers(Tx, get(trees))]),
+                  %% io:format("Tx: ~p\n", [Tx]),
+                  %% io:format("Accounts: ~p\n", [catch aetx:accounts(Tx)]),
+                  %% io:format("Origin: ~p\n", [catch aetx:origin(Tx)]),
+                  %% io:format("Signers: ~p\n", [catch aetx:signers(Tx, get(trees))]),
                   case aetx:signers(Tx, get(trees)) of
                       {ok, PubSigners} ->
-                          Signers = [ maps:get(Pub, maps:get(keys, S, #{}), <<"invalid">>) || Pub <- PubSigners],
+                          PrivSigners = [ maps:get(Pub, maps:get(keys, S, #{}), <<"invalid">>) || Pub <- PubSigners],
                           Fault = maps:get(next_signing, S, correct),
-                          %% Apply fault injection
-                          io:format("Signers: ~p\n", [Signers]),
-                          %% my:signature(maps:get(next_signing, S, correct), Tx),
+                          Signers =
+                              case Fault of
+                                  correct -> PrivSigners;
+                                  drop_first_signature -> tl(PrivSigners);
+                                  drop_last_signature -> tl(lists:reverse(PrivSigners));
+                                  replace_first ->
+                                      ReplaceKey = lists:last(maps:values(maps:get(keys, S, #{})) -- [hd(PrivSigners)]),
+                                      [ReplaceKey | tl(PrivSigners)];
+                                  replace_last ->
+                                      ReplaceKey = lists:last(maps:values(maps:get(keys, S, #{})) -- [hd(PrivSigners)]),
+                                      [ReplaceKey | tl(lists:reverse(PrivSigners))]
+                              end,
                           apply_transaction(Signers, maps:get(height, S), Tx);
                       AeTxErr ->
                           AeTxErr
@@ -80,16 +88,16 @@ apply_transaction(Height, AeTx) ->
 apply_transaction(Signers, Height, AeTx) ->
     Env      = aetx_env:tx_env(Height),
     Trees    = get(trees),
-    io:format("Creating Binary Tx\n"),
+    %% io:format("Creating Binary Tx\n"),
     BinTx = aec_governance:add_network_id(aetx:serialize_to_binary(AeTx)),
-    io:format("Creating Signatures ~p\n", [BinTx]),
+    %% io:format("Creating Signatures ~p\n", [BinTx]),
 
     Signatures = [ enacl:sign_detached(BinTx, Signer) || Signer <- Signers ],
-    io:format("Signatures: ~p\n", [Signatures]),
+    io:format("Signatures: ~p\n", [Signers]),
 
     SignedTx = aetx_sign:new(AeTx, Signatures),
     %% When we use strict, we see errors returned, otherwise only invalid txs returned
-    io:format("Created signed Tx"),
+    %% io:format("Created signed Tx"),
     case aec_trees:apply_txs_on_state_trees_strict([SignedTx], Trees, Env) of
         {ok, _ValidTxs, InvalidTxs, NewTrees, _} ->
             put(trees, NewTrees),
