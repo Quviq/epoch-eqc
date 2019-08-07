@@ -11,7 +11,7 @@
 
 -compile([export_all, nowarn_export_all]).
 
--record(account, {key, amount, nonce, names_owned = []}).
+-record(account, {key, amount, nonce}).
 
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
@@ -31,7 +31,10 @@ spend_args(#{height := Height} = S) ->
                              frequency([{10, {account,  gen_account_key(2, 1, S)}},
                                         {2, {oracle, gen_account_key(1, 49, S)}},      %% There is no check account really is an oracle!
                                         %% {1, {contract, gen_contract_id(1, 100, maps:get(contracts, S))}},
-                                        {2, {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++ [<<"ta.test">>])}}])],
+                                        {2, {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++
+                                                            [N || {N, _} <- maps:get(protected_names, S, [])] ++
+                                                              [<<"ta.test">>])}}
+                                       ])],
          [Sender,
           case To of
               {account, Receiver} -> {account, Receiver};
