@@ -18,7 +18,7 @@
 -compile([export_all, nowarn_export_all]).
 -define(PatronAmount, 100000000000001).  %% read from file
 
--record(account,  {key, amount, nonce, names_owned = []}).
+-record(account,  {key, amount, nonce}).
 
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
@@ -116,14 +116,14 @@ mine_features(_S, [_B], _Res) ->
     [mining].
 
 
-%% --- Operation: total ---
-total_pre(S) ->
+%% --- Operation: balance ---
+balance_pre(S) ->
     maps:is_key(accounts, S).
 
-total_args(_S) ->
+balance_args(_S) ->
     [].
 
-total() ->
+balance() ->
     TreesTotal =
         case get(trees) of
             undefined -> #{};
@@ -131,7 +131,7 @@ total() ->
         end,
     lists:sum(maps:values(TreesTotal)).
 
-total_post(S, [], Res) ->
+balance_post(S, [], Res) ->
     FeeTotal = lists:sum([ Fee || {Fee, _} <- maps:get(fees, S, [])]),
     eq(Res, ?PatronAmount - FeeTotal).
 
