@@ -45,9 +45,6 @@ common_postcond(Correct, Res) ->
 %% Make sure that in the feature we can switch that off.
 mine_next(#{height := Height} = S, _Value, [Blocks]) ->
     ExpiredQs = expired_queries(S, Height + Blocks),
-
-%% alreeady Height +1 due to update in core model!!!!
-    %% io:format("H: ~p ~p -> Expired ~p\n", [ Height, Blocks, ExpiredQs]),
     lists:foldl(
       fun(Q, NS) ->
               expire_query(Q#query.symb_id,
