@@ -21,7 +21,7 @@
 
 %% Possibly make this into a parameterized module
 models() ->
-  [ txs_core_eqc, txs_oracles_eqc, txs_spend_eqc ].
+  [ txs_core_eqc, txs_oracles_eqc, txs_spend_eqc, txs_names_eqc ].
 
 
 %% --- Calling the SUT ---------------------------------------------
