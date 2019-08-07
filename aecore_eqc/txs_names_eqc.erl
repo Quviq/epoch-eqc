@@ -21,7 +21,7 @@
 
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
-    #{preclaims => [], claims => []}.
+    #{preclaims => [], claims => [], named_accounts => #{}}.
 
 
 %% -- Common pre-/post-conditions --------------------------------------------
@@ -37,16 +37,6 @@ common_postcond(Correct, Res) ->
 
 %% -- Operations -------------------------------------------------------------
 
-
-
-%% --- Operation: multi_mine ---
-%%
-%% The multi mine part that is name system dependent
-%%
-%% This will generate warnings:
-%%    Warning: multi_mine_next unused (no multi_mine_command or multi_mine_args defined).
-%%    Warning: multi_mine_features unused (no multi_mine_command or multi_mine_args defined).
-%% Make sure that in the feature we can switch that off.
 mine_next(#{height := Height} = S, _Value, [Blocks]) ->
     ExpiredPreclaims = expired_preclaims(S, Height + Blocks),
     ExpiredClaims = expired_claims(S, Height + Blocks),
@@ -58,7 +48,6 @@ mine_next(#{height := Height} = S, _Value, [Blocks]) ->
 
 mine_features(#{height := Height} = S, [Blocks], _Res) ->
     [{mine, expired_preclaims} || expired_preclaims(S, Height + Blocks) =/= [] ].
-
 
 
 %% --- Operation: ns_preclaim ---
@@ -81,7 +70,7 @@ ns_preclaim_valid(S = #{height := Height}, [Sender, {Name, Salt}, Tx]) ->
     andalso check_balance(S, Sender, maps:get(fee, Tx))
     andalso maps:get(nonce, Tx) == good
     andalso valid_fee(Height, Tx)
-    andalso new_name_and_salt(S, Name, Salt).
+    andalso new_name_and_salt(maps:get(preclaims, S, []), Name, Salt).
 
 ns_preclaim_tx(S, [Sender, {_Name, _Salt}, Tx]) ->
     aens_preclaim_tx:new(update_nonce(S, Sender, Tx)).
@@ -188,7 +177,7 @@ ns_update_pre(S) ->
 
 ns_update_args(S = #{height := Height}) ->
      ?LET({{Name, Sender}, Pointers},
-          {gen_name_claim(S), gen_pointers(S)},
+          {gen_claimed_name(S), gen_pointers(S)},
           [Name, Sender, Pointers,
            #{account_id => aeser_id:create(account, Sender),
              name_id => aeser_id:create(name, aens_hash:name_hash(Name)),
@@ -205,15 +194,6 @@ ns_update_args(S = #{height := Height}) ->
                                %% This means that such a transaction cannot be created (which makes sense if serialization of it is undefined
                    end || {Kind, Key} <- Pointers ]
             }]).
-
-gen_pointers(S) ->
-    ?LET(Pointers, [?LET({Kind, {_, NameAccount}},
-                         oneof([
-                         {account, gen_account(1, 5, S)},
-{oracle, txs_oracles_eqc:gen_oracle_account(1, 5, S)}
-]),
-                         {Kind, txs_spend_eqc:account_key(NameAccount)}), {fake, binary(32)}, {fake, binary(32)}],
-        sublist(Pointers)).
 
 ns_update_valid(#{height := Height} = S, [Name, Sender, _Pointers, Tx]) ->
     is_account(S, Sender)
@@ -290,7 +270,7 @@ expired_claims(S, Height) ->
 
 good_preclaims(#{ preclaims := Ps, height := H}) ->
     [ P || P = #preclaim{ height = H0 } <- Ps, H0 < H ].
-           
+
 add(Tag, X, S) ->
     S#{ Tag => maps:get(Tag, S, []) ++ [X] }.
 
@@ -341,12 +321,12 @@ bump_and_charge(Key, Fee, S) ->
 check_balance(S, Sender, Amount) ->
     txs_spend_eqc:check_balance(S, Sender, Amount).
 
-new_name_and_salt(#{preclaims := Ps}, Name, Salt) ->
+new_name_and_salt(Ps, Name, Salt) ->
     [ P || P = #preclaim{name = Na, salt = Sa} <- Ps,
                  Na == Name andalso Sa == Salt ] == [].
-                 
+
 valid_fee(H, #{ fee := Fee }) ->
-    Fee >= 20000 * minimum_gas_price(H).   %% not precise, but we don't generate fees in the shady range   
+    Fee >= 20000 * minimum_gas_price(H).   %% not precise, but we don't generate fees in the shady range
 
 is_claimed(#{claims := Cs}, Name) ->
     lists:keymember(Name, #claim.name, Cs).
@@ -413,14 +393,21 @@ gen_preclaim(S) ->
     %%               end)},
     %%     {1, {gen_name(), gen_salt(), gen_account(1, 1, S)}}).
 
-gen_name_claim(#{claims := []} = S) ->
+gen_claimed_name(#{claims := []} = S) ->
     {gen_name(), gen_account(1, 1, S)};
-gen_name_claim(#{claims := Cs} = S) ->
+gen_claimed_name(#{claims := Cs} = S) ->
     weighted_default(
         {39, ?LET(#claim{name = N, claimer = C}, elements(Cs),
                   begin
-                    A = txs_spend_eqc:existing_account(S, C),
-                    frequency([{1, {gen_name(), A}}, {1, {N, gen_account(0, 1, S)}}, {38, {N, A}}])
+                    frequency([{1, {gen_name(), C}}, {1, {N, gen_account(0, 1, S)}}, {38, {N, C}}])
                   end)},
         {1, {gen_name(), gen_account(1, 1, S)}}).
 
+gen_pointers(S) ->
+    ?LET(Pointers, [?LET({Kind, AccountKey},
+                         oneof([
+                                {account, gen_account(1, 5, S)},
+                                {oracle, txs_oracles_eqc:gen_oracle_account(1, 5, S)}
+                               ]),
+                         {Kind, AccountKey}), {fake, binary(32)}, {fake, binary(32)}],
+        sublist(Pointers)).
