@@ -35,7 +35,7 @@ common_postcond(Correct, Res) ->
     {error, _} when Correct -> eq(Res, ok);
     {error, _}              -> true;
     ok when Correct         -> true;
-    ok                      -> eq(ok, {error, '_'})
+    ok                      -> eq(ok, {error, Correct})
   end.
 
 
@@ -78,18 +78,17 @@ ns_preclaim_args(S = #{height := Height}) ->
           nonce => gen_nonce()}]).
 
 ns_preclaim_valid(S = #{height := Height}, [Sender, {Name, Salt}, Tx]) ->
-  is_account(S, Sender)
-    andalso check_balance(S, Sender, maps:get(fee, Tx))
-    andalso maps:get(nonce, Tx) == good
-    andalso valid_fee(Height, Tx)
-    andalso new_name_and_salt(maps:get(preclaims, S, []), Name, Salt).
+  valid([{account, is_account(S, Sender)},
+         {balance, check_balance(S, Sender, maps:get(fee, Tx))},
+         {nonce, maps:get(nonce, Tx) == good},
+         {fee, valid_fee(Height, Tx)},
+         {new_name_and_salt, new_name_and_salt(maps:get(preclaims, S, []), Name, Salt)}]).
 
 ns_preclaim_tx(S, [Sender, {_Name, _Salt}, Tx]) ->
   aens_preclaim_tx:new(update_nonce(S, Sender, Tx)).
 
 ns_preclaim_next(S = #{height := Height}, _Value, [Sender, {Name, Salt}, Tx] = Args) ->
   case ns_preclaim_valid(S, Args) of
-    false -> S;
     true  ->
       #{ fee := Fee } = Tx,
       Preclaim = #preclaim{name    = Name,
@@ -100,7 +99,8 @@ ns_preclaim_next(S = #{height := Height}, _Value, [Sender, {Name, Salt}, Tx] = A
                            protocol = aec_hard_forks:protocol_effective_at_height(Height)},
       reserve_fee(Fee,
                   bump_and_charge(Sender, Fee,
-                                  add(preclaims, Preclaim, S)))
+                                  add(preclaims, Preclaim, S)));
+    _ -> S
   end.
 
 ns_preclaim_post(S, Args, Res) ->
@@ -109,7 +109,7 @@ ns_preclaim_post(S, Args, Res) ->
 
 ns_preclaim_features(S, [_Sender, {_Name, _Salt}, _Tx] = Args, Res) ->
   Correct = ns_preclaim_valid(S, Args),
-  [{correct, if Correct -> ns_preclaim; true -> false end},
+  [{correct, case Correct of true -> ns_preclaim; _ -> false end},
    {ns_preclaim, Res} ].
 
 %% --- Operation: ns_claim ---
@@ -126,13 +126,14 @@ ns_claim_args(S = #{height := Height}) ->
           nonce => gen_nonce()}]).
 
 ns_claim_valid(S = #{height := Height}, [Sender, #{name := Name} = Tx]) ->
-  is_account(S, Sender)
-    andalso check_balance(S, Sender, maps:get(fee, Tx))
-    andalso maps:get(nonce, Tx) == good
-    andalso valid_fee(Height, Tx)
-    andalso is_valid_preclaim(S, Tx, Sender)
-    andalso not is_claimed(S, Name)
-    andalso not is_protected(S, Name).
+  valid([{account, is_account(S, Sender)},
+         {balance, check_balance(S, Sender, maps:get(fee, Tx))},
+         {nonce, maps:get(nonce, Tx) == good},
+         {fee, valid_fee(Height, Tx)},
+         {preclaim, is_valid_preclaim(S, Tx, Sender)},
+         {valid_name,  valid_name(maps:get(name,Tx))},
+         {unclaimed, not is_claimed(S, Name)},
+         {unprotected, not is_protected(S, Name)}]).
 
 is_valid_preclaim(#{preclaims := Ps, height := Height}, Tx = #{name := Name, name_salt := Salt}, Claimer) ->
   case [ PC || PC = #preclaim{name = N, salt = Sa, claimer = C} <- Ps,
@@ -141,12 +142,11 @@ is_valid_preclaim(#{preclaims := Ps, height := Height}, Tx = #{name := Name, nam
     [#preclaim{ height = H }] ->
       H + aec_governance:name_claim_preclaim_delta() =< Height
         andalso Height < H +  aec_governance:name_preclaim_expiration()  %% this is always the case in this model
-        andalso valid_name(Tx)
   end.
 
 %% names may not have dots in between, only at the end (.test)
-valid_name(Tx) ->
-  case string:lexemes(maps:get(name,Tx), ".") of
+valid_name(Name) ->
+  case string:lexemes(Name, ".") of
     [_, <<"test">>] -> true;
     _ -> false
   end.
@@ -156,7 +156,6 @@ ns_claim_tx(S, [Sender, Tx]) ->
 
 ns_claim_next(S = #{height := Height}, _Value, [Sender, Tx] = Args) ->
   case ns_claim_valid(S, Args) of
-    false -> S;
     true  ->
       #{ fee := Fee, name := Name } = Tx,
       Claim = #claim{name    = Name,
@@ -167,7 +166,8 @@ ns_claim_next(S = #{height := Height}, _Value, [Sender, Tx] = Args) ->
       remove_preclaim(Tx,
                       reserve_fee(Fee,
                                   bump_and_charge(Sender, Fee,
-                                                  add(claims, Claim, S))))
+                                                  add(claims, Claim, S))));
+    _ -> S
   end.
 
 ns_claim_post(S, Args, Res) ->
@@ -208,19 +208,19 @@ ns_update_args(S = #{height := Height}) ->
          }]).
 
 ns_update_valid(#{height := Height} = S, [Name, Sender, _Pointers, Tx]) ->
-  is_account(S, Sender)
-    andalso maps:get(nonce, Tx) == good
-    andalso check_balance(S, Sender, maps:get(fee, Tx) + aec_governance:name_claim_locked_fee())
-    andalso valid_fee(Height, Tx)
-    andalso maps:get(name_ttl, Tx) =< aec_governance:name_claim_max_expiration()
-    andalso owns_name(S, Sender, Name)
-    andalso is_valid_name(S, Name, Height).
+  valid([{account, is_account(S, Sender)},
+         {balance, check_balance(S, Sender, maps:get(fee, Tx) + aec_governance:name_claim_locked_fee())},
+         {nonce, maps:get(nonce, Tx) == good},
+         {fee, valid_fee(Height, Tx)},
+         {name_expiry, maps:get(name_ttl, Tx) =< aec_governance:name_claim_max_expiration()},
+         {claimed_name, is_claimed_name(S, Name, Height)},
+         {owner, owns_name(S, Sender, Name)}]).
 
 ns_update_tx(S, [_Name, Sender, _Pointers, Tx]) ->
   aens_update_tx:new(update_nonce(S, Sender, Tx)).
+
 ns_update_next(#{height := Height} = S, _, [Name, Sender, Pointers, Tx] = Args) ->
   case ns_update_valid(S, Args) of
-    false -> S;
     true  ->
       #{ fee := Fee, name_ttl := TTL } = Tx,
       S1 = case lists:keyfind(account, 1, Pointers) of
@@ -229,12 +229,13 @@ ns_update_next(#{height := Height} = S, _, [Name, Sender, Pointers, Tx] = Args) 
            end,
       reserve_fee(Fee,
                   bump_and_charge(Sender, Fee,
-                                  update_claim_height(Name, Height, TTL, S1)))
+                                  update_claim_height(Name, Height, TTL, S1)));
+    _ -> S
   end.
 
 ns_update_features(S, [_Name, _Sender, Pointers, _Tx] = Args, Res) ->
   Correct = ns_update_valid(S, Args),
-  [{correct, if Correct -> ns_update; true -> false end},
+  [{correct, case Correct of true -> ns_update; _ -> false end},
    {ns_update, Res}] ++
     [{ns_update, [ Kind || {Kind, _} <- Pointers]}].
 
@@ -366,7 +367,7 @@ owns_name(#{claims := Names, height := Height}, Who, Name) ->
                andalso Claim#claim.expires_by >= Height
   end.
 
-is_valid_name(#{claims := Names}, Name, Height) ->
+is_claimed_name(#{claims := Names}, Name, Height) ->
   case lists:keyfind(Name, #claim.name, Names) of
     false -> false;
     Claim -> Height =< Claim#claim.expires_by
@@ -427,3 +428,12 @@ gen_pointers(S) ->
                              ]),
                        {Kind, AccountKey}), {fake, binary(32)}, {fake, binary(32)}],
        sublist(Pointers)).
+
+%% Keep this lazy such that it mimics 'andalso'. In that way, one can first check whether
+%% the account exists and only if so, check its balance.
+valid([]) ->
+  true;
+valid([{_, true} | Rest]) ->
+  valid(Rest);
+valid([Tag | Rest]) ->
+  Tag.
