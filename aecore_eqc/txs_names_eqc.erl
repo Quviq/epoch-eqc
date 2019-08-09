@@ -135,7 +135,7 @@ ns_claim_valid(S = #{height := Height}, [Sender, #{name := Name} = Tx]) ->
          {unclaimed, not is_claimed(S, Name)},
          {unprotected, not is_protected(S, Name)}]).
 
-is_valid_preclaim(#{preclaims := Ps, height := Height}, Tx = #{name := Name, name_salt := Salt}, Claimer) ->
+is_valid_preclaim(#{preclaims := Ps, height := Height}, _Tx = #{name := Name, name_salt := Salt}, Claimer) ->
   case [ PC || PC = #preclaim{name = N, salt = Sa, claimer = C} <- Ps,
                Name == N, Salt == Sa, Claimer == C ] of
     [] -> false;
@@ -241,7 +241,53 @@ ns_update_features(S, [_Name, _Sender, Pointers, _Tx] = Args, Res) ->
 
 
 %% --- Operation: ns_revoke ---
+ns_revoke_pre(S) ->
+    maps:is_key(accounts, S).
 
+ns_revoke_args(#{height := Height} = S) ->
+     ?LET({Name, Sender}, gen_claimed_name(S),
+          [Sender, Name,
+           #{account_id => aeser_id:create(account, Sender),
+             name_id => aeser_id:create(name, aens_hash:name_hash(Name)),
+             fee => gen_fee(Height),
+             nonce => gen_nonce()
+            }]).
+
+ns_revoke_valid(#{height := Height} = S, [Sender, Name, Tx]) ->
+  valid([{account, is_account(S, Sender)},
+         {balance, check_balance(S, Sender, maps:get(fee, Tx))},
+         {nonce, maps:get(nonce, Tx) == good},
+         {fee, valid_fee(Height, Tx)},
+         {claimed_name, is_claimed_name(S, Name, Height)},
+         {owner, owns_name(S, Sender, Name)}]).
+
+ns_revoke_tx(S, [Sender, _Name, Tx]) ->
+  aens_revoke_tx:new(update_nonce(S, Sender, Tx)).
+
+ns_revoke_next(#{height := Height} = S, _Value, [Sender, Name, Tx] = Args) ->
+    case ns_revoke_valid(S, Args) of
+        true  ->
+            #{ fee := Fee } = Tx,
+            reserve_fee(Fee,
+            bump_and_charge(Sender, Fee,
+                remove_named_account(Name,
+                                     revoke_claim(Name, Height, S))));
+      _ -> S
+    end.
+
+ns_revoke_post(S, Args, Res) ->
+  common_postcond(ns_revoke_valid(S, Args), Res).
+
+
+ns_revoke_features(#{height := Height} = S, [Sender, Name, _Tx] = Args, Res) ->
+    Correct = ns_revoke_valid(S, Args),
+    [{correct, case Correct of true -> ns_revoke; _ -> false end},
+     {ns_revoke, Res}] ++
+  	[ {protocol, ns_revoke,
+ 	   aec_hard_forks:protocol_effective_at_height(Height) -
+	       get_claim_protocol({Name, Sender}, S)} ||
+ 	    Correct == true
+	].
 
 %% -- weight ---------------------------------------------------------------
 
@@ -435,5 +481,5 @@ valid([]) ->
   true;
 valid([{_, true} | Rest]) ->
   valid(Rest);
-valid([Tag | Rest]) ->
+valid([Tag | _Rest]) ->
   Tag.
