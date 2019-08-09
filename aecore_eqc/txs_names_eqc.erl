@@ -65,6 +65,7 @@ mine_features(#{height := Height} = S, [Blocks], _Res) ->
 ns_preclaim_pre(S) ->
   maps:is_key(accounts, S).
 
+%% We cannot reject invalid names here, because we only get teh hash of it.
 ns_preclaim_args(S = #{height := Height}) ->
   ?LET([Sender, Name, Salt],
        [gen_account(1, 49, S), gen_name(), gen_salt()],

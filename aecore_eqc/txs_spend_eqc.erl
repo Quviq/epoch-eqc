@@ -139,7 +139,11 @@ resolve_account(_, {contract, Key}) -> {contract, Key};
 resolve_account(_, {_, Key})     -> Key.
 
 check_balance(S, Key, Amount) ->
-     (account(S, Key))#account.amount >= Amount.
+  case account(S, Key) of
+    false -> false;
+    Account ->
+      Account#account.amount >= Amount
+  end.
 
 
 on_account(Key, Fun, S = #{accounts := Accounts}) ->
@@ -184,8 +188,8 @@ account_keys(#{accounts := Accounts}) ->
 
 %% --- local helpers ------
 
-is_account(#{accounts := Accounts}, Key) ->
-    lists:keymember(Key, #account.key, Accounts).
+is_account(S, Key) ->
+    lists:keymember(Key, #account.key, maps:get(accounts, S, #{})).
 
 account_key(#account{key = Key}) ->
     Key.
@@ -197,8 +201,8 @@ valid_fee(H, #{ fee := Fee }) ->
     Fee >= 20000 * minimum_gas_price(H).   %% not precise, but we don't generate fees in the shady range
 
 
-account(#{accounts := Accounts}, Key) ->
-    lists:keyfind(Key, #account.key, Accounts).
+account(S, Key) ->
+    lists:keyfind(Key, #account.key, maps:get(accounts, S, #{})).
 
 
 %% -- Generators -------------------------------------------------------------
