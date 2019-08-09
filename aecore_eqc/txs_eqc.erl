@@ -1473,7 +1473,8 @@ contract_create_args(#{height := Height} = S) ->
                     frequency([{10, 1}, {30, 2}]),
                     #{owner_id => aeser_id:create(account, Sender#account.key),
                       vm_version  => frequency([{1, elements([0,5])}, {max(10, Height), aevm_sophia_1},
-                                                {2, vm_solidity}, {50, aevm_sophia_2}]),
+                                                {2, vm_solidity}, {50, aevm_sophia_2}, {40, aevm_sophia_3},
+                                               {30, aevm_sophia_4}]),
                       abi_version => weighted_default({49, 1}, {1, elements([0,3])}),
                       fee => gen_fee_above(Height, Fixed),
                       gas_price => frequency([{1,0}, {10, 1}, {89, minimum_gas_price(Height)}]),
@@ -1506,7 +1507,7 @@ contract_create_valid(S, [Height, {_, Sender}, Name, CompilerVersion, Tx]) ->
                                  [{aevm_sophia_3, 1}, {aevm_sophia_2, 1}]);
                Protocol == 4 ->
                    lists:member({maps:get(vm_version, Tx), maps:get(abi_version, Tx)},
-                                [{aevm_sophia_3, 1}, {fate_sophia_1, 1}])
+                                [{aevm_sophia_4, 1}, {fate_sophia_1, 1}])
             end
     andalso lists:member(CompilerVersion,
                              [ 1 || Protocol >= 1] ++
@@ -1524,12 +1525,16 @@ contract_create(Height, {_, _Sender}, Name, CompilerVersion, Tx) ->
 
 contract_create_tx(Name, CompilerVersion, Tx) ->
     #{src := Contract, args := Args} = CompiledContract = contract(Name),
+    %% THis is wrong encoding, because it always takes the latest VM
+    %% We can add 4 or 5 as first argument of encode_call_data to encode it for newer VMs
     {ok, CallData} = aect_test_utils:encode_call_data(Contract, <<"init">>, Args),
     Code = maps:get({code, CompilerVersion}, CompiledContract),
     NTx = maps:update_with(vm_version, fun(aevm_sophia_1) -> 1;
                                           (vm_solidity) -> 2;
                                           (aevm_sophia_2) -> 3;
                                           (aevm_sophia_3) -> 4;
+                                          (fate_sophia_1) -> 5;
+                                          (aevm_sophia_4) -> 6;
                                           (N) when is_integer(N), N >= 0 -> N
                                        end, Tx),
     NTx#{code => Code, call_data => CallData}.
@@ -1575,7 +1580,8 @@ contract_create_features(S, [Height, {_, _Sender}, Name, CompilerVersion, Tx] = 
     Correct = contract_create_valid(S, Args) andalso maps:get(gas, Tx) >= GasFun(Height),
     [{correct, if Correct -> contract_create; true -> false end},
      {contract_create, Res},
-     {contract_create, compiler, CompilerVersion}].
+     {contract_create, compiler, CompilerVersion},
+     {contract_create, vm, maps:get(vm_version, Tx)}].
 
 %% --- Operation: call_contract ---
 contract_call_pre(S) ->

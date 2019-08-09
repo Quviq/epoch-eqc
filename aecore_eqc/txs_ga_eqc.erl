@@ -121,8 +121,12 @@ ga_attach_valid(S, [Height, {_, Sender}, Name, CompilerVersion, Tx]) ->
     andalso txs_eqc:check_balance(S, Sender, maps:get(fee, Tx) + GasFun(Height) * maps:get(gas_price, Tx))
     andalso txs_eqc:valid_contract_fee(Height, Fixed, Tx)
     andalso Protocol >= 3
-    andalso lists:member({maps:get(vm_version, Tx), maps:get(abi_version, Tx)},
-                         [{aevm_sophia_3, 1}])
+    andalso if Protocol == 3 -> lists:member({maps:get(vm_version, Tx), maps:get(abi_version, Tx)},
+                                             [{aevm_sophia_3, 1}]);
+               Protocol > 3 -> lists:member({maps:get(vm_version, Tx), maps:get(abi_version, Tx)},
+                                             [{aevm_sophia_4, 1}]);
+               true -> false
+            end
     andalso lists:member(CompilerVersion, [1, 2]).
 
 ga_attach_adapt(S, [_, {STag, Sender}, Contract, CompilerVersion, Tx]) ->
