@@ -289,6 +289,70 @@ ns_revoke_features(#{height := Height} = S, [Sender, Name, _Tx] = Args, Res) ->
  	    Correct == true
 	].
 
+%% --- Operation: ns_transfer ---
+ns_transfer_pre(S) ->
+    maps:is_key(accounts, S).
+
+ns_transfer_args(#{height := Height} = S) ->
+    ?LET({{Name, Sender}, To},
+         {gen_claimed_name(S),
+          oneof([{account, gen_account(1, 49, S)},
+                 {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++ [<<"ta.test">>])}])},
+         [Sender, To, Name,
+          #{account_id => aeser_id:create(account, Sender),  %% The sender is asserted to never be a name.
+            recipient_id =>
+              case To of
+                {account, Receiver} ->
+                  aeser_id:create(account, Receiver);
+                {name, ToName} ->
+                  aeser_id:create(name, aens_hash:name_hash(ToName))
+              end,
+            name_id => aeser_id:create(name, aens_hash:name_hash(Name)),
+            fee => gen_fee(Height),
+            nonce => gen_nonce()
+           }]).
+
+%% ns_transfer_pre(S, [Height, Sender, Receiver, Name, Tx]) ->
+%%     aeser_id:create(name, aens_hash:name_hash(Name)) == maps:get(name_id, Tx)
+%%         andalso correct_height(S, Height)
+%%         andalso valid_nonce(S, Sender, Tx)
+%%         andalso valid_account(S, STag, Sender) andalso valid_account(S, Receiver).
+
+ns_transfer_valid(#{height := Height} = S, [Sender, To, Name, Tx]) ->
+  valid([{account, is_account(S, Sender)},
+         {balance, check_balance(S, Sender, maps:get(fee, Tx))},
+         {nonce, maps:get(nonce, Tx) == good},
+         {fee, valid_fee(Height, Tx)},
+         {claimed_name, is_claimed_name(S, Name, Height)},
+         {owner, owns_name(S, Sender, Name)},
+         {receiver_account,
+          resolve_account(S, To) =/= false} %%  Assumption the recipient does not need to exist
+        ]).
+
+ns_transfer_tx(S, [Sender, _To, _Name, Tx]) ->
+    aens_transfer_tx:new(update_nonce(S, Sender, Tx)).
+
+ns_transfer_next(S, _, [Sender, To, Name, Tx] = Args) ->
+    case ns_transfer_valid(S, Args) of
+        true  ->
+            #{ fee := Fee } = Tx,
+            ReceiverKey = resolve_account(S, To),
+            reserve_fee(Fee,
+            bump_and_charge(Sender, Fee,
+                transfer_name(ReceiverKey, Name,
+                              credit(ReceiverKey, 0, S))));   %% to create it if it doesn't exist
+      _ -> S
+    end.
+
+ns_transfer_post(S, Args, Res) ->
+  common_postcond(ns_transfer_valid(S, Args), Res).
+
+
+ns_transfer_features(S, [_Sender, _To, _Name, _Tx] = Args, Res) ->
+    Correct = ns_transfer_valid(S, Args),
+    [{correct, case Correct of true -> ns_transfer; _ -> false end},
+     {ns_transfer, Res}].
+
 %% -- weight ---------------------------------------------------------------
 
 weight(S, ns_preclaim) ->
@@ -346,9 +410,6 @@ remove_named_account(Name, S) ->
 add_named_account(Name, Acc, S) ->
   S#{ named_accounts => maps:merge(maps:get(named_accounts, S, #{}), #{ Name => Acc }) }.
 
-
-
-
 transfer_name(NewOwner, Name, S) ->
   on_claim(Name, fun(C) -> C#claim{ claimer = NewOwner } end, S).
 
@@ -375,11 +436,19 @@ revoke_claim(Name, Height, S) ->
 is_account(S, Key) ->
   txs_spend_eqc:is_account(S, Key).
 
+resolve_account(S, {name, Name}) ->
+  maps:get(Name, maps:get(named_accounts, S, #{}), false);
+resolve_account(_S, {account, Key}) ->
+  Key.
+
 reserve_fee(Fee, S) ->
   txs_spend_eqc:reserve_fee(Fee, S).
 
 bump_and_charge(Key, Fee, S) ->
   txs_spend_eqc:bump_and_charge(Key, Fee, S).
+
+credit(Key, Amount, S) ->
+  txs_spend_eqc:credit(Key, Amount, S).
 
 check_balance(S, Sender, Amount) ->
   txs_spend_eqc:check_balance(S, Sender, Amount).
@@ -423,9 +492,9 @@ is_protected(S, Name) ->
   proplists:get_value(Name, maps:get(protected_names, S)) =/= undefined.
 
 
-  %% -- Generators -------------------------------------------------------------
-  minimum_gas_price(H) ->
-                          aec_governance:minimum_gas_price(H).
+%% -- Generators -------------------------------------------------------------
+minimum_gas_price(H) ->
+  aec_governance:minimum_gas_price(H).
 
 
 gen_name() ->
