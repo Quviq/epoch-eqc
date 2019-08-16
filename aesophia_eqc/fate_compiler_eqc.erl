@@ -16,10 +16,12 @@ run(Code, Contract, Function0, Arguments) ->
         Cache = cache(Code),
         Call  = make_call(Contract, Function, Arguments),
         Spec  = dummy_spec(),
-        {ok, ES} = aefa_fate:run_with_cache(Call, Spec, Cache),
-        aefa_engine_state:accumulator(ES)
-    catch _:{error, op_not_implemented_yet} ->
-        {error, abort}
+        case aefa_fate:run_with_cache(Call, Spec, Cache) of
+            {ok, ES}      -> aefa_engine_state:accumulator(ES);
+            {error, E, _} -> {error, binary_to_list(E)}
+        end
+    catch _:Err ->
+        {'EXIT', Err, erlang:get_stacktrace()}
     end.
 
 compile_contract(Code) ->
@@ -31,7 +33,10 @@ compile_contract(Code, Options) ->
     FCode     = aeso_ast_to_fcode:ast_to_fcode(TypedAst, Options),
     Fate      = aeso_fcode_to_fate:compile(FCode, Options),
     Bin       = aeb_fate_code:serialize(Fate),
-    aeb_fate_code:deserialize(Bin).
+    case aeb_fate_code:deserialize(Bin) of
+        Fate  -> Fate;
+        Fate1 -> {Fate1, '/=', Fate}
+    end.
 
 dummy_spec() ->
     #{ trees     => aec_trees:new_without_backend(),
@@ -50,6 +55,7 @@ make_call(Contract, Function, Arguments) ->
     #{ contract => pad_contract_name(Contract),
        gas      => 1000000,
        value    => 0,
+       store    => aefa_stores:initial_contract_store(),
        call     => aeb_fate_encoding:serialize(Calldata) }.
 
 pad_contract_name(Name) ->
@@ -343,7 +349,9 @@ pp_type(int)         -> "int";
 pp_type(string)      -> "string";
 pp_type({id, X})     -> X;
 pp_type({list, T})   -> "list(" ++ pp_type(T) ++ ")";
-pp_type({tuple, Ts}) -> "(" ++ string:join([pp_type(T) || T <- Ts], ", ") ++ ")".
+pp_type({tuple, []}) -> "unit";
+pp_type({tuple, Ts}) -> "(" ++ string:join([pp_type(T) || T <- Ts], " * ") ++ ")";
+pp_type({args, Ts})  -> "(" ++ string:join([pp_type(T) || T <- Ts], ", ") ++ ")".
 
 pp_pat({var, X})    -> X;
 pp_pat({bool, B})   -> atom_to_list(B);
@@ -362,7 +370,7 @@ pp_def({type_def, Name, {alias_t, Type}}) ->
 pp_def({type_def, Name, {record_t, _, Fields}}) ->
     ["record ", Name, " = {", string:join([[X, " : ", pp_type(T)] || {X, T} <- Fields], ", "), "}"];
 pp_def({type_def, Name, {variant_t, _, Cons}}) ->
-    ["datatype ", Name, " = ", string:join([[Con, [pp_type({tuple, Args}) || Args /= []]] || {Con, Args} <- Cons], " | ")].
+    ["datatype ", Name, " = ", string:join([[Con, [pp_type({args, Args}) || Args /= []]] || {Con, Args} <- Cons], " | ")].
 
 pp_expr(E) -> pp_pat(E).
 
@@ -474,7 +482,7 @@ untup(X) -> X.
 pp_fun(Defs, {Args, CaseType, Type, Expr, Clauses}) -> lists:flatten(
     ["contract Test =\n",
      [["  ", pp_def(Def), "\n"] || Def <- Defs],
-     "  function test(", string:join([[X, " : ", pp_type(T)] || {X, T} <- Args], ", "),
+     "  entrypoint test(", string:join([[X, " : ", pp_type(T)] || {X, T} <- Args], ", "),
                     ") : ", pp_type(Type), " =\n",
      "    switch(", pp_expr(Expr), " : ", pp_type(CaseType), ")\n",
      [ ["      ", pp_pat(Pat), " => ", pp_expr(Body), "\n"]
@@ -503,7 +511,7 @@ interpret_fun(Defs, {Vars, CaseType, ResType, Expr, Clauses}, Args) ->
     Env       = maps:from_list([ {X, V} || {{X, _}, V} <- lists:zip(Vars, Args) ]),
     CaseVal   = eval(Env, CaseType1, Expr),
     case match_clauses(CaseType1, Clauses, CaseVal) of
-        false        -> {error, abort};
+        false        -> {error, "Incomplete patterns"};
         {Env1, Body} -> eval(maps:merge(Env, maps:from_list(Env1)), ResType1, Body)
     end.
 
