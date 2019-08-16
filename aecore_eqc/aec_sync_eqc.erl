@@ -619,6 +619,3 @@ parse(String) ->
 
 difficulty() ->
   elements([4.0, 5.0]).
-
-full_peer({Scheme, Host}) -> {Scheme, Host, 80};
-full_peer(Uri) -> Uri.
