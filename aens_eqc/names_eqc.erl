@@ -36,18 +36,14 @@ prop_legacy() ->
     ?FORALL(Strings, list(utf8()),
             begin
                 Name = iolist_to_binary(lists:join(".", Strings)),
-                ?IMPLIES(Name =/= <<>>,
-                         begin
-                             OldHash = (catch {ok, name_hash(Name)}),
-                             NewHash = (catch {ok, aens_hash:name_hash(Name)}),
-                             collect(Name,
-                                     ?WHENFAIL(eqc:format("old hash: ~p\nnew hash: ~p\n",
-                                                          [OldHash, NewHash]),
-                                               case {OldHash, NewHash} of
-                                                   {{ok, H1}, {ok, H2}} -> collect(ok, true);
-                                                   {{ok, _}, NewHash} -> false;
-                                                   {_, {ok, _}} -> false;
-                                                   _ -> collect(error, true) %% both raise exception
-                                               end))
-                         end)
+                OldHash = (catch {ok, name_hash(Name)}),
+                NewHash = (catch {ok, aens_hash:name_hash(Name)}),
+                ?WHENFAIL(eqc:format("old hash: ~p\nnew hash: ~p\n",
+                                     [OldHash, NewHash]),
+                          case {OldHash, NewHash} of
+                              {{ok, H1}, {ok, H2}} -> collect(ok, true);
+                              {{ok, _}, NewHash} -> false;
+                              {_, {ok, _}} -> false;
+                              _ -> collect(error, true) %% both raise exception
+                          end)
             end).
