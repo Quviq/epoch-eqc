@@ -131,7 +131,7 @@ ns_claim_valid(S = #{height := Height}, [Sender, #{name := Name} = Tx]) ->
          {nonce, maps:get(nonce, Tx) == good},
          {fee, valid_fee(Height, Tx)},
          {preclaim, is_valid_preclaim(S, Tx, Sender)},
-         {valid_name,  valid_name(maps:get(name,Tx))},
+         {valid_name,  valid_name(Height, maps:get(name,Tx))},
          {unclaimed, not is_claimed(S, Name)},
          {unprotected, not is_protected(S, Name)}]).
 
@@ -145,9 +145,11 @@ is_valid_preclaim(#{preclaims := Ps, height := Height}, _Tx = #{name := Name, na
   end.
 
 %% names may not have dots in between, only at the end (.test)
-valid_name(Name) ->
+%% This also holds for Lima, creating subnames is a different transaction
+valid_name(Height, Name) ->
+  Protocol = aec_hard_forks:protocol_effective_at_height(Height),
   case string:lexemes(Name, ".") of
-    [_, <<"test">>] -> true;
+    [_, Registery] -> lists:member(Registery, aec_governance:name_registrars(Protocol));
     _ -> false
   end.
 
@@ -207,6 +209,9 @@ ns_update_args(S = #{height := Height}) ->
               end || {Kind, Key} <- Pointers ]
          }]).
 
+ns_update_pre(#{height := Height}, [Name, _, _, _]) ->
+  backward_compatible(Height, Name).
+
 ns_update_valid(#{height := Height} = S, [Name, Sender, _Pointers, Tx]) ->
   valid([{account, is_account(S, Sender)},
          {balance, check_balance(S, Sender, maps:get(fee, Tx) + aec_governance:name_claim_locked_fee())},
@@ -252,6 +257,9 @@ ns_revoke_args(#{height := Height} = S) ->
              fee => gen_fee(Height),
              nonce => gen_nonce()
             }]).
+
+ns_revoke_pre(#{height := Height}, [_, Name, _]) ->
+  backward_compatible(Height, Name).
 
 ns_revoke_valid(#{height := Height} = S, [Sender, Name, Tx]) ->
   valid([{account, is_account(S, Sender)},
@@ -311,6 +319,9 @@ ns_transfer_args(#{height := Height} = S) ->
             fee => gen_fee(Height),
             nonce => gen_nonce()
            }]).
+
+ns_transfer_pre(#{height := Height}, [_, _, Name, _]) ->
+  backward_compatible(Height, Name).
 
 ns_transfer_valid(#{height := Height} = S, [Sender, To, Name, Tx]) ->
   valid([{account, is_account(S, Sender)},
@@ -422,6 +433,15 @@ revoke_claim(Name, Height, S) ->
                      %% trick, after a revoke, the name cannot be used any more on that height or heigher
                  end, S).
 
+backward_compatible(Height, Name) ->
+  Domains = string:lexemes(Name, "."),
+  length(Domains) == 2 andalso
+  ((aec_hard_forks:protocol_effective_at_height(Height) >= 4
+   andalso
+   lists:last(Domains) == <<"aet">>)
+    orelse
+      (aec_hard_forks:protocol_effective_at_height(Height) < 4  andalso
+       length(Domains) == 2)).
 
 
 %% --- local helpers ------
@@ -492,9 +512,13 @@ minimum_gas_price(H) ->
 
 
 gen_name() ->
-  ?LET(NFs, frequency([{1, non_empty(list(elements(?NAMEFRAGS)))},
-                       {90, [elements(?NAMEFRAGS)]}]),
-       return(iolist_to_binary(lists:join(".", NFs ++ ["test"])))).
+  ?LET({SubName, Suffix}, {gen_subname(), oneof(["test", "aet"])},
+       return(iolist_to_binary(lists:join(".", [SubName] ++ [Suffix])))).
+
+gen_subname() ->
+    ?LET(NFs, frequency([{1, non_empty(list(elements(?NAMEFRAGS)))},
+                         {90, [elements(?NAMEFRAGS)]}]),
+       return(iolist_to_binary(lists:join(".", NFs)))).
 
 gen_salt() -> choose(270, 280).
 
