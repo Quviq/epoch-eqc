@@ -93,8 +93,9 @@ value(S, Type) ->
 
 value(int)    -> int();
 value(string) ->
-    ?LET(Parts, list(string_part()),
-    list_to_binary(string:join(Parts, "-")));
+    ?SUCHTHAT(Bin,
+        ?LET(Parts, list(string_part()), list_to_binary(string:join(Parts, "-"))),
+        byte_size(Bin) /= 32);   %% To not confuse the auto-address machinery.
 value({tuple, Ts}) ->
     ?LET(Vs, [ value(T) || T <- Ts ], list_to_tuple(Vs));
 value({map, Key, Val}) ->
@@ -155,9 +156,9 @@ initial_value(Types) when is_list(Types) ->
 
 %% -- Compiling --------------------------------------------------------------
 
-contracts_source(#state{ contracts = Cs }, CmdChunks) ->
+contracts_source(#state{ contracts = Cs } = S, CmdChunks) ->
     ACIs = [ contract_aci(C) || C <- Cs ],
-    [ contract_source(ACIs, C, [Chunk || {I, Chunk} <- CmdChunks, I == Id ])
+    [ contract_source(S, ACIs, C, [Chunk || {I, Chunk} <- CmdChunks, I == Id ])
         || C = #contract{id = Id} <- Cs ].
 
 contract_name(I) -> lists:concat(["Test", I]).
@@ -169,26 +170,29 @@ contract_aci(#contract{id = I, state_type = Type}) ->
     , ind(2, [ [getter_proto(R, T), setter_proto(R, T)] || {R, T} <- references(Type) ])
     ].
 
-contract_source(ACIs, #contract{id = I, state_type = Type}, CmdChunks) ->
+contract_source(S, ACIs, #contract{id = I, state_type = Type}, CmdChunks) ->
     lists:flatten(
     [ [ ACI || {J, ACI} <- ix(ACIs), I /= J ]
     , [ "contract ", contract_name(I), " =\n"
       , ind(2, state_type(Type))
       , ind(2, init_function(Type))
       , ind(2, [ [getter(R, T), setter(R, T)] || {R, T} <- references(Type) ])
-      , ind(2, [ chunk_code(I, Chunk) || Chunk <- CmdChunks ])
+      , ind(2, [ chunk_code(S, I, Chunk) || Chunk <- CmdChunks ])
       ] ]).
 
-chunk_code(Id, Cmds) ->
+chunk_code(S, Id, Cmds) ->
     RemoteArgs = chunk_contract_vars(Id, Cmds),
     VarArgs    = chunk_vars(Cmds),
     [ "stateful entrypoint ", chunk_entrypoint(Cmds)
     , "(", lists:join(", ", [[X, " : ", T] || {X, T} <- RemoteArgs ++ VarArgs]), ") =\n"
-    , ind(2, chunk_body(Id, Cmds)) ].
+    , ind(2, chunk_body(S, Id, Cmds)) ].
 
 chunk_contract_vars(Id, Cmds) ->
-    Js = lists:usort([ J || Cmd <- Cmds, J <- cmd_references(Cmd), J /= Id ]),
+    Js = chunk_references(Id, Cmds),
     [ {contract_var(J), contract_name(J)} || J <- Js ].
+
+chunk_references(Id, Cmds) ->
+    lists:usort([ J || Cmd <- Cmds, J <- cmd_references(Cmd), J /= Id ]).
 
 contract_var(J) -> "r" ++ integer_to_list(J).
 
@@ -201,10 +205,10 @@ call_references(set_state, [{Id, _}, _]) -> [Id];
 call_references(get_state, [{Id, _}])    -> [Id].
 
 chunk_vars(Cmds) ->
-    chunk_vars([], Cmds, []).
+    [ {var(X), "_"} || X <- chunk_vars([], Cmds, []) ].
 
 chunk_vars(Local, [], Acc) ->
-    [{var(X), "_"} || X <- lists:usort(lists:flatten(Acc)) -- Local];
+    lists:usort(lists:flatten(Acc)) -- Local;
 chunk_vars(Local, [{set, {var, X}, Call} | Cmds], Acc) ->
     chunk_vars([X | Local], Cmds, [vars(Call), Acc]).
 
@@ -215,28 +219,29 @@ vars(_) -> [].
 
 var(I) -> lists:concat(["x", I]).
 
-chunk_body(Id, Cmds) ->
-    Code  = [ cmd_to_sophia(Id, Cmd) || Cmd <- Cmds ],
-    Bound = [ X || {{bind, X}, _} <- Code ],
-    [ [ S || {_, S} <- Code ]
+chunk_body(S, Id, Cmds) ->
+    Code  = [ cmd_to_sophia(S, Id, Cmd) || Cmd <- Cmds ],
+    Bound = [ X || {{bind, X, _}, _} <- Code ],
+    [ [ Src || {_, Src} <- Code ]
     , to_sophia_val(list_to_tuple(Bound))
     ].
 
-cmd_to_sophia(Id, {set, {var, N}, Call}) ->
-    case call_to_sophia(Id, Call) of
-        {bind, Code}   -> {{bind, {var, N}}, ["let ", var(N), " = ", Code, "\n"]};
-        {nobind, Code} -> {nobind, [Code, "\n"]}
+cmd_to_sophia(S, Id, {set, {var, N}, Call}) ->
+    case call_to_sophia(S, Id, Call) of
+        {bind, T, Code}   -> {{bind, {var, N}, T}, ["let ", var(N), " = ", Code, "\n"]};
+        {nobind, T, Code} -> {{nobind, T}, [Code, "\n"]}
     end.
 
-call_to_sophia(Id, {call, ?MODULE, Fun, Args}) ->
-    call_to_sophia(Id, Fun, Args);
-call_to_sophia(Id, {call, ?MODULE, Fun, Args, _Meta}) ->
-    call_to_sophia(Id, Fun, Args).
+call_to_sophia(S, Id, {call, ?MODULE, Fun, Args}) ->
+    call_to_sophia(S, Id, Fun, Args);
+call_to_sophia(S, Id, {call, ?MODULE, Fun, Args, _Meta}) ->
+    call_to_sophia(S, Id, Fun, Args).
 
-call_to_sophia(Id, get_state, [Ref]) ->
-    {bind, [ getter_name(Id, Ref), "()" ]};
-call_to_sophia(Id, set_state, [Ref, Val]) ->
-    {nobind, [ setter_name(Id, Ref), "(", to_sophia_val(Val), ")" ]}.
+call_to_sophia(S, Id, get_state, [Ref]) ->
+    Type = ref_type(S, Ref),
+    {bind, Type, [ getter_name(Id, Ref), "()" ]};
+call_to_sophia(_S, Id, set_state, [Ref, Val]) ->
+    {nobind, {tuple, []}, [ setter_name(Id, Ref), "(", to_sophia_val(Val), ")" ]}.
 
 chunk_entrypoint([{set, {var, N}, _} | _]) -> lists:concat(["chunk_", N]).
 
@@ -294,6 +299,11 @@ to_sophia_type(int)         -> "int";
 to_sophia_type(string)      -> "string";
 to_sophia_type({tuple, Ts}) -> string:join([ to_sophia_type(T) || T <- Ts ], " * ").
 
+to_vm_type(int)         -> word;
+to_vm_type(string)      -> string;
+to_vm_type({map, K, V}) -> {map, to_vm_type(K), to_vm_type(V)};
+to_vm_type({tuple, Ts}) -> {tuple, lists:map(fun to_vm_type/1, Ts)}.
+
 to_sophia_val(Map) when is_map(Map) ->
     ["{", lists:join(", ", [ ["[", to_sophia_val(K), "] = ", to_sophia_val(V)]
                            || {K, V} <- maps:to_list(Map) ]), "}"];
@@ -316,17 +326,43 @@ compile_commands(InitS = #state{ contracts = Cs }, Chunks) ->
     [ {set, Account, {call, ?MODULE, new_account, [1000000000000000000]}} ] ++
     [ {set, {var, Id + 1}, {call, ?MODULE, create_contract, [Account, Source, {}]}}
       || {#contract{id = Id}, Source} <- lists:zip(Cs, Sources) ] ++
-    compile_chunks(length(Cs) + 2, Chunks).
+    compile_chunks(InitS, #{}, length(Cs) + 2, Chunks).
 
-compile_chunks(_, []) -> [];
-compile_chunks(Var, [{Id, Cmds} | Chunks]) ->
+compile_chunks(_, _, _, []) -> [];
+compile_chunks(S, Binds, Var, [{Id, Cmds} | Chunks]) ->
     Account  = {var, 1},
     Contract = {var, Id + 1},
-    Fun = list_to_atom(chunk_entrypoint(Cmds)),
-    Args = {},              %% TODO
-    Type = {tuple, []},     %% TODO
-    [{set, {var, Var}, {call, ?MODULE, call_contract, [Account, Contract, Fun, Type, Args, #{}]}} |
-     compile_chunks(Var + 1, Chunks)].
+    Fun      = list_to_atom(chunk_entrypoint(Cmds)),
+    Args     = chunk_arguments(Binds, Id, Cmds),
+    {Xs, Type} = chunk_return_type(S, Id, Cmds),
+    NewBinds = case Xs of
+                 [X] -> #{X => Var};
+                 _   -> maps:from_list([{X, {Var, I}} || {I, X} <- ix(Xs)])
+               end,
+    Binds1 = maps:merge(Binds, NewBinds),
+    [{set, {var, Var}, {call, ?MODULE, call_contract, [Account, Contract, Fun, to_vm_type(Type), Args, #{}]}} |
+     compile_chunks(S, Binds1, Var + 1, Chunks)].
+
+chunk_arguments(Binds, Id, Cmds) ->
+    MakeArg =
+        fun(X) ->
+            case maps:get(X, Binds, undefined) of
+                undefined -> error({chunk_arguments, Binds, X});
+                {Var, I}  -> {call, erlang, element, [I, {var, Var}]};
+                Var       -> {var, Var}
+            end end,
+    Refs = [{'@ct', {var, J + 1}} || J <- chunk_references(Id, Cmds)],
+    Args = lists:map(MakeArg, chunk_vars([], Cmds, [])),
+    list_to_tuple(Refs ++ Args).
+
+chunk_return_type(S, Id, Cmds) ->
+    {Xs, Ts} = lists:unzip([ {X, T}
+                             || Cmd = {set, {var, X}, _} <- Cmds,
+                                {{bind, _, T}, _} <- [cmd_to_sophia(S, Id, Cmd)] ]),
+    case Ts of
+        [T] -> {Xs, T};
+        _   -> {Xs, {tuple, Ts}}
+    end.
 
 %% -- Property ---------------------------------------------------------------
 
@@ -349,10 +385,6 @@ prop_compile(Mod) ->
                    end,
             conjunction([{{Backend, I}, IsOk(Res)} || {Backend, I, Res} <- Results])
         end)
-        %% HSR={_, _, Res} = run_commands(Mod, Cmds),
-        %% pretty_commands(Mod, Cmds, HSR,
-        %% check_command_names(Mod, Cmds,
-        %%     Res == ok))
     end))).
 
 prop_run() -> prop_run(fate, ?MODULE).
@@ -363,11 +395,7 @@ prop_run(Backend, Mod) ->
     ?FORALL(Chunks, command_chunks(Cmds),
     begin
         CompiledCmds = compile_commands(InitS, Chunks),
-        ?WHENFAIL(
-            begin
-                eqc:format("CompiledCmds = ~p\n", [CompiledCmds]),
-                [eqc:format("~s\n", [Source]) || Source <- contracts_source(InitS, Chunks)]
-            end,
+        ?WHENFAIL([eqc:format("~s\n", [Source]) || Source <- contracts_source(InitS, Chunks)],
         begin
             init_run(Backend),
             HSR={_, _, Res} = run_commands(Mod, CompiledCmds),
@@ -430,15 +458,21 @@ new_account_post(_, _, Res) ->
 create_contract_post(_, _, Res) ->
     is_binary(Res) andalso byte_size(Res) == 32.
 
-call_contract_post(_, _, {ok, _}) -> true;
-call_contract_post(_, _, {error, Err}) -> {error, binary_to_list(Err)}.
+call_contract_post(_, _, {error, Err}) ->
+    case is_binary(Err) of
+        true  ->
+            io:format("~s\n", [Err]),
+            binary_to_list(Err);
+        false -> {error, Err}
+    end;
+call_contract_post(_, _, _)            -> true.
 
 %% -- Common -----------------------------------------------------------------
 
-weight(_, new_account)    -> 0;
-weight(_, create_account) -> 0;
-weight(_, call_contract)  -> 0;
-weight(_, _)              -> 1.
+weight(_, new_account)     -> 0;
+weight(_, create_contract) -> 0;
+weight(_, call_contract)   -> 0;
+weight(_, _)               -> 1.
 
 call(Fun, Args) ->
     S = aecontract_SUITE:state(),
