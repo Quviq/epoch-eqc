@@ -12,13 +12,24 @@
 
 %% -- State ------------------------------------------------------------------
 
--record(contract, {id, state_type, state}).
--record(state, {contracts :: [#contract{}], values = []}).
+-record(contract, {id,
+                   state_type,
+                   state        %% No symbolic variables
+                  }).
+
+-record(state, {contracts :: [#contract{}],
+                values = [], %% Can contain symbolic variables
+                env    = #{} %% Maps symbolic variables to concrete values
+               }).
 
 init_state() ->
     ?LET(Types, ne_list(3, state_type()),
-    #state{ contracts = [ #contract{ id = I, state_type = T }
+    #state{ contracts = [ #contract{ id = I, state_type = T,
+                                     state = init_value(T) }
                           || {I, T} <- ix(Types) ] }).
+
+init_value({map, _, _}) -> #{};
+init_value(Types)       -> list_to_tuple(lists:map(fun init_value/1, Types)).
 
 get_contract(S, Id) ->
     lists:keyfind(Id, #contract.id, S#state.contracts).
@@ -37,16 +48,36 @@ ref_value(S, {Id, R}) ->
         {field, I} -> element(I, V)
     end.
 
+set_ref({Id, R}, Val, S) ->
+    C  = get_contract(S, Id),
+    C1 = C#contract{ state = set_ref1(R, Val, C#contract.state) },
+    S#state{ contracts = lists:keyreplace(Id, #contract.id, S#state.contracts, C1) }.
+
+set_ref1(top, Val, _) -> Val;
+set_ref1({field, I}, Val, Old) ->
+    setelement(I, Old, Val).
+
+evaluate(S, {var, X})           -> maps:get(X, S#state.env);
+evaluate(S, L) when is_list(L)  -> [evaluate(S, V) || V <- L];
+evaluate(S, T) when is_tuple(T) -> list_to_tuple(evaluate(S, tuple_to_list(T)));
+evaluate(S, M) when is_map(M)   -> maps:map(fun(_, V) -> evaluate(S, V) end, M);
+evaluate(_S, X) -> X.
+
 %% -- Operations -------------------------------------------------------------
 
 %% --- get ---
 
-get_state_args(S) -> [reference(S)].
+get_state_args(S) ->
+    ?LET(R, reference(S), [R, ref_value(S, R)]).
 
-get_state(_) -> ok.
+get_state_pre(S, [R, V]) -> V == ref_value(S, R).
 
-get_state_next(S, V, [Ref]) ->
-  S#state{ values = [{V, ref_type(S, Ref)} | S#state.values] }.
+get_state(_, _) -> ok.
+
+get_state_next(S, {var, X} = V, [Ref, Val]) ->
+  S#state{ values = [{V, ref_type(S, Ref)} | S#state.values]
+         , env    = (S#state.env)#{ X => Val }
+         }.
 
 %% --- put ---
 
@@ -57,7 +88,93 @@ set_state_args(S) ->
 
 set_state(_, _) -> ok.
 
+set_state_next(S, _V, [Ref, Val]) ->
+  set_ref(Ref, evaluate(S, Val), S).
+
+%% --- Map functions ---
+
+map_funs() -> [ map_get
+              , map_upd
+              , map_del
+              , map_member
+              , map_lookup
+              , map_lookup_d
+              , map_size
+              , map_to_list].
+
+map_fun_signature(map_get)      -> {[existing_key, map], val};
+map_fun_signature(map_upd)      -> {[key, val, map], map};
+map_fun_signature(map_del)      -> {[key, map], map};
+map_fun_signature(map_lookup)   -> {[key, map], {option, val}};
+map_fun_signature(map_lookup_d) -> {[key, map, val], val};
+map_fun_signature(map_member)   -> {[key, map], bool};
+map_fun_signature(map_size)     -> {[map], int};
+map_fun_signature(map_to_list)  -> {[map], {list, {tuple, [key, val]}}}.
+
+map_fun_body(map_get)      -> "map[key]";
+map_fun_body(map_upd)      -> "map{[key] = val}";
+map_fun_body(map_del)      -> "Map.delete(key, map)";
+map_fun_body(map_lookup)   -> "Map.lookup(key, map)";
+map_fun_body(map_lookup_d) -> "Map.lookup_default(key, map, val)";
+map_fun_body(map_member)   -> "Map.member(key, map)";
+map_fun_body(map_size)     -> "Map.size(map)";
+map_fun_body(map_to_list)  -> "Map.to_list(map)".
+
+map_get_args(S)      -> args(S, map_get).
+map_upd_args(S)      -> args(S, map_upd).
+map_del_args(S)      -> args(S, map_del).
+map_member_args(S)   -> args(S, map_member).
+map_lookup_args(S)   -> args(S, map_lookup).
+map_lookup_d_args(S) -> args(S, map_lookup_d).
+map_size_args(S)     -> args(S, map_size).
+map_to_list_args(S)  -> args(S, map_to_list).
+
+map_get(Key, Map)           -> maps:get(Key, Map, error).
+map_upd(Key, Val, Map)      -> Map#{ Key => Val }.
+map_del(Key, Map)           -> maps:remove(Key, Map).
+map_member(Key, Map)        -> maps:is_key(Key, Map).
+map_to_list(Map)            -> maps:to_list(Map).
+map_size(Map)               -> maps:size(Map).
+map_lookup_d(Key, Map, Val) -> maps:get(Key, Map, Val).
+
+map_lookup(Key, Map) ->
+    case maps:get(Key, Map, not_found) of
+        not_found -> none;
+        Val       -> {some, Val}
+    end.
+
 %% -- Common -----------------------------------------------------------------
+
+args(S, Fun) ->
+    ?LET({Id, Type, Map}, map(S),
+    begin
+        {ArgSig, _} = map_fun_signature(Fun),
+        ?LET(Args, [arg_gen(S, Type, Map, Arg) || Arg <- ArgSig],
+             [Id, Type | Args] ++ [apply_map_fun(S, Fun, Args)])
+    end).
+
+apply_map_fun(S, Fun, Args) ->
+    Args1 = evaluate(S, Args),
+    apply(?MODULE, Fun, Args1).
+
+arg_gen(S, Type = {map, _, ValT}, Map, K) ->
+    case K of
+        map          -> return(Map);
+        existing_key -> existing_key(evaluate(S, Map), Type);
+        key          -> maybe_existing_key(1, 1, evaluate(S, Map), Type);
+        val          -> value(S, ValT)
+    end.
+
+precondition_common(S, {call, ?MODULE, Fun, [Id, Type | Args0]}) ->
+    not lists:member(Fun, map_funs()) orelse
+    begin
+        Args = lists:droplast(Args0),
+        Res  = lists:last(Args0),
+        Res /= error
+            andalso Res == apply_map_fun(S, Fun, Args)
+            andalso lists:member(Type, map_types((get_contract(S, Id))#contract.state_type))
+    end;
+precondition_common(_, _) -> true.
 
 %% -- Generators -------------------------------------------------------------
 
@@ -74,16 +191,45 @@ record_type() ->
 
 -define(MAX_DEPTH, 3).
 map_type() ->
-    ?LET(D, choose(1, ?MAX_DEPTH), map_type(D)).
+    ?LET(D, choose(1, ?MAX_DEPTH), map_type1(D)).
+
+map_type(S) ->
+    elements([ M || #contract{ state_type = T } <- S#state.contracts,
+                    M <- map_types(T) ]).
 
 key_type() -> elements([int, string, {tuple, [int, string]}]).
 
-map_type(0) -> key_type();
-map_type(N) -> {map, key_type(), map_type(N - 1)}.
+map_type1(0) -> key_type();
+map_type1(N) -> {map, key_type(), map_type1(N - 1)}.
 
 string_part() ->
     oneof([ ?LET(N, nat(), integer_to_list(N))
           , elements(["x", "foo", "abcXYZ"]) ]).
+
+existing_key(Map, Type) ->
+    maybe_existing_key(1, 0, Map, Type).
+
+maybe_existing_key(_, _, Map, {map, KeyType, _}) when Map == #{} ->
+    value(KeyType);
+maybe_existing_key(A, B, Map, {map, KeyType, _}) ->
+    weighted_default(
+        {A, elements(maps:keys(Map))},
+        {B, value(KeyType)}).
+
+map(S) ->
+    ?LET(Type, map_type(S),
+    ?LET(Map,  value(S, Type),
+    ?LET(Id,   elements([ Id || #contract{id = Id, state_type = T} <- S#state.contracts,
+                                lists:member(Type, map_types(T)) ]),
+         {Id, Type, Map}))).
+
+map_and_existing_key(S) ->
+    map_and_maybe_existing_key(S, 1, 0).
+
+map_and_maybe_existing_key(S, A, B) ->
+    ?LET({Id, Type, Map}, map(S),
+    ?LET(Key, maybe_existing_key(A, B, evaluate(S, Map), Type),
+        {Id, Type, Map, Key})).
 
 value(S, Type) ->
     case [V || {V, T} <- S#state.values, T == Type] of
@@ -154,6 +300,19 @@ initial_value({map, _, _}) -> #{};
 initial_value(Types) when is_list(Types) ->
     {record, [ initial_value(T) || T <- Types ]}.
 
+type_check(Map, {map, KeyT, ValT}) ->
+    is_map(Map) andalso
+    maps:fold(fun(_, _, false) -> false;
+                 (K, V, true)  -> type_check(K, KeyT) andalso type_check(V, ValT)
+              end, true, Map);
+type_check(N, int) -> is_integer(N);
+type_check(S, string) -> is_binary(S);
+type_check(T, {tuple, Ts}) ->
+    is_tuple(T) andalso
+    tuple_size(T) == length(Ts) andalso
+    lists:all(fun({V, Type}) -> type_check(V, Type) end, lists:zip(tuple_to_list(T), Ts));
+type_check(_, _) -> false.
+
 %% -- Compiling --------------------------------------------------------------
 
 contracts_source(#state{ contracts = Cs } = S, CmdChunks) ->
@@ -168,6 +327,7 @@ contract_aci(#contract{id = I, state_type = Type}) ->
     , ind(2, state_type(Type))
     , ind(2, "entrypoint init : () => state\n")
     , ind(2, [ [getter_proto(R, T), setter_proto(R, T)] || {R, T} <- references(Type) ])
+    , ind(2, [ map_function_protos(T) || T <- map_types(Type) ])
     ].
 
 contract_source(S, ACIs, #contract{id = I, state_type = Type}, CmdChunks) ->
@@ -177,6 +337,7 @@ contract_source(S, ACIs, #contract{id = I, state_type = Type}, CmdChunks) ->
       , ind(2, state_type(Type))
       , ind(2, init_function(Type))
       , ind(2, [ [getter(R, T), setter(R, T)] || {R, T} <- references(Type) ])
+      , ind(2, [ map_functions(T) || T <- map_types(Type) ])
       , ind(2, [ chunk_code(S, I, Chunk) || Chunk <- CmdChunks ])
       ] ]).
 
@@ -202,7 +363,8 @@ cmd_references({set, _, {call, ?MODULE, Fun, Args, _Meta}}) ->
     call_references(Fun, Args).
 
 call_references(set_state, [{Id, _}, _]) -> [Id];
-call_references(get_state, [{Id, _}])    -> [Id].
+call_references(get_state, [{Id, _}, _]) -> [Id];
+call_references(_Fun, [Id | _]) when is_integer(Id) -> [Id].
 
 chunk_vars(Cmds) ->
     [ {var(X), "_"} || X <- chunk_vars([], Cmds, []) ].
@@ -221,15 +383,15 @@ var(I) -> lists:concat(["x", I]).
 
 chunk_body(S, Id, Cmds) ->
     Code  = [ cmd_to_sophia(S, Id, Cmd) || Cmd <- Cmds ],
-    Bound = [ X || {{bind, X, _}, _} <- Code ],
+    Bound = [ X || {{bind, X, _, _}, _} <- Code ],
     [ [ Src || {_, Src} <- Code ]
     , to_sophia_val(list_to_tuple(Bound))
     ].
 
 cmd_to_sophia(S, Id, {set, {var, N}, Call}) ->
     case call_to_sophia(S, Id, Call) of
-        {bind, T, Code}   -> {{bind, {var, N}, T}, ["let ", var(N), " = ", Code, "\n"]};
-        {nobind, T, Code} -> {{nobind, T}, [Code, "\n"]}
+        {bind, T, V, Code} -> {{bind, {var, N}, T, V}, ["let ", var(N), " = ", Code, "\n"]};
+        {nobind, T, Code}  -> {{nobind, T}, [Code, "\n"]}
     end.
 
 call_to_sophia(S, Id, {call, ?MODULE, Fun, Args}) ->
@@ -237,13 +399,28 @@ call_to_sophia(S, Id, {call, ?MODULE, Fun, Args}) ->
 call_to_sophia(S, Id, {call, ?MODULE, Fun, Args, _Meta}) ->
     call_to_sophia(S, Id, Fun, Args).
 
-call_to_sophia(S, Id, get_state, [Ref]) ->
+call_to_sophia(S, Id, get_state, [Ref, Val]) ->
     Type = ref_type(S, Ref),
-    {bind, Type, [ getter_name(Id, Ref), "()" ]};
+    {bind, Type, Val, [ getter_name(Id, Ref), "()" ]};
 call_to_sophia(_S, Id, set_state, [Ref, Val]) ->
-    {nobind, {tuple, []}, [ setter_name(Id, Ref), "(", to_sophia_val(Val), ")" ]}.
+    {nobind, {tuple, []}, [ setter_name(Id, Ref), "(", to_sophia_val(Val), ")" ]};
+call_to_sophia(_S, Id, MapFun, [J, Type | Args0]) ->
+    Res       = lists:last(Args0),
+    Args      = lists:droplast(Args0),
+    {_, ResT} = map_fun_signature(MapFun),
+    {bind, signature_type_val(Type, ResT), Res,
+     [map_fun_name(Id, J, MapFun, Type), to_sophia_arguments(Args)]}.
+
+to_sophia_arguments(Vals) ->
+    ["(", lists:join(", ", [to_sophia_val(V) || V <- Vals]), ")"].
 
 chunk_entrypoint([{set, {var, N}, _} | _]) -> lists:concat(["chunk_", N]).
+
+map_types({map, K, V}) ->
+    [{map, K, V} | map_types(V)];
+map_types(Ts) when is_list(Ts) ->
+    lists:usort(lists:flatmap(fun map_types/1, Ts));
+map_types(_) -> [].
 
 references(T = {map, _, _})     -> [{top, T}];
 references(Ts) when is_list(Ts) -> [ {{field, I}, T} || {I, T} <- ix(Ts) ].
@@ -260,27 +437,71 @@ getter_name({field, I}) -> "get_" ++ field_name(I).
 setter_name(top)        -> "set_state";
 setter_name({field, I}) -> "set_" ++ field_name(I).
 
-getter_proto(top, T) ->
-    ["entrypoint get_state : () => ", to_sophia_type(T), "\n"];
-getter_proto({field, I}, T) ->
-    [ "entrypoint get_", field_name(I), " : () => ", to_sophia_type(T), "\n" ].
+getter_proto(R, T) ->
+    ["entrypoint ", getter_name(R), " : () => ", to_sophia_type(T), "\n"].
 
-getter(top, T) ->
-    ["entrypoint get_state() : ", to_sophia_type(T), " = state\n"];
-getter({field, I}, T) ->
-    [ "entrypoint get_", field_name(I), "() : ", to_sophia_type(T), " = state.", field_name(I), "\n" ].
+getter(R, T) ->
+    ["entrypoint ", getter_name(R), "() : ", to_sophia_type(T), " = ", getter_body(R), "\n"].
 
-setter_proto(top, T) ->
-    ["entrypoint set_state : ", to_sophia_type(T), " => unit\n"];
-setter_proto({field, I}, T) ->
-    X = field_name(I),
-    [ "entrypoint set_", X, " : ", to_sophia_type(T), " => unit\n"].
+getter_body(top)        -> "state";
+getter_body({field, I}) -> ["state.", field_name(I)].
 
-setter(top, T) ->
-    ["stateful entrypoint set_state(s : ", to_sophia_type(T), ") = put(s)\n"];
-setter({field, I}, T) ->
-    X = field_name(I),
-    [ "stateful entrypoint set_", X, "(", X, " : ", to_sophia_type(T), ") = put(state{", X, " = ", X, "})\n" ].
+setter_proto(R, T) ->
+    ["entrypoint ", setter_name(R), " : ", to_sophia_type(T), " => unit\n"].
+
+setter(R, T) ->
+    ["stateful entrypoint ", setter_name(R), "(x : ", to_sophia_type(T), ") = ", setter_body(R), "\n"].
+
+setter_body(top) -> "put(x)";
+setter_body({field, I}) ->
+    ["put(state{", field_name(I), " = x})"].
+
+type_suffix(int)         -> "i";
+type_suffix(string)      -> "s";
+type_suffix({map, K, V}) -> [type_suffix(K), "2", type_suffix(V)];
+type_suffix({tuple, Ts}) -> lists:map(fun type_suffix/1, Ts).
+
+map_fun_name(Id, Id, Fun, Type) ->
+    map_fun_name(Fun, Type);
+map_fun_name(_, Id, Fun, Type) ->
+    [contract_var(Id), ".", map_fun_name(Fun, Type)].
+
+map_fun_name(Fun, Type) ->
+    [atom_to_list(Fun), "_", type_suffix(Type)].
+
+signature_type_val({map, Key, Val} = Type, K) ->
+    case K of
+        map          -> Type;
+        key          -> Key;
+        existing_key -> Key;
+        val          -> Val;
+        bool         -> bool;
+        int          -> int;
+        {list, T}    -> {list, signature_type_val(Type, T)};
+        {tuple, Ts}  -> {tuple, [signature_type_val(Type, T) || T <- Ts]};
+        {option, T}  -> {option, signature_type_val(Type, T)}
+    end.
+
+arg_to_list(existing_key) -> "key";
+arg_to_list(Arg) -> atom_to_list(Arg).
+
+map_fun_proto(Fun, Type) ->
+    {Args, Ret} = map_fun_signature(Fun),
+    T = fun(K) -> to_sophia_type(signature_type_val(Type, K)) end,
+    ["entrypoint ", map_fun_name(Fun, Type), " : (", lists:join(", ", [T(Arg) || Arg <- Args]), ") => ", T(Ret), "\n"].
+
+map_fun_lhs(Fun, Type) ->
+    {Args, Ret} = map_fun_signature(Fun),
+    T = fun(K) -> to_sophia_type(signature_type_val(Type, K)) end,
+    ["entrypoint ", map_fun_name(Fun, Type),
+        "(", lists:join(", ", [[arg_to_list(Arg), " : ", T(Arg)] || Arg <- Args]), ") : ", T(Ret)].
+
+map_function_protos(Type) ->
+    [ map_fun_proto(Fun, Type) || Fun <- map_funs() ].
+
+map_functions(Type) ->
+    [ [map_fun_lhs(Fun, Type), " = ", map_fun_body(Fun), "\n"]
+      || Fun <- map_funs() ].
 
 state_type(T = {map, _, _}) ->
     ["type state = ", to_sophia_type(T)];
@@ -297,10 +518,16 @@ init_function(Type) ->
 to_sophia_type({map, K, V}) -> ["map(", to_sophia_type(K), ", ", to_sophia_type(V), ")"];
 to_sophia_type(int)         -> "int";
 to_sophia_type(string)      -> "string";
-to_sophia_type({tuple, Ts}) -> string:join([ to_sophia_type(T) || T <- Ts ], " * ").
+to_sophia_type(bool)        -> "bool";
+to_sophia_type({list, T})   -> ["list(", to_sophia_type(T), ")"];
+to_sophia_type({option, T}) -> ["option(", to_sophia_type(T), ")"];
+to_sophia_type({tuple, Ts}) -> ["(", string:join([ to_sophia_type(T) || T <- Ts ], " * "), ")"].
 
 to_vm_type(int)         -> word;
+to_vm_type(bool)        -> bool;
 to_vm_type(string)      -> string;
+to_vm_type({list, T})   -> {list, to_vm_type(T)};
+to_vm_type({option, T}) -> {option, to_vm_type(T)};
 to_vm_type({map, K, V}) -> {map, to_vm_type(K), to_vm_type(V)};
 to_vm_type({tuple, Ts}) -> {tuple, lists:map(fun to_vm_type/1, Ts)}.
 
@@ -323,7 +550,7 @@ compile_commands(InitS = #state{ contracts = Cs }, Chunks) ->
     Account = {var, 1},
     Sources = contracts_source(InitS, Chunks),
     [ {init, no_state} ] ++
-    [ {set, Account, {call, ?MODULE, new_account, [1000000000000000000]}} ] ++
+    [ {set, Account, {call, ?MODULE, new_account, []}} ] ++
     [ {set, {var, Id + 1}, {call, ?MODULE, create_contract, [Account, Source, {}]}}
       || {#contract{id = Id}, Source} <- lists:zip(Cs, Sources) ] ++
     compile_chunks(InitS, #{}, length(Cs) + 2, Chunks).
@@ -334,34 +561,41 @@ compile_chunks(S, Binds, Var, [{Id, Cmds} | Chunks]) ->
     Contract = {var, Id + 1},
     Fun      = list_to_atom(chunk_entrypoint(Cmds)),
     Args     = chunk_arguments(Binds, Id, Cmds),
-    {Xs, Type} = chunk_return_type(S, Id, Cmds),
+    {Xs, Expect, Type} = chunk_return_type(S, Id, Cmds),
     NewBinds = case Xs of
                  [X] -> #{X => Var};
                  _   -> maps:from_list([{X, {Var, I}} || {I, X} <- ix(Xs)])
                end,
     Binds1 = maps:merge(Binds, NewBinds),
-    [{set, {var, Var}, {call, ?MODULE, call_contract, [Account, Contract, Fun, to_vm_type(Type), Args, #{}]}} |
+    [{set, {var, Var}, {call, ?MODULE, call_contract, [Account, Contract, Fun, to_vm_type(Type), Args, Expect]}} |
      compile_chunks(S, Binds1, Var + 1, Chunks)].
 
 chunk_arguments(Binds, Id, Cmds) ->
-    MakeArg =
-        fun(X) ->
-            case maps:get(X, Binds, undefined) of
-                undefined -> error({chunk_arguments, Binds, X});
-                {Var, I}  -> {call, erlang, element, [I, {var, Var}]};
-                Var       -> {var, Var}
-            end end,
+    MakeArg = fun(X) -> make_arg(Binds, X) end,
     Refs = [{'@ct', {var, J + 1}} || J <- chunk_references(Id, Cmds)],
     Args = lists:map(MakeArg, chunk_vars([], Cmds, [])),
     list_to_tuple(Refs ++ Args).
 
+make_arg(Binds, X) ->
+    case maps:get(X, Binds, undefined) of
+        undefined -> error({chunk_arguments, Binds, X});
+        {Var, I}  -> {call, erlang, element, [I, {var, Var}]};
+        Var       -> {var, Var}
+    end.
+
 chunk_return_type(S, Id, Cmds) ->
-    {Xs, Ts} = lists:unzip([ {X, T}
-                             || Cmd = {set, {var, X}, _} <- Cmds,
-                                {{bind, _, T}, _} <- [cmd_to_sophia(S, Id, Cmd)] ]),
+    {Xs, Ts, Vs} = lists:unzip3(
+                     [ {X, T, V}
+                       || Cmd = {set, {var, X}, _} <- Cmds,
+                          {{bind, _, T, V}, _} <- [cmd_to_sophia(S, Id, Cmd)] ]),
     case Ts of
-        [T] -> {Xs, T};
-        _   -> {Xs, {tuple, Ts}}
+        [T] -> {Xs, hd(Vs), T};
+        _   ->
+            V = case lists:keyfind(error, 1, Vs) of
+                    {error, _} = Err -> Err;
+                    false -> list_to_tuple(Vs)
+                end,
+            {Xs, V, {tuple, Ts}}
     end.
 
 %% -- Property ---------------------------------------------------------------
@@ -387,7 +621,8 @@ prop_compile(Mod) ->
         end)
     end))).
 
-prop_run() -> prop_run(fate, ?MODULE).
+prop_run() -> prop_run(fate).
+prop_run(Backend) -> prop_run(Backend, ?MODULE).
 prop_run(Backend, Mod) ->
     ?SETUP(fun() -> init(Backend), fun() -> ok end end,
     ?FORALL(InitS, init_state(),
@@ -399,8 +634,9 @@ prop_run(Backend, Mod) ->
         begin
             init_run(Backend),
             HSR={_, _, Res} = run_commands(Mod, CompiledCmds),
+            aggregate(command_names(Cmds),
             pretty_commands(Mod, CompiledCmds, HSR,
-                Res == ok)
+                Res == ok))
         end)
     end)))).
 
@@ -433,19 +669,28 @@ init_run(Backend) ->
     aecontract_SUITE:state(aect_test_utils:new_state()),
     ok.
 
-new_account(Balance) ->
-    call(new_account, [Balance]).
+-define(MAX_GAS, 6000000 * 1000 * 1000).
+-define(BALANCE, 1000 * 1000 * 1000 * 1000 * 1000 * 1000 * 1000 * 1000).
+
+new_account() ->
+    call(new_account, [?BALANCE]).
 
 -define(SOPHIA_CONTRACT_VSN, 2).
 
 create_contract(Owner, Source, Args) ->
     Backend = get(backend),
-    {ok, Code} = aeso_compiler:from_string(Source, [{backend, Backend}, no_implicit_stdlib]),
-    ByteCode = aect_sophia:serialize(Code, ?SOPHIA_CONTRACT_VSN),
-    call(create_contract_with_code, [Owner, ByteCode, Args, #{}]).
+    case aeso_compiler:from_string(Source, [{backend, Backend}, no_implicit_stdlib]) of
+        {ok, Code} ->
+            ByteCode = aect_sophia:serialize(Code, ?SOPHIA_CONTRACT_VSN),
+            call(create_contract_with_code, [Owner, ByteCode, Args, #{}]);
+        {error, Err} ->
+            io:format("~s\n", [Err]),
+            {error, binary_to_list(Err)}
+    end.
 
-call_contract(Caller, ContractKey, Fun, Type, Args, Options) ->
-    call(call_contract, [Caller, ContractKey, Fun, Type, Args, Options]).
+call_contract(Caller, ContractKey, Fun, Type, Args, _Expect) ->
+    {Res, _Gas} = call(call_contract, [Caller, ContractKey, Fun, Type, Args, #{gas => ?MAX_GAS, return_gas_used => true}]),
+    Res.
 
 %% Silence warnings.
 new_account_args(_) -> [].
@@ -458,14 +703,22 @@ new_account_post(_, _, Res) ->
 create_contract_post(_, _, Res) ->
     is_binary(Res) andalso byte_size(Res) == 32.
 
-call_contract_post(_, _, {error, Err}) ->
+call_contract_post(_, [_, _, _, _, _, {error, Expect}], {error, Actual}) ->
+    eq_err(Actual, Expect);
+call_contract_post(_, _, {{error, Err}, _}) ->
     case is_binary(Err) of
         true  ->
             io:format("~s\n", [Err]),
             binary_to_list(Err);
         false -> {error, Err}
     end;
-call_contract_post(_, _, _)            -> true.
+call_contract_post(_, [_, _, _, _, _, Expect], Actual) ->
+    eq(Actual, Expect).
+
+eq_err(<<"Maps: Key does not exist">>, not_found) -> true;
+eq_err(Actual, Expected) when is_binary(Actual) ->
+    eq(binary_to_list(Actual), Expected);
+eq_err(Actual, Expected) -> eq(Actual, Expected).
 
 %% -- Common -----------------------------------------------------------------
 
