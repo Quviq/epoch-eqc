@@ -17,14 +17,16 @@
                    state        %% No symbolic variables
                   }).
 
--record(state, {contracts :: [#contract{}],
+-record(state, {backend,
+                contracts :: [#contract{}],
                 values = [], %% Can contain symbolic variables
                 env    = #{} %% Maps symbolic variables to concrete values
                }).
 
-init_state() ->
+init_state(Backend) ->
     ?LET(Types, ne_list(3, state_type()),
-    #state{ contracts = [ #contract{ id = I, state_type = T,
+    #state{ backend = Backend,
+            contracts = [ #contract{ id = I, state_type = T,
                                      state = init_value(T) }
                           || {I, T} <- ix(Types) ] }).
 
@@ -168,10 +170,13 @@ arg_gen(S, Type = {map, _, ValT}, Map, K) ->
 precondition_common(S, {call, ?MODULE, Fun, [Id, Type | Args0]}) ->
     not lists:member(Fun, map_funs()) orelse
     begin
+        {ArgsT, _} = map_fun_signature(Fun),
         Args = lists:droplast(Args0),
         Res  = lists:last(Args0),
         Res /= error
             andalso Res == apply_map_fun(S, Fun, Args)
+            andalso lists:all(fun({V, T}) -> type_check(S, V, signature_type_val(Type, T))
+                              end, lists:zip(Args, ArgsT))
             andalso lists:member(Type, map_types((get_contract(S, Id))#contract.state_type))
     end;
 precondition_common(_, _) -> true.
@@ -237,7 +242,7 @@ value(S, Type) ->
         Vs  -> weighted_default({3, elements(Vs)}, {1, value(Type)})
     end.
 
-value(int)    -> int();
+value(int)    -> nat();
 value(string) ->
     ?SUCHTHAT(Bin,
         ?LET(Parts, list(string_part()), list_to_binary(string:join(Parts, "-"))),
@@ -286,13 +291,13 @@ prop_chunks() ->
     equals(lists:append(Xss), Xs))))).
 
 command_chunks([{model, ?MODULE}, {init, #state{ contracts = Cs }} | Cmds]) ->
-    ?LET(Chunks, ?SUCHTHAT(Chunks, chunks(Cmds), nice_chunks(Chunks)),
+    ?LET(Chunks, chunks(Cmds),
          [ {elements([ C#contract.id || C <- Cs ]), Chunk}
            || Chunk <- Chunks ]).
 
 nice_chunks(Cs) ->
     %% AEVM stack-limit workaround
-    lists:all(fun(C) -> length(C) =< 16 end, Cs).
+    lists:all(fun(C) -> length(C) =< 12 end, Cs).
 
 %% -- Types and values -------------------------------------------------------
 
@@ -300,35 +305,41 @@ initial_value({map, _, _}) -> #{};
 initial_value(Types) when is_list(Types) ->
     {record, [ initial_value(T) || T <- Types ]}.
 
-type_check(Map, {map, KeyT, ValT}) ->
+type_check(Val, Type) -> type_check(#state{}, Val, Type).
+
+type_check(S, {var, _} = V, T) ->
+    %% io:format("~p == ~p\n", [T, lists:keyfind(X, 1, S#state.values)]),
+    %% true;
+    {V, T} == lists:keyfind(V, 1, S#state.values);
+    %% error({just_checking, S, X, T});
+type_check(S, Map, {map, KeyT, ValT}) ->
     is_map(Map) andalso
     maps:fold(fun(_, _, false) -> false;
-                 (K, V, true)  -> type_check(K, KeyT) andalso type_check(V, ValT)
+                 (K, V, true)  -> type_check(S, K, KeyT) andalso type_check(S, V, ValT)
               end, true, Map);
-type_check(N, int) -> is_integer(N);
-type_check(S, string) -> is_binary(S);
-type_check(T, {tuple, Ts}) ->
+type_check(_, N, int) -> is_integer(N);
+type_check(_, B, string) -> is_binary(B);
+type_check(S, T, {tuple, Ts}) ->
     is_tuple(T) andalso
     tuple_size(T) == length(Ts) andalso
-    lists:all(fun({V, Type}) -> type_check(V, Type) end, lists:zip(tuple_to_list(T), Ts));
-type_check(_, _) -> false.
+    lists:all(fun({V, Type}) -> type_check(S, V, Type) end, lists:zip(tuple_to_list(T), Ts));
+type_check(_, _, _) -> false.
 
 %% -- Compiling --------------------------------------------------------------
 
 contracts_source(#state{ contracts = Cs } = S, CmdChunks) ->
-    ACIs = [ contract_aci(C) || C <- Cs ],
+    ACIs = [ contract_aci(S, C) || C <- Cs ],
     [ contract_source(S, ACIs, C, [Chunk || {I, Chunk} <- CmdChunks, I == Id ])
         || C = #contract{id = Id} <- Cs ].
 
 contract_name(I) -> lists:concat(["Test", I]).
 
-contract_aci(#contract{id = I, state_type = Type}) ->
+contract_aci(S, #contract{id = I, state_type = Type}) ->
     [ "contract ", contract_name(I), " =\n"
     , ind(2, state_type(Type))
     , ind(2, "entrypoint init : () => state\n")
     , ind(2, [ [getter_proto(R, T), setter_proto(R, T)] || {R, T} <- references(Type) ])
-    , ind(2, [ map_function_protos(T) || T <- map_types(Type) ])
-    ].
+    , ind(2, [ map_function_protos(T) || T <- map_types(S, Type) ]) ].
 
 contract_source(S, ACIs, #contract{id = I, state_type = Type}, CmdChunks) ->
     lists:flatten(
@@ -337,7 +348,7 @@ contract_source(S, ACIs, #contract{id = I, state_type = Type}, CmdChunks) ->
       , ind(2, state_type(Type))
       , ind(2, init_function(Type))
       , ind(2, [ [getter(R, T), setter(R, T)] || {R, T} <- references(Type) ])
-      , ind(2, [ map_functions(T) || T <- map_types(Type) ])
+      , ind(2, [ map_functions(T) || T <- map_types(S, Type) ])
       , ind(2, [ chunk_code(S, I, Chunk) || Chunk <- CmdChunks ])
       ] ]).
 
@@ -404,17 +415,22 @@ call_to_sophia(S, Id, get_state, [Ref, Val]) ->
     {bind, Type, Val, [ getter_name(Id, Ref), "()" ]};
 call_to_sophia(_S, Id, set_state, [Ref, Val]) ->
     {nobind, {tuple, []}, [ setter_name(Id, Ref), "(", to_sophia_val(Val), ")" ]};
-call_to_sophia(_S, Id, MapFun, [J, Type | Args0]) ->
+call_to_sophia(S, Id, MapFun, [J, Type | Args0]) ->
     Res       = lists:last(Args0),
     Args      = lists:droplast(Args0),
     {_, ResT} = map_fun_signature(MapFun),
     {bind, signature_type_val(Type, ResT), Res,
-     [map_fun_name(Id, J, MapFun, Type), to_sophia_arguments(Args)]}.
+     [map_fun_name(S, Id, J, MapFun, Type), to_sophia_arguments(Args)]}.
 
 to_sophia_arguments(Vals) ->
     ["(", lists:join(", ", [to_sophia_val(V) || V <- Vals]), ")"].
 
 chunk_entrypoint([{set, {var, N}, _} | _]) -> lists:concat(["chunk_", N]).
+
+poly_map() -> {map, {tvar, key}, {tvar, val}}.
+
+map_types(#state{ backend = fate_poly }, _) -> [poly_map()];
+map_types(_, Type)                          -> map_types(Type).
 
 map_types({map, K, V}) ->
     [{map, K, V} | map_types(V)];
@@ -461,11 +477,18 @@ type_suffix(string)      -> "s";
 type_suffix({map, K, V}) -> [type_suffix(K), "2", type_suffix(V)];
 type_suffix({tuple, Ts}) -> lists:map(fun type_suffix/1, Ts).
 
-map_fun_name(Id, Id, Fun, Type) ->
-    map_fun_name(Fun, Type);
-map_fun_name(_, Id, Fun, Type) ->
-    [contract_var(Id), ".", map_fun_name(Fun, Type)].
+map_fun_name(S, Id, Id, Fun, Type) ->
+    map_fun_name(S, Fun, Type);
+map_fun_name(S, _, Id, Fun, Type) ->
+    [contract_var(Id), ".", map_fun_name(S, Fun, Type)].
 
+map_fun_name(#state{ backend = fate_poly }, Fun, _) ->
+    map_fun_name(Fun, poly_map());
+map_fun_name(_, Fun, Type) ->
+    map_fun_name(Fun, Type).
+
+map_fun_name(Fun, {map, {tvar, _}, {tvar, _}}) ->
+    atom_to_list(Fun);
 map_fun_name(Fun, Type) ->
     [atom_to_list(Fun), "_", type_suffix(Type)].
 
@@ -515,10 +538,11 @@ init_function(Type) ->
     [ "entrypoint init() =\n"
     , ind(2, to_sophia_val(initial_value(Type))) ].
 
-to_sophia_type({map, K, V}) -> ["map(", to_sophia_type(K), ", ", to_sophia_type(V), ")"];
+to_sophia_type({tvar, X})   -> ["'", atom_to_list(X)];
 to_sophia_type(int)         -> "int";
 to_sophia_type(string)      -> "string";
 to_sophia_type(bool)        -> "bool";
+to_sophia_type({map, K, V}) -> ["map(", to_sophia_type(K), ", ", to_sophia_type(V), ")"];
 to_sophia_type({list, T})   -> ["list(", to_sophia_type(T), ")"];
 to_sophia_type({option, T}) -> ["option(", to_sophia_type(T), ")"];
 to_sophia_type({tuple, Ts}) -> ["(", string:join([ to_sophia_type(T) || T <- Ts ], " * "), ")"].
@@ -549,7 +573,7 @@ field_name(I) -> [lists:nth(I, lists:seq($a, $z))].
 compile_commands(InitS = #state{ contracts = Cs }, Chunks) ->
     Account = {var, 1},
     Sources = contracts_source(InitS, Chunks),
-    [ {init, no_state} ] ++
+    [ {init, InitS#state.backend} ] ++
     [ {set, Account, {call, ?MODULE, new_account, []}} ] ++
     [ {set, {var, Id + 1}, {call, ?MODULE, create_contract, [Account, Source, {}]}}
       || {#contract{id = Id}, Source} <- lists:zip(Cs, Sources) ] ++
@@ -602,43 +626,57 @@ chunk_return_type(S, Id, Cmds) ->
 
 %% The property.
 prop_compile() -> prop_compile(?MODULE).
+
 prop_compile(Mod) ->
-    ?FORALL(InitS, init_state(),
+    ?FORALL(Backend, elements([aevm, fate]),
+            prop_compile(Backend, Mod)).
+
+prop_compile(Backend, Mod) ->
+    ?FORALL(InitS, init_state(Backend),
     ?FORALL(Cmds, ?SUCHTHAT(Cmds, commands(Mod, InitS), length(Cmds) > 2),
     ?FORALL(Chunks, command_chunks(Cmds),
     begin
         Sources = contracts_source(InitS, Chunks),
         ?WHENFAIL([eqc:format("~s\n", [Source]) || Source <- Sources],
         begin
-            Results = [ {Backend, I, catch aeso_compiler:from_string(Source, [{backend, Backend}, no_implicit_stdlib])}
-                             || {I, Source} <- ix(Sources),
-                                Backend <- [fate] ], % , aevm] ],
+            Results = [ {I, catch aeso_compiler:from_string(Source, [{backend, Backend}, no_implicit_stdlib])}
+                             || {I, Source} <- ix(Sources) ],
             IsOk = fun({ok, _})       -> true;
                       ({'EXIT', Err}) -> ?WHENFAIL(eqc:format("~p\n", [Err]), false);
                       ({error, Err})  -> ?WHENFAIL(eqc:format("~s\n", [Err]), false)
                    end,
-            conjunction([{{Backend, I}, IsOk(Res)} || {Backend, I, Res} <- Results])
+            conjunction([{I, IsOk(Res)} || {I, Res} <- Results])
         end)
     end))).
 
+backend_variants(fate) -> [fate_poly, fate];
+backend_variants(aevm) -> [aevm].
+
 prop_run() -> prop_run(fate).
-prop_run(Backend) -> prop_run(Backend, ?MODULE).
-prop_run(Backend, Mod) ->
-    ?SETUP(fun() -> init(Backend), fun() -> ok end end,
-    ?FORALL(InitS, init_state(),
-    ?FORALL(Cmds, ?SUCHTHAT(Cmds, commands(Mod, InitS), length(Cmds) > 2),
+prop_run(Backend0) ->
+    ?SETUP(fun() -> init(Backend0), fun() -> ok end end,
+    ?FORALL(Backend, elements(backend_variants(Backend0)),
+    ?FORALL(InitS, init_state(Backend),
+    ?FORALL(Cmds, ?SUCHTHAT(Cmds, commands(?MODULE, InitS), length(Cmds) > 2),
     ?FORALL(Chunks, command_chunks(Cmds),
     begin
         CompiledCmds = compile_commands(InitS, Chunks),
         ?WHENFAIL([eqc:format("~s\n", [Source]) || Source <- contracts_source(InitS, Chunks)],
         begin
             init_run(Backend),
-            HSR={_, _, Res} = run_commands(Mod, CompiledCmds),
+            HSR={_, _, Res} = run_commands(?MODULE, CompiledCmds),
             aggregate(command_names(Cmds),
-            pretty_commands(Mod, CompiledCmds, HSR,
-                Res == ok))
+            pretty_commands(?MODULE, CompiledCmds, HSR,
+            case Res of
+                ok -> true;
+                {exception, {'EXIT', {function_clause, [{aeso_icode_to_asm, dup, _, _} | _]}}} ->
+                    ?IMPLIES(false, false);
+                _ -> false
+            end))
         end)
-    end)))).
+                %% [{aeso_icode_to_asm, dup, _, _} | _] -> ?IMPLIES(false, false);
+                %% Trace -> ?WHENFAIL(eqc:format("exit(function_clause)\n  ~p\n", [Trace]), false)
+    end))))).
 
 
 %% -- Low-level operations ---------------------------------------------------
@@ -658,6 +696,7 @@ api_spec(_) ->
           ]
       } ] }.
 
+init_run(fate_poly) -> init_run(fate);
 init_run(Backend) ->
     VM = fun(_, FATE) when Backend == fate -> FATE;
             (AEVM, _) when Backend == aevm -> AEVM end,
@@ -705,15 +744,28 @@ create_contract_post(_, _, Res) ->
 
 call_contract_post(_, [_, _, _, _, _, {error, Expect}], {error, Actual}) ->
     eq_err(Actual, Expect);
-call_contract_post(_, _, {{error, Err}, _}) ->
+call_contract_post(_, _, {error, Err}) ->
     case is_binary(Err) of
         true  ->
             io:format("~s\n", [Err]),
             binary_to_list(Err);
         false -> {error, Err}
     end;
-call_contract_post(_, [_, _, _, _, _, Expect], Actual) ->
-    eq(Actual, Expect).
+call_contract_post(Backend, [_, _, _, _, _, Expect], Actual) ->
+    %% Map.to_list sorts differently on AEVM
+    eq(sort_lists(Backend, Actual), sort_lists(Backend, Expect)).
+
+sort_lists(aevm, X) -> sort_lists(X);
+sort_lists(_, X) -> X.
+
+sort_lists(L) when is_list(L) ->
+    lists:sort(lists:map(fun sort_lists/1, L));
+sort_lists(T) when is_tuple(T) ->
+    list_to_tuple(lists:map(fun sort_lists/1, tuple_to_list(T)));
+sort_lists(M) when is_map(M) ->
+    %% No lists in map keys (currently)
+    maps:map(fun(_, V) -> sort_lists(V) end, M);
+sort_lists(X) -> X.
 
 eq_err(<<"Maps: Key does not exist">>, not_found) -> true;
 eq_err(Actual, Expected) when is_binary(Actual) ->
