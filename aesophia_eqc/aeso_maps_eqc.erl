@@ -6,6 +6,9 @@
 
 -compile([export_all, nowarn_export_all]).
 
+-define(PROFILE, true).
+-include_lib("eqc/include/eqc_profile.hrl").
+
 -include_lib("eqc/include/eqc.hrl").
 -include_lib("eqc/include/eqc_statem.hrl").
 -include_lib("eqc/include/eqc_mocking.hrl").
@@ -24,11 +27,13 @@
                }).
 
 init_state(Backend) ->
-    ?LET(Types, ne_list(3, state_type()),
+    ?LET(MapTypes, ne_list(2, map_type()),
+    ?LET(Types, ?LET(N, weighted_default({4, 2}, {1, 3}),
+                        ne_list(N, state_type(MapTypes))),
     #state{ backend = Backend,
             contracts = [ #contract{ id = I, state_type = T,
                                      state = init_value(T) }
-                          || {I, T} <- ix(Types) ] }).
+                          || {I, T} <- ix(Types) ] })).
 
 init_value({map, _, _}) -> #{};
 init_value(Types)       -> list_to_tuple(lists:map(fun init_value/1, Types)).
@@ -66,6 +71,9 @@ evaluate(S, M) when is_map(M)   -> maps:map(fun(_, V) -> evaluate(S, V) end, M);
 evaluate(_S, X) -> X.
 
 %% -- Operations -------------------------------------------------------------
+
+%% Where we cut up the chunks.
+cut_args(S) -> [elements([C#contract.id || C <- S#state.contracts])].
 
 %% --- get ---
 
@@ -145,6 +153,29 @@ map_lookup(Key, Map) ->
         Val       -> {some, Val}
     end.
 
+%% Generate a pair of references of the same type
+ref_pair(S) ->
+    ?LET(InRef, reference(S),
+    begin
+        Type = ref_type(S, InRef),
+        {InRef, reference(S, Type), Type}
+    end).
+
+map_upd_s_args(S) ->
+    ?LET({InRef, OutRef, Type = {map, _, ValT}}, ref_pair(S),
+    ?LET(Id, id_for_type(S, Type),
+    ?LET(Key, maybe_existing_key(1, 1, ref_value(S, InRef), Type),
+    ?LET(Val, oneof([value(S, ValT), tombstone]),
+    [Id, Type, Key, Val, InRef, OutRef])))).
+
+map_upd_s_next(S, V, [_, _, Key, Val, InRef, OutRef]) ->
+    OldMap  = ref_value(S, InRef),
+    NewMap = case Val of
+                 tombstone -> maps:remove(Key, OldMap);
+                 _         -> OldMap#{ Key => evaluate(S, Val) }
+             end,
+    set_state_next(S, V, [OutRef, NewMap]).
+
 %% -- Common -----------------------------------------------------------------
 
 args(S, Fun) ->
@@ -191,6 +222,10 @@ state_type() ->
     weighted_default({1, map_type()},
                      {1, record_type()}).
 
+state_type(MapTypes) ->
+    weighted_default({1, elements(MapTypes)},
+                     {1, ne_list(3, elements(MapTypes))}).
+
 record_type() ->
     ne_list(3, map_type()).
 
@@ -221,12 +256,14 @@ maybe_existing_key(A, B, Map, {map, KeyType, _}) ->
         {A, elements(maps:keys(Map))},
         {B, value(KeyType)}).
 
+id_for_type(S, Type) ->
+    elements([ Id || #contract{id = Id, state_type = T} <- S#state.contracts,
+                     lists:member(Type, map_types(T)) ]).
 map(S) ->
     ?LET(Type, map_type(S),
     ?LET(Map,  value(S, Type),
-    ?LET(Id,   elements([ Id || #contract{id = Id, state_type = T} <- S#state.contracts,
-                                lists:member(Type, map_types(T)) ]),
-         {Id, Type, Map}))).
+    ?LET(Id,   id_for_type(S, Type),
+        {Id, Type, Map}))).
 
 map_and_existing_key(S) ->
     map_and_maybe_existing_key(S, 1, 0).
@@ -239,7 +276,7 @@ map_and_maybe_existing_key(S, A, B) ->
 value(S, Type) ->
     case [V || {V, T} <- S#state.values, T == Type] of
         []  -> value(Type);
-        Vs  -> weighted_default({3, elements(Vs)}, {1, value(Type)})
+        Vs  -> weighted_default({9, elements(Vs)}, {1, value(Type)})
     end.
 
 value(int)    -> nat();
@@ -264,6 +301,11 @@ reference(#state{ contracts = Cs }) ->
         {map, _, _} -> {Id, top};
         _           -> {Id, {field, choose(1, length(T))}}
     end).
+
+reference(#state{ contracts = Cs }, Type) ->
+    elements([ {Id, R} || #contract{ id = Id, state_type = T } <- Cs,
+                          {R, Type1} <- references(T),
+                          Type1 == Type ]).
 
 chunks([])  -> [[]];
 chunks([X]) -> [[X]];
@@ -290,10 +332,19 @@ prop_chunks() ->
     aggregate(with_title(chunk_size), [length(Ys) || Ys <- Xss],
     equals(lists:append(Xss), Xs))))).
 
-command_chunks([{model, ?MODULE}, {init, #state{ contracts = Cs }} | Cmds]) ->
-    ?LET(Chunks, chunks(Cmds),
-         [ {elements([ C#contract.id || C <- Cs ]), Chunk}
-           || Chunk <- Chunks ]).
+command_chunks([{model, ?MODULE}, {init, _} | Cmds]) ->
+    cut(Cmds, [[]]).
+
+cut([], [[] | Acc]) ->
+    lists:reverse(Acc);
+cut([], [Chunk | Acc]) ->
+    lists:reverse([{1, lists:reverse(Chunk)} | Acc]);
+cut([{set, _, {call, _, cut, [_]}} | Cmds], Acc = [[] | _]) ->
+    cut(Cmds, Acc);
+cut([{set, _, {call, _, cut, [Id]}} | Cmds], [Chunk | Acc]) ->
+    cut(Cmds, [[], {Id, lists:reverse(Chunk)} | Acc]);
+cut([Cmd | Cmds], [Chunk | Acc]) ->
+    cut(Cmds, [[Cmd | Chunk] | Acc]).
 
 nice_chunks(Cs) ->
     %% AEVM stack-limit workaround
@@ -308,10 +359,7 @@ initial_value(Types) when is_list(Types) ->
 type_check(Val, Type) -> type_check(#state{}, Val, Type).
 
 type_check(S, {var, _} = V, T) ->
-    %% io:format("~p == ~p\n", [T, lists:keyfind(X, 1, S#state.values)]),
-    %% true;
     {V, T} == lists:keyfind(V, 1, S#state.values);
-    %% error({just_checking, S, X, T});
 type_check(S, Map, {map, KeyT, ValT}) ->
     is_map(Map) andalso
     maps:fold(fun(_, _, false) -> false;
@@ -336,7 +384,7 @@ contract_name(I) -> lists:concat(["Test", I]).
 
 contract_aci(S, #contract{id = I, state_type = Type}) ->
     [ "contract ", contract_name(I), " =\n"
-    , ind(2, state_type(Type))
+    , ind(2, state_type_to_sophia(Type))
     , ind(2, "entrypoint init : () => state\n")
     , ind(2, [ [getter_proto(R, T), setter_proto(R, T)] || {R, T} <- references(Type) ])
     , ind(2, [ map_function_protos(T) || T <- map_types(S, Type) ]) ].
@@ -345,7 +393,7 @@ contract_source(S, ACIs, #contract{id = I, state_type = Type}, CmdChunks) ->
     lists:flatten(
     [ [ ACI || {J, ACI} <- ix(ACIs), I /= J ]
     , [ "contract ", contract_name(I), " =\n"
-      , ind(2, state_type(Type))
+      , ind(2, state_type_to_sophia(Type))
       , ind(2, init_function(Type))
       , ind(2, [ [getter(R, T), setter(R, T)] || {R, T} <- references(Type) ])
       , ind(2, [ map_functions(T) || T <- map_types(S, Type) ])
@@ -375,6 +423,8 @@ cmd_references({set, _, {call, ?MODULE, Fun, Args, _Meta}}) ->
 
 call_references(set_state, [{Id, _}, _]) -> [Id];
 call_references(get_state, [{Id, _}, _]) -> [Id];
+call_references(map_upd_s, [Id, _Ty, _Key, _Val, {InId, _}, {OutId, _}]) ->
+    [Id, InId, OutId];
 call_references(_Fun, [Id | _]) when is_integer(Id) -> [Id].
 
 chunk_vars(Cmds) ->
@@ -415,6 +465,20 @@ call_to_sophia(S, Id, get_state, [Ref, Val]) ->
     {bind, Type, Val, [ getter_name(Id, Ref), "()" ]};
 call_to_sophia(_S, Id, set_state, [Ref, Val]) ->
     {nobind, {tuple, []}, [ setter_name(Id, Ref), "(", to_sophia_val(Val), ")" ]};
+call_to_sophia(S, Id, map_upd_s, [J, Type, Key, Val, InRef, OutRef]) ->
+    GetCall = [getter_name(Id, InRef), "()"],
+    UpdCall =
+        case Val of
+            tombstone ->
+                [map_fun_name(S, Id, J, map_del, Type),
+                 "(", lists:join(", ", [ to_sophia_val(Key), GetCall ]),
+                 ")"];
+            _ ->
+                [map_fun_name(S, Id, J, map_upd, Type),
+                 "(", lists:join(", ", [ to_sophia_val(Key), to_sophia_val(Val), GetCall ]),
+                 ")"]
+        end,
+    {nobind, {tuple, []}, [ setter_name(Id, OutRef), "(", UpdCall, ")" ]};
 call_to_sophia(S, Id, MapFun, [J, Type | Args0]) ->
     Res       = lists:last(Args0),
     Args      = lists:droplast(Args0),
@@ -526,9 +590,9 @@ map_functions(Type) ->
     [ [map_fun_lhs(Fun, Type), " = ", map_fun_body(Fun), "\n"]
       || Fun <- map_funs() ].
 
-state_type(T = {map, _, _}) ->
+state_type_to_sophia(T = {map, _, _}) ->
     ["type state = ", to_sophia_type(T)];
-state_type(Ts) when is_list(Ts) ->
+state_type_to_sophia(Ts) when is_list(Ts) ->
     [ "record state =\n"
     , ind(2, ["{ ", lists:join("\n, ", [ [field_name(I), " : ", to_sophia_type(T)]
                                         || {I, T} <- ix(Ts) ]),
@@ -658,25 +722,24 @@ prop_run(Backend0) ->
     ?FORALL(Backend, elements(backend_variants(Backend0)),
     ?FORALL(InitS, init_state(Backend),
     ?FORALL(Cmds, ?SUCHTHAT(Cmds, commands(?MODULE, InitS), length(Cmds) > 2),
-    ?FORALL(Chunks, command_chunks(Cmds),
     begin
+        Chunks = command_chunks(Cmds),
         CompiledCmds = compile_commands(InitS, Chunks),
         ?WHENFAIL([eqc:format("~s\n", [Source]) || Source <- contracts_source(InitS, Chunks)],
         begin
             init_run(Backend),
             HSR={_, _, Res} = run_commands(?MODULE, CompiledCmds),
             aggregate(command_names(Cmds),
+            measure(chunk_len, [length(Chunk) || {_, Chunk} <- Chunks],
             pretty_commands(?MODULE, CompiledCmds, HSR,
             case Res of
                 ok -> true;
                 {exception, {'EXIT', {function_clause, [{aeso_icode_to_asm, dup, _, _} | _]}}} ->
                     ?IMPLIES(false, false);
                 _ -> false
-            end))
+            end)))
         end)
-                %% [{aeso_icode_to_asm, dup, _, _} | _] -> ?IMPLIES(false, false);
-                %% Trace -> ?WHENFAIL(eqc:format("exit(function_clause)\n  ~p\n", [Trace]), false)
-    end))))).
+    end)))).
 
 
 %% -- Low-level operations ---------------------------------------------------
@@ -714,11 +777,11 @@ init_run(Backend) ->
 new_account() ->
     call(new_account, [?BALANCE]).
 
--define(SOPHIA_CONTRACT_VSN, 2).
+-define(SOPHIA_CONTRACT_VSN, 3).
 
 create_contract(Owner, Source, Args) ->
     Backend = get(backend),
-    case aeso_compiler:from_string(Source, [{backend, Backend}, no_implicit_stdlib]) of
+    case ?BENCHMARK(compile, aeso_compiler:from_string(Source, [{backend, Backend}, no_implicit_stdlib])) of
         {ok, Code} ->
             ByteCode = aect_sophia:serialize(Code, ?SOPHIA_CONTRACT_VSN),
             call(create_contract_with_code, [Owner, ByteCode, Args, #{}]);
@@ -729,7 +792,10 @@ create_contract(Owner, Source, Args) ->
 
 call_contract(Caller, ContractKey, Fun, Type, Args, _Expect) ->
     {Res, _Gas} = call(call_contract, [Caller, ContractKey, Fun, Type, Args, #{gas => ?MAX_GAS, return_gas_used => true}]),
-    Res.
+    case Res of
+        error -> {Res, _Gas};
+        _     -> Res
+    end.
 
 %% Silence warnings.
 new_account_args(_) -> [].
@@ -777,7 +843,9 @@ eq_err(Actual, Expected) -> eq(Actual, Expected).
 weight(_, new_account)     -> 0;
 weight(_, create_contract) -> 0;
 weight(_, call_contract)   -> 0;
-weight(_, _)               -> 1.
+weight(_, map_upd_s)       -> 20;
+weight(_, cut)             -> 30;
+weight(_, _)               -> 10.
 
 call(Fun, Args) ->
     S = aecontract_SUITE:state(),
