@@ -389,61 +389,6 @@ ns_transfer_features(S, [_Sender, _To, _Name, _Tx] = Args, Res) ->
     [{correct, case Correct of true -> ns_transfer; _ -> false end},
      {ns_transfer, Res}].
 
-%% --- Operation: ns_subname ---
-ns_subname_pre(S) ->
-    maps:is_key(accounts, S).
-
-ns_subname_args(#{height := Height} = S) ->
-    io:format("Trying subname"),
-    ?LET([{Name, Sender}, SubNameDefs],
-         [gen_claimed_name(S), list({gen_subname(), gen_account(1, 9, S)})],
-         begin
-           io:format("args subname: ~p ~p\n", [Height, SubNameDefs]),
-         [Sender, Name,
-          #{account_id => aeser_id:create(account, Sender),  %% The sender is asserted to never be a name.
-            name_id => aeser_id:create(name, aens_hash:name_hash(Name)),
-            fee => gen_fee(Height),
-            definitions =>
-              maps:from_list([ {SubName, aens_pointer:new(<<"account_pubkey">>, aeser_id:create(account, Key))}
-                              || {SubName, Key} <- SubNameDefs]),
-            nonce => gen_nonce()
-           }]
-         end).
-
-ns_subname_pre(#{height := Height}, [_, Name, _] = Args) ->
-  io:format("Precondition subname ~p ~p\n", [Height, Args]),
-  true. %% backward_compatible(Height, Name).
-
-ns_subname_valid(#{height := Height} = S, [Sender, Name, Tx]) ->
-  valid([{account, is_account(S, Sender)},
-         {balance, check_balance(S, Sender, maps:get(fee, Tx))},
-         {nonce, maps:get(nonce, Tx) == good},
-         {fee, valid_fee(Height, Tx)},
-         {claimed_name, is_claimed_name(S, Name, Height)},
-         {owner, owns_name(S, Sender, Name)},
-         {protocol, aec_hard_forks:protocol_effective_at_height(Height) >= 4}
-        ]).
-
-ns_subname_tx(S, [Sender, _Name, Tx]) ->
-    aens_subname_tx:new(update_nonce(S, Sender, Tx)).
-
-ns_subname_next(S, _, [Sender, Name, Tx] = Args) ->
-    case ns_subname_valid(S, Args) of
-        true  ->
-            #{ fee := Fee } = Tx,
-            reserve_fee(Fee,
-            bump_and_charge(Sender, Fee, S));
-      _ -> S
-    end.
-
-ns_subname_post(S, Args, Res) ->
-  common_postcond(ns_subname_valid(S, Args), Res).
-
-
-ns_subname_features(S, [_Sender, _Name, _Tx] = Args, Res) ->
-    Correct = ns_subname_valid(S, Args),
-    [{correct, case Correct of true -> ns_subname; _ -> false end},
-     {ns_subname, Res}].
 
 %% -- weight ---------------------------------------------------------------
 
