@@ -35,7 +35,10 @@ call(S, {call, M, Cmd, Args}) ->
     true ->
       case apply(M, CmdTx, [S, Args]) of
         {ok, Tx} ->
-          apply_transaction(maps:get(height, S), Tx);
+          try apply_transaction(maps:get(height, S), Tx)
+          catch _:Reason ->
+              {error, Reason}
+          end;
         Error ->
           Error
       end;
