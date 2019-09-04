@@ -98,7 +98,7 @@ mine_pre(S) ->
     maps:is_key(accounts, S).
 
 mine_args(_) ->
-    [?LET(Blocks, frequency([{10, 1}, {1, 10}, {1, 100}, {1, 1000}, {1, 10000}, {1, 25000}]),
+    [?LET(Blocks, frequency([{10, 1}, {1, 10}, {1, 100}, {2, 480}, {1, 1000}, {1, 10000}, {1, 25000}]),
           ?SHRINK(Blocks, [choose(1, Blocks) || Blocks =/= 1]))].
 
 mine_call(#{height := Height}, [Blocks]) ->
