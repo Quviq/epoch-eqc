@@ -132,17 +132,27 @@ ns_claim_pre(S) ->
   maps:is_key(accounts, S) andalso maps:get(preclaims, S, []) /= [].
 
 ns_claim_args(S = #{height := Height}) ->
+  Protocol = aec_hard_forks:protocol_effective_at_height(Height),
+  OnLima = if Protocol < 4 -> 0; Protocol >= 4 -> 100 end,
   ?LET({Name, Salt, Sender}, gen_claim(S),
        [Sender,
         #{account_id => aeser_id:create(account, Sender),
           name => Name,
           name_salt => Salt,
           fee => gen_fee(Height),
-          name_fee => oneof([prelima,
-                             20000000,  %% too little
-                             try aec_governance:name_claim_fee(Name, aec_hard_forks:protocol_effective_at_height(Height))
-                             catch _:_ -> 400000000
-                             end]),
+          name_fee => frequency([{if Protocol < 4 -> 100;
+                                     Protocol >= 4 -> 1
+                                  end, prelima},
+                                 {1, 20000000}  %% too little for auction
+                                ] ++
+                                  try F = aec_governance:name_claim_fee(Name, Protocol),
+                                        [ {1, max(0, F-1)},
+                                          {OnLima, F},
+                                          {OnLima, F+1},
+                                          {OnLima, (F * 105) div 100},
+                                          {OnLima, 2*F} ]
+                                  catch _:_ -> []
+                                  end),
           nonce => gen_nonce()}]).
 
 ns_claim_valid(S = #{height := Height}, [Sender, #{name := Name} = Tx]) ->
@@ -156,7 +166,7 @@ ns_claim_valid(S = #{height := Height}, [Sender, #{name := Name} = Tx]) ->
          {unclaimed, not is_claimed(S, Name)},
          {unprotected, not is_protected(S, Name)},
          {valid_name_fee, is_valid_name_fee(Protocol, Name, maps:get(name_fee, Tx))},
-         {valid_bid, true}]).
+         {valid_bid, is_valid_bid(Protocol, S, Name, maps:get(name_fee, Tx))}]).
 
 ns_claim_tx(S, [Sender, Tx]) ->
   FixTx = case maps:get(name_fee, Tx) of
@@ -168,7 +178,7 @@ ns_claim_tx(S, [Sender, Tx]) ->
 ns_claim_next(S = #{height := Height}, _Value, [Sender, Tx] = Args) ->
   case ns_claim_valid(S, Args) of
     true  ->
-      #{ fee := Fee, name := Name, name_salt := Salt } = Tx,
+      #{ fee := Fee, name := Name} = Tx,
       Protocol = aec_hard_forks:protocol_effective_at_height(Height),
       case aec_governance:name_claim_bid_timeout(Name, Protocol) of
         0 ->
@@ -193,7 +203,7 @@ ns_claim_next(S = #{height := Height}, _Value, [Sender, Tx] = Args) ->
                             bid = NameFee,
                             claimer = Sender,
                             protocol = Protocol},
-          case lists:keyfind(Name, #auction.name, maps:get(auctions, S)) of
+          case find_auction(S, Name) of
             false ->
               remove_preclaim(Tx,
                               reserve_fee(Fee,
@@ -217,12 +227,20 @@ ns_claim_post(S, Args, Res) ->
 
 ns_claim_features(S =  #{height := Height}, [_Sender, Tx] = Args, Res) ->
   Correct = ns_claim_valid(S, Args),
+  Name = maps:get(name, Tx),
+  Salt = maps:get(name_salt, Tx),
   [{correct, if Correct -> ns_claim; true -> false end},
    {ns_claim, Res}] ++
     [{ns_claim, maps:get(name, Tx)} || Res == ok] ++
+    [{ns_claim, {name_in_auction, if Salt == 0 -> right_salt;
+                                    true -> wrong_salt end}} ||
+      find_auction(S, Name) =/= false ] ++
+    [{ns_claim, {already_claimed, if Salt == 0 -> zero_salt;
+                                    true -> salt end}} ||
+      is_claimed_name(S, Name) ] ++
     [ {ns_claim, {protocol,
        aec_hard_forks:protocol_effective_at_height(Height) -
-         get_preclaim_protocol(Tx,S)}} || Correct ].
+         get_preclaim_protocol(Tx,S)}} || Correct andalso Salt =/= 0 ].
 
 %% --- Operation: ns_update ---
 
@@ -255,7 +273,7 @@ ns_update_valid(#{height := Height} = S, [Name, Sender, _Pointers, Tx]) ->
          {nonce, maps:get(nonce, Tx) == good},
          {fee, valid_fee(Height, Tx)},
          {name_expiry, maps:get(name_ttl, Tx) =< aec_governance:name_claim_max_expiration()},
-         {claimed_name, is_claimed_name(S, Name, Height)},
+         {claimed_name, is_claimed_name(S, Name)},
          {owner, owns_name(S, Sender, Name)}]).
 
 ns_update_tx(S, [_Name, Sender, _Pointers, Tx]) ->
@@ -300,7 +318,7 @@ ns_revoke_valid(#{height := Height} = S, [Sender, Name, Tx]) ->
          {balance, check_balance(S, Sender, maps:get(fee, Tx))},
          {nonce, maps:get(nonce, Tx) == good},
          {fee, valid_fee(Height, Tx)},
-         {claimed_name, is_claimed_name(S, Name, Height)},
+         {claimed_name, is_claimed_name(S, Name)},
          {owner, owns_name(S, Sender, Name)}]).
 
 ns_revoke_tx(S, [Sender, _Name, Tx]) ->
@@ -359,7 +377,7 @@ ns_transfer_valid(#{height := Height} = S, [Sender, To, Name, Tx]) ->
          {balance, check_balance(S, Sender, maps:get(fee, Tx))},
          {nonce, maps:get(nonce, Tx) == good},
          {fee, valid_fee(Height, Tx)},
-         {claimed_name, is_claimed_name(S, Name, Height)},
+         {claimed_name, is_claimed_name(S, Name)},
          {owner, owns_name(S, Sender, Name)},
          {receiver_account,
           resolve_account(S, To) =/= false} %%  Assumption the recipient does not need to exist
@@ -532,7 +550,7 @@ owns_name(#{claims := Names, height := Height}, Who, Name) ->
                andalso Claim#claim.expires_by >= Height
   end.
 
-is_claimed_name(#{claims := Names}, Name, Height) ->
+is_claimed_name(#{claims := Names, height := Height}, Name) ->
   case lists:keyfind(Name, #claim.name, Names) of
     false -> false;
     Claim -> Height =< Claim#claim.expires_by
@@ -541,14 +559,24 @@ is_claimed_name(#{claims := Names}, Name, Height) ->
 is_protected(S, Name) ->
   proplists:get_value(Name, maps:get(protected_names, S)) =/= undefined.
 
-is_valid_name_fee(Protocol, Name, NameFee) when Protocol < 4 ->
+is_valid_name_fee(Protocol, _Name, NameFee) when Protocol < 4 ->
    NameFee == prelima;
 is_valid_name_fee(Protocol, Name, NameFee) ->
   valid_name(Protocol, Name) andalso  %% otherwise fee computation may fail
     is_integer(NameFee) andalso
     NameFee >= aec_governance:name_claim_fee(Name, Protocol).
 
-is_valid_preclaim(Protocol, S,  #{name_salt := Salt} = Tx, Claimer) when Protocol < 4 ->
+is_valid_bid(Protocol, _S, _Name, _NameFee) when Protocol < 4 ->
+  true;
+is_valid_bid(_, S, Name, NameFee) ->
+  NameFee =/= prelima andalso
+    case find_auction(S, Name) of
+      false -> true;
+      #auction{bid = PrevBid} ->
+          (NameFee - PrevBid) * 100 >= PrevBid * aec_governance:name_claim_bid_increment()
+    end.
+
+is_valid_preclaim(Protocol, S, Tx, Claimer) when Protocol < 4 ->
   is_valid_preclaim_no_auction(S, Tx, Claimer);
 is_valid_preclaim(_Protocol, #{auctions := Auctions} = S, #{name := Name, name_salt := Salt} = Tx, Claimer) ->
   %% Name should be in auction
@@ -575,6 +603,9 @@ valid_name(Protocol, Name) ->
     [_, Registery] -> lists:member(Registery, aec_governance:name_registrars(Protocol));
     _ -> false
   end.
+
+find_auction(S, Name) ->
+  lists:keyfind(Name, #auction.name, maps:get(auctions, S)).
 
 %% -- Generators -------------------------------------------------------------
 minimum_gas_price(H) ->
@@ -603,22 +634,21 @@ gen_fee(H) ->
              {1,  ?LET(F, choose(0, 15000), F)},   %%  too low (and very low for hard fork)
              {1,  ?LET(F, choose(0, 15000), F * minimum_gas_price(H))}]).    %% too low
 
-gen_claim(#{preclaims := []} = S) ->
-  {gen_name(), gen_salt(), gen_account(1, 1, S)};
-gen_claim(#{preclaims := Ps} = S) ->
-  weighted_default(
-    {39, ?LET(#preclaim{name = N, salt = Salt, claimer = C}, elements(Ps),
-              begin
-                frequency([{1, {N, gen_salt(), C}}, {1, {gen_name(), Salt, C}}, {50, {N, Salt, C}}])
-              end)},
-    {1, {gen_name(), gen_salt(), gen_account(1, 1, S)}}).
+gen_claim(#{preclaims := Ps, auctions := As} = S) ->
+  frequency([{20, ?LET(#preclaim{name = N, salt = Salt, claimer = C}, elements(Ps),
+                       begin
+                         frequency([{1, {N, gen_salt(), C}}, {1, {gen_name(), Salt, C}}, {50, {N, Salt, C}}])
+                       end)} || Ps =/= [] ] ++
+              [{30, oneof([ {N, 0, C} || #auction{name = N, claimer = C} <- As])} || As =/= [] ] ++
+              [{10, ?LET({Name, Account}, gen_claimed_name(S),
+                        {Name, oneof([0, gen_salt()]), Account})}]).
 
 gen_claimed_name(#{claims := [], auctions := []} = S) ->
   {gen_name(), gen_account(1, 1, S)};
 gen_claimed_name(#{claims := Cs, auctions := As} = S) ->
   weighted_default(
-    {39, ?LET({N, C}, elements([ {N, C} || #claim{name = N, claimer = C} <- Cs ] ++
-                                 [ {N, C} || #auction{name = N, claimer = C} <- As]),
+    {39, ?LET({N, C}, frequency([ {10, {N, C}} || #claim{name = N, claimer = C} <- Cs ] ++
+                                 [ {1, {N, C}} || #auction{name = N, claimer = C} <- As]),
               begin
                 frequency([{1, {gen_name(), C}}, {1, {N, gen_account(0, 1, S)}}, {38, {N, C}}])
               end)},
