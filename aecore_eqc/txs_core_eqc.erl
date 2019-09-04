@@ -16,7 +16,7 @@
 -include_lib("eqc/include/eqc_statem.hrl").
 
 -compile([export_all, nowarn_export_all]).
--define(PatronAmount, 100000000000001).  %% read from file
+-define(PatronAmount, 1000000000000000000000001).  %% read from file
 
 -record(account,  {key, amount, nonce}).
 
