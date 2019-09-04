@@ -33,10 +33,8 @@ call(S, {call, M, Cmd, Args}) ->
   CmdCall = list_to_atom(lists:concat([Cmd, "_call"])),
   case lists:member({CmdTx, 2}, M:module_info(exports)) of
     true ->
-      %% io:format("calling ~p ", [CmdTx]),
       case apply(M, CmdTx, [S, Args]) of
         {ok, Tx} ->
-          %% io:format("-> ~p\n", [Tx]),
           apply_transaction(maps:get(height, S), Tx);
         Error ->
           Error
@@ -44,16 +42,13 @@ call(S, {call, M, Cmd, Args}) ->
     false ->
       case lists:member({CmdCall, 2}, M:module_info(exports)) of
         true ->
-          %% io:format("calling ~p ", [CmdCall]),
           apply(M, CmdCall, [S, Args]);
         false ->
-          %% io:format("calling ~p\n", [Cmd]),
           apply(M, Cmd, Args)
       end
   end.
 
 apply_transaction(Height, Tx) ->
-    %% io:format("Tx = ~p\n", [Tx]),
     Env      = aetx_env:tx_env(Height),
     Trees    = get(trees),
 
