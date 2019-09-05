@@ -169,9 +169,10 @@ ns_claim_valid(S = #{height := Height}, [Sender, #{name := Name} = Tx]) ->
          {valid_bid, is_valid_bid(Protocol, S, Name, maps:get(name_fee, Tx))}]).
 
 ns_claim_tx(S, [Sender, Tx]) ->
-  FixTx = case maps:get(name_fee, Tx) of
-            prelima -> maps:remove(name_fee, Tx);
-            _ -> Tx
+  Protocol = aec_hard_forks:protocol_effective_at_height(maps:get(height, S)),
+  FixTx = case maps:get(name_fee, Tx) == prelima orelse Protocol < 4 of
+            true -> maps:remove(name_fee, Tx);
+            false -> Tx
           end,
   aens_claim_tx:new(update_nonce(S, Sender, FixTx)).
 
@@ -560,7 +561,7 @@ is_protected(S, Name) ->
   proplists:get_value(Name, maps:get(protected_names, S)) =/= undefined.
 
 is_valid_name_fee(Protocol, _Name, NameFee) when Protocol < 4 ->
-   NameFee == prelima;
+   true;  %% we remove the field part
 is_valid_name_fee(Protocol, Name, NameFee) ->
   valid_name(Protocol, Name) andalso  %% otherwise fee computation may fail
     is_integer(NameFee) andalso
@@ -593,7 +594,7 @@ is_valid_preclaim_no_auction( #{preclaims := Ps, height := Height},
     [] -> false;
     [#preclaim{ height = H }] ->
       H + aec_governance:name_claim_preclaim_delta() =< Height
-        andalso Height < H +  aec_governance:name_preclaim_expiration()  %% this is always the case in this model
+        andalso Height =< H +  aec_governance:name_preclaim_expiration()
   end.
 
 %% names may not have dots in between, only at the end (.test)
