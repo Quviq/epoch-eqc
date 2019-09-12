@@ -13,9 +13,10 @@
 
 -compile([export_all, nowarn_export_all]).
 
--define(NAMEFRAGS, ["foo", "bar", "baz", "longer-name",
+-define(NAMEFRAGS, ["foo", "longer-name",
                     "31-bytes-minimum-as-auctionname",
-                    "this-name-is-32-bytes-ascii-name", "this-name-is-more-than-32-bytes-ascii-name"  %% do not enter auction
+                    "this-name-is-32-bytes-ascii-name",
+                    "this-name-is-more-than-32-bytes-ascii-name"  %% do not enter auction
                    ]).
 
 -record(preclaim,{name, salt, height, claimer, protocol, expires_by}).
