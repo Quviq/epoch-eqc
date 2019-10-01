@@ -35,7 +35,7 @@ initiate_pre(_S) ->
 initiate_args(_S) ->
     ?LET([InitiatorAccount, ResponderAccount], [fake_account_gen(<<"alice">>),
                                                 fake_account_gen(<<"bob">>)],
-    ?LET(Faulty, weighted_default({90, false}, {10, true}),
+    ?LET(Faulty, weighted_default({99, false}, {1, true}),
     [<<"myhost.com">>, 16123, #{initiator => aec_accounts:pubkey(InitiatorAccount),
                                 responder => aec_accounts:pubkey(ResponderAccount),
                                 lock_period => choose(0, 20),
@@ -57,10 +57,13 @@ initiate_pre(_S, [_Host, _Port, #{initiator_amount := InitiatorAmount,
         (ResponderAmount + PushAmount) >= Reserve.
 
 
-initiate(Host, Port, Opts, _) ->
+initiate(Host, Port, Opts, #{faulty := Faulty}) ->
     case aesc_fsm:initiate(Host, Port, Opts) of
-        {ok, Pid} ->
+        {ok, Pid} when not Faulty ->
             Pid;
+        {ok, Pid} when Faulty ->
+            exit(Pid, kill),
+            {error, faulty};
         Error ->
             Error
     end.
@@ -79,17 +82,72 @@ initiate_callouts(_S, [Host, Port, Opts, #{faulty := Faulty,
           ?SEQ([
                 ?CALLOUT(aesc_session_noise, connect, [Host, Port, []], Connection),
                 ?WHEN(Connection =/= {error, not_connected},
-                      ?SEQ([
-                            ?CALLOUT(aec_chain, genesis_hash, [], <<"123">>),
-                            ?CALLOUT(aesc_session_noise, channel_open, [?WILDCARD, ?WILDCARD], ok)]))
+                      ?APPLY(noise_open_channel, []))
                ])).
 
-initiate_next(S, _Value, _Args) ->
-    S.
+noise_open_channel_callouts(S, []) ->
+    ?CALLOUT(aec_chain, genesis_hash, [], <<"123">>),
+    ?MATCH({Map, ok}, ?CALLOUT(aesc_session_noise, channel_open, [?WILDCARD, ?VAR], ok)),
+    ?APPLY(store_channel_id, [Map]).
+
+store_channel_id_next(S, _Value, [Map]) ->
+    S#{temporary_channel_id => {call, maps, get, [temporary_channel_id, Map]}}.
+
+initiate_next(S, Value, [_, _, _, #{faulty := Faulty,
+                                     alice := InitiatorAccount,
+                                     bob := ResponderAccount}]) ->
+    case Faulty of
+        true -> S;
+        false ->
+            S#{ alice => InitiatorAccount,
+                bob => ResponderAccount,
+                fsm => Value,
+                state => initialized }
+    end.
 
 %% if reserve is 0 or low, we can still open
 initiate_post(_S, [_, _, #{channel_reserve := _Reserve}, #{faulty := Faulty}], Res) ->
     is_pid(Res) orelse Faulty.
+
+initiate_features(_S, [_Host, _Port, _Opts, #{faulty := Faulty}], Res) ->
+    [ successful_faulty || Res == {error, faulty} ] ++
+        [ faulty || Faulty ] ++
+        [ successful || not Faulty ].
+
+
+%% --- Operation: chain_mismatch ---
+chain_mismatch_pre(S) ->
+    maps:get(state, S, undefined) == initialized andalso
+        maps:is_key(temporary_channel_id, S).
+
+chain_mismatch_args(#{fsm := Fsm} = S) ->
+    [Fsm, #{ chain_hash             => <<"234">>
+           , temporary_channel_id   => maps:get(temporary_channel_id, S)
+           , initiator_amount       => 0
+           , responder_amount       => 0
+           , channel_reserve        => 0
+           , initiator              => alice
+           , responder              => bob } ].
+
+chain_mismatch_pre(_S, [_, _]) ->
+    true.
+
+chain_mismatch(Fsm, ArgMap) ->
+    aesc_fsm:message(Fsm, {channel_accept, ArgMap}).
+
+chain_mismatch_callouts(_S, [Fsm, ArgMap]) ->
+    ?CALLOUT(aec_chain, genesis_hash, [], <<"123">>),
+    ?SEND(?SELF, ?WILDCARD),  %% error
+    ?SEND(?SELF, ?WILDCARD).  %% died
+
+chain_mismatch_next(S, _Value, [_, _]) ->
+    #{}.
+
+%% chain_mismatch_process(_S, [Fsm, ArgMap]) ->
+%%     worker.
+
+chain_mismatch_post(_S, [_, _], Res) ->
+    eq(Res, ok).
 
 
 %% --- ... more operations
@@ -118,8 +176,9 @@ prop_fsm() ->
         cleanup(),
         check_command_names(Cmds,
             measure(length, commands_length(Cmds),
+            aggregate(call_features(H),
                 pretty_commands(?MODULE, Cmds, {H, S, Res},
-                                Res == ok)))
+                                Res == ok))))
     end))).
 
 start_supervisor() ->
