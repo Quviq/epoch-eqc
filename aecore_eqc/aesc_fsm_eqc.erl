@@ -33,45 +33,62 @@ initiate_pre(_S) ->
     true.
 
 initiate_args(_S) ->
-    ?LET(Faulty, false, %% weighted_default({90, false}, {10, true}),
-    [Faulty, <<"myhost.com">>, 16123, #{initiator => <<"alice">>,
-                                        responder => <<"bob">>,
-                                        lock_period => choose(0, 20),
-                                        initiator_amount => choose(0, 100),
-                                        responder_amount => choose(0, 100),
-                                        channel_reserve => choose(0, 20),
-                                        push_amount => choose(0, 20)
-                                       }]).
+    ?LET([InitiatorAccount, ResponderAccount], [fake_account_gen(<<"alice">>),
+                                                fake_account_gen(<<"bob">>)],
+    ?LET(Faulty, weighted_default({90, false}, {10, true}),
+    [<<"myhost.com">>, 16123, #{initiator => aec_accounts:pubkey(InitiatorAccount),
+                                responder => aec_accounts:pubkey(ResponderAccount),
+                                lock_period => choose(0, 20),
+                                initiator_amount => choose(0, 100),
+                                responder_amount => choose(0, 100),
+                                channel_reserve => choose(0, 20),
+                                push_amount => choose(0, 20)
+                               },
+     #{faulty => Faulty,
+       alice => InitiatorAccount,
+       bob => ResponderAccount}])).
 
-initiate(_Faulty, Host, Port, Opts) ->
+initiate_pre(_S, [_Host, _Port, #{initiator_amount := InitiatorAmount,
+                                  responder_amount := ResponderAmount,
+                                  channel_reserve := Reserve,
+                                  push_amount := PushAmount
+                                 }, _]) ->
+    (InitiatorAmount - PushAmount) >= Reserve andalso
+        (ResponderAmount + PushAmount) >= Reserve.
+
+
+initiate(Host, Port, Opts, _) ->
     case aesc_fsm:initiate(Host, Port, Opts) of
         {ok, Pid} ->
-            unlink(Pid),
-            register(sut, Pid),
             Pid;
         Error ->
             Error
     end.
 
-initiate_callouts(_S, [Faulty, Host, Port, Opts]) ->
-    ?MATCH_GEN([InitiatorType, ResponderType], vector(2, elements([basic, generalized]))),
+initiate_callouts(_S, [Host, Port, Opts, #{faulty := Faulty,
+                                           alice := InitiatorAccount,
+                                           bob := ResponderAccount}]) ->
     ?MATCH(AReturn,
            ?CALLOUT(aec_chain, get_account, [maps:get(initiator, Opts)],
-                    oneof([{error, something} || Faulty ] ++ [ {value, InitiatorType} ]))),
-    ?WHEN(AReturn =/= {error, something},
-              ?CALLOUT(aec_accounts, type, [InitiatorType], InitiatorType)),
+                    oneof([{error, something} || Faulty ] ++ [ {value, InitiatorAccount} ]))),
     ?MATCH(BReturn,
            ?CALLOUT(aec_chain, get_account, [maps:get(responder, Opts)],
-                    oneof([{error, something} || Faulty] ++ [ {value, ResponderType} ]))),
-    ?WHEN(BReturn =/= {error, something},
-          ?CALLOUT(aec_accounts, type, [ResponderType], ResponderType)),
+                    oneof([{error, something} || Faulty] ++ [ {value, ResponderAccount} ]))),
     ?WHEN(BReturn =/= {error, something} andalso AReturn =/= {error, something},
-          ?CALLOUT(aesc_session_noise, connect, [Host, Port, []], {ok, noise_id})).
+          ?SEQ([
+                ?MATCH(Connection,
+                       ?CALLOUT(aesc_session_noise, connect, [Host, Port, []],
+                                oneof([{error, not_connected} || Faulty] ++ [{ok, noise_id}]))),
+                ?WHEN(Connection =/= {error, not_connected},
+                      ?SEQ([
+                            ?CALLOUT(aec_chain, genesis_hash, [], <<"123">>),
+                            ?CALLOUT(aesc_session_noise, channel_open, [?WILDCARD, ?WILDCARD], ok)]))
+               ])).
 
 initiate_next(S, _Value, _Args) ->
     S.
 
-initiate_post(_S, [Faulty, _, _, Opts], Res) ->
+initiate_post(_S, [_, _, Opts, #{faulty := Faulty}], Res) ->
     is_pid(Res) orelse Faulty.
 
 
@@ -85,6 +102,7 @@ weight(_S, start) -> 1;
 weight(_S, _Cmd) -> 10.
 
 prop_fsm() ->
+    eqc:dont_print_counterexample(
     ?SETUP(
         fun() ->
                 %% Setup mocking, etc.
@@ -102,7 +120,7 @@ prop_fsm() ->
             measure(length, commands_length(Cmds),
                 pretty_commands(?MODULE, Cmds, {H, S, Res},
                                 Res == ok)))
-    end)).
+    end))).
 
 start_supervisor() ->
     case whereis(aesc_fsm_sup) of
@@ -118,10 +136,23 @@ cleanup() ->
         Pid -> exit(Pid, kill)
     end.
 
+fake_account_gen(Owner) ->
+    Pad = 32 - size(Owner),
+    ?LET(Generalized, bool(),
+         {account,
+          aeser_id:create(account, <<Owner/binary, 0:Pad/unit:8>>),
+          nat(), %% balance
+          if Generalized -> 0; true -> 1 end, %% nonce
+          0, %% flags
+          oneof([undefined || not Generalized] ++
+                    [aeser_id:create(contract, <<"this is a top contract">>) ||  Generalized]),  %% ga_contract :: undefined | aeser_id:id(),
+          oneof([undefined || not Generalized] ++
+                    [ <<"fun_hash">> || Generalized ])}).
+
 %% -- API-spec ---------------------------------------------------------------
 api_spec() ->
     #api_spec{ language = erlang, mocking = eqc_mocking,
-               modules = [ lager_spec(), noise_layer_spec(), aec_chain_spec(), aec_accounts_spec() ] }.
+               modules = [ lager_spec(), noise_layer_spec(), aec_chain_spec() ] }.
 
 lager_spec() ->
     #api_module{ name = lager, fallback = lager_mock }.
@@ -138,12 +169,6 @@ aec_chain_spec() ->
     #api_module{
        name = aec_chain,
        functions =
-           [ #api_fun{ name = get_account, arity = 1}
-           ] }.
-
-aec_accounts_spec() ->
-    #api_module{
-       name = aec_accounts,
-       functions =
-           [ #api_fun{ name = type, arity = 1}
+           [ #api_fun{ name = get_account, arity = 1},
+             #api_fun{ name = genesis_hash, arity = 0}
            ] }.
