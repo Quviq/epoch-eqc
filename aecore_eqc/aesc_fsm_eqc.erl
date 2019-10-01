@@ -29,26 +29,50 @@ precondition_common(_S, _Call) ->
 %% -- Operations -------------------------------------------------------------
 
 %% --- Operation: init ---
-start_pre(_S) ->
+initiate_pre(_S) ->
     true.
 
-start_args(_S) ->
-    [#{}].
+initiate_args(_S) ->
+    ?LET(Faulty, false, %% weighted_default({90, false}, {10, true}),
+    [Faulty, <<"myhost.com">>, 16123, #{initiator => <<"alice">>,
+                                        responder => <<"bob">>,
+                                        lock_period => choose(0, 20),
+                                        initiator_amount => choose(0, 100),
+                                        responder_amount => choose(0, 100),
+                                        channel_reserve => choose(0, 20),
+                                        push_amount => choose(0, 20)
+                                       }]).
 
-start(Arg) ->
-    {ok, Pid} = aesc_fsm:start_link(Arg),
-    unlink(Pid),
-    register(sut, Pid),
-    Pid.
+initiate(_Faulty, Host, Port, Opts) ->
+    case aesc_fsm:initiate(Host, Port, Opts) of
+        {ok, Pid} ->
+            unlink(Pid),
+            register(sut, Pid),
+            Pid;
+        Error ->
+            Error
+    end.
 
-start_callouts(_S, [Arg]) ->
-    ?EMPTY.
+initiate_callouts(_S, [Faulty, Host, Port, Opts]) ->
+    ?MATCH_GEN([InitiatorType, ResponderType], vector(2, elements([basic, generalized]))),
+    ?MATCH(AReturn,
+           ?CALLOUT(aec_chain, get_account, [maps:get(initiator, Opts)],
+                    oneof([{error, something} || Faulty ] ++ [ {value, InitiatorType} ]))),
+    ?WHEN(AReturn =/= {error, something},
+              ?CALLOUT(aec_accounts, type, [InitiatorType], InitiatorType)),
+    ?MATCH(BReturn,
+           ?CALLOUT(aec_chain, get_account, [maps:get(responder, Opts)],
+                    oneof([{error, something} || Faulty] ++ [ {value, ResponderType} ]))),
+    ?WHEN(BReturn =/= {error, something},
+          ?CALLOUT(aec_accounts, type, [ResponderType], ResponderType)),
+    ?WHEN(BReturn =/= {error, something} andalso AReturn =/= {error, something},
+          ?CALLOUT(aesc_session_noise, connect, [Host, Port, []], {ok, noise_id})).
 
-start_next(S, _Value, _Args) ->
+initiate_next(S, _Value, _Args) ->
     S.
 
-start_post(_S, _Args, Res) ->
-    is_pid(Res).
+initiate_post(_S, [Faulty, _, _, Opts], Res) ->
+    is_pid(Res) orelse Faulty.
 
 
 %% --- ... more operations
@@ -71,18 +95,33 @@ prop_fsm() ->
     ?FORALL(Cmds, commands(?MODULE),
     begin
         %% stop the server if running
+        start_supervisor(),
         {H, S, Res} = run_commands(Cmds),
-        %% cleanup
+        cleanup(),
         check_command_names(Cmds,
             measure(length, commands_length(Cmds),
                 pretty_commands(?MODULE, Cmds, {H, S, Res},
                                 Res == ok)))
     end)).
 
+start_supervisor() ->
+    case whereis(aesc_fsm_sup) of
+        undefined -> ok;
+        Pid -> exit(Pid, kill)
+    end,
+    {ok, Supervisor} = aesc_fsm_sup:start_link(),
+    unlink(Supervisor).
+
+cleanup() ->
+    case whereis(aesc_fsm_sup) of
+        undefined -> ok;
+        Pid -> exit(Pid, kill)
+    end.
+
 %% -- API-spec ---------------------------------------------------------------
 api_spec() ->
     #api_spec{ language = erlang, mocking = eqc_mocking,
-               modules = [ lager_spec(), noise_layer_spec() ] }.
+               modules = [ lager_spec(), noise_layer_spec(), aec_chain_spec(), aec_accounts_spec() ] }.
 
 lager_spec() ->
     #api_module{ name = lager, fallback = lager_mock }.
@@ -93,4 +132,18 @@ noise_layer_spec() ->
        functions =
            [ #api_fun{ name = channel_open, arity = 2, matched = all, fallback = false}
            , #api_fun{ name = connect, arity = 3, matched = all, fallback = false}
+           ] }.
+
+aec_chain_spec() ->
+    #api_module{
+       name = aec_chain,
+       functions =
+           [ #api_fun{ name = get_account, arity = 1}
+           ] }.
+
+aec_accounts_spec() ->
+    #api_module{
+       name = aec_accounts,
+       functions =
+           [ #api_fun{ name = type, arity = 1}
            ] }.
