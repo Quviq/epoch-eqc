@@ -68,6 +68,7 @@ initiate(Host, Port, Opts, _) ->
 initiate_callouts(_S, [Host, Port, Opts, #{faulty := Faulty,
                                            alice := InitiatorAccount,
                                            bob := ResponderAccount}]) ->
+    ?MATCH_GEN(Connection, oneof([{error, not_connected} || Faulty] ++ [{ok, noise_id}])),
     ?MATCH(AReturn,
            ?CALLOUT(aec_chain, get_account, [maps:get(initiator, Opts)],
                     oneof([{error, something} || Faulty ] ++ [ {value, InitiatorAccount} ]))),
@@ -76,9 +77,7 @@ initiate_callouts(_S, [Host, Port, Opts, #{faulty := Faulty,
                     oneof([{error, something} || Faulty] ++ [ {value, ResponderAccount} ]))),
     ?WHEN(BReturn =/= {error, something} andalso AReturn =/= {error, something},
           ?SEQ([
-                ?MATCH(Connection,
-                       ?CALLOUT(aesc_session_noise, connect, [Host, Port, []],
-                                oneof([{error, not_connected} || Faulty] ++ [{ok, noise_id}]))),
+                ?CALLOUT(aesc_session_noise, connect, [Host, Port, []], Connection),
                 ?WHEN(Connection =/= {error, not_connected},
                       ?SEQ([
                             ?CALLOUT(aec_chain, genesis_hash, [], <<"123">>),
@@ -88,7 +87,8 @@ initiate_callouts(_S, [Host, Port, Opts, #{faulty := Faulty,
 initiate_next(S, _Value, _Args) ->
     S.
 
-initiate_post(_S, [_, _, Opts, #{faulty := Faulty}], Res) ->
+%% if reserve is 0 or low, we can still open
+initiate_post(_S, [_, _, #{channel_reserve := _Reserve}, #{faulty := Faulty}], Res) ->
     is_pid(Res) orelse Faulty.
 
 
