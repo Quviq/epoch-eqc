@@ -175,6 +175,7 @@ prop_fsm() ->
     ?FORALL(Cmds, commands(?MODULE),
     begin
         %% stop the server if running
+        application:start(gproc),
         start_supervisor(),
         {H, S, Res} = run_commands(Cmds),
         cleanup(),
