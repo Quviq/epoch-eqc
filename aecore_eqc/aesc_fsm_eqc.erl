@@ -229,5 +229,22 @@ aec_chain_spec() ->
        name = aec_chain,
        functions =
            [ #api_fun{ name = get_account, arity = 1},
+             #api_fun{ name = top_header, arity = 0},
+             #api_fun{ name = get_key_header_by_height, arity = 1},
              #api_fun{ name = genesis_hash, arity = 0}
+           ] }.
+
+aec_next_nonce_spec() ->
+    #api_module{
+       name = aec_next_nonce,
+       functions =
+           [ #api_fun{ name = pick_for_account, arity = 1}
+           ] }.
+
+aetx_env_spec() ->
+    #api_module{
+       name = aetx_env,
+       functions =
+           [ #api_fun{ name = tx_env_and_trees_from_hash, arity = 2},
+             #api_fun{ name = height, arity = 1}
            ] }.
