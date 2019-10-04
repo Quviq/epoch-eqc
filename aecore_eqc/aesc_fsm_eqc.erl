@@ -154,6 +154,59 @@ chain_mismatch_post(_S, [_, _], Res) ->
     eq(Res, ok).
 
 
+%% --- Operation: channel_accept ---
+channel_accept_pre(S) ->
+    maps:get(state, S, undefined) == initialized andalso
+        maps:is_key(temporary_channel_id, S).
+
+channel_accept_args(#{fsm := Fsm, chain := Chain} = S) ->
+    GenesisHeader = lists:last(Chain),
+    [Fsm, #{ chain_hash             => aec_headers:root_hash(GenesisHeader)
+           , temporary_channel_id   => maps:get(temporary_channel_id, S)
+           , initiator_amount       => 0
+           , responder_amount       => 0
+           , channel_reserve        => 0
+           , initiator              => alice
+           , responder              => bob } ].
+
+channel_accept_pre(_S, [_Fsm, _Args]) ->
+    true.
+
+channel_accept(Fsm, ArgMap) ->
+    aesc_fsm:message(Fsm, {channel_accept, ArgMap}).
+
+channel_accept_callouts(#{chain := Chain} = S, [Fsm, ArgMap]) ->
+    GenesisHeader = lists:last(Chain),
+    %% I create my own representation of environment and whenever code
+    %% is using that without calling aetx_env, code will crash as it should!
+    Trees = [],
+    PinnedHeight = 0,
+    ?CALLOUT(aec_chain, genesis_hash, [], aec_headers:root_hash(GenesisHeader)),
+    ?PAR([?SEQ([
+                ?CALLOUT(aec_chain, get_account, [maps:get(initiator, ArgMap)], {value, maps:get(alice, S)}),
+                ?CALLOUT(aec_next_nonce, pick_for_account, [maps:get(initiator, ArgMap)], {ok, nonce(maps:get(alice, S))}),
+                ?CALLOUT(aec_chain, top_header, [], hd(Chain)),
+                ?CALLOUT(aec_chain, get_key_header_by_height, [PinnedHeight], {ok, GenesisHeader}), %% This needs to be a different one
+                %% This header is now serialized and hashed
+                %% aesc:fsm should be refactored to find the key header instead and use this key header to
+                %% build the env instead of first serializing and then deserializing.... too complex
+                ?CALLOUT(aetx_env, tx_env_and_trees_from_hash, [aetx_contract, ?WILDCARD], {#{height => PinnedHeight}, Trees}),
+                ?CALLOUT(aetx_env, height, [?WILDCARD], PinnedHeight),
+                ?CALLOUT(aetx_env, height, [?WILDCARD], PinnedHeight)
+               ]),
+          ?SEND(?SELF, ?WILDCARD)]).
+
+
+channel_accept_next(S, _Value, [_Fsm, _Args]) ->
+    S.
+
+channel_accept_post(_S, [_Fsm, _Args], _Res) ->
+    false.
+
+nonce({account, _, _, Nonce, _, _, _}) ->
+    Nonce.
+
+
 %% --- ... more operations
 
 %% -- Property ---------------------------------------------------------------
