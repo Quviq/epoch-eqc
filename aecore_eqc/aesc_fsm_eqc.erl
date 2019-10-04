@@ -12,9 +12,12 @@
 
 -compile([export_all, nowarn_export_all]).
 
+
 %% -- State ------------------------------------------------------------------
 initial_state() ->
-    #{}.
+    #{chain => [aec_headers:new_key_header(0, <<"prevhash">>, <<"0 PrevKeyHash">>, <<"genesis">>, <<"miner">>, <<"beneficiary">>,
+                                          2000, 0, 0, 0, 1)]
+     }.
 
 %% -- Common pre-/post-conditions --------------------------------------------
 command_precondition_common(_S, _Cmd) ->
@@ -121,7 +124,7 @@ chain_mismatch_pre(S) ->
         maps:is_key(temporary_channel_id, S).
 
 chain_mismatch_args(#{fsm := Fsm} = S) ->
-    [Fsm, #{ chain_hash             => <<"234">>
+    [Fsm, #{ chain_hash             => <<"non-genesis">>
            , temporary_channel_id   => maps:get(temporary_channel_id, S)
            , initiator_amount       => 0
            , responder_amount       => 0
@@ -135,13 +138,14 @@ chain_mismatch_pre(_S, [_, _]) ->
 chain_mismatch(Fsm, ArgMap) ->
     aesc_fsm:message(Fsm, {channel_accept, ArgMap}).
 
-chain_mismatch_callouts(_S, [Fsm, ArgMap]) ->
-    ?CALLOUT(aec_chain, genesis_hash, [], <<"123">>),
+chain_mismatch_callouts(#{chain := Chain}, [Fsm, ArgMap]) ->
+    GenesisHeader = lists:last(Chain),
+    ?CALLOUT(aec_chain, genesis_hash, [], aec_headers:root_hash(GenesisHeader)),
     ?SEND(?SELF, ?WILDCARD),  %% error
     ?SEND(?SELF, ?WILDCARD).  %% died
 
 chain_mismatch_next(S, _Value, [_, _]) ->
-    #{}.
+    maps:with([chain], S).
 
 %% chain_mismatch_process(_S, [Fsm, ArgMap]) ->
 %%     worker.
@@ -156,7 +160,7 @@ chain_mismatch_post(_S, [_, _], Res) ->
 %% invariant(_S) ->
 %% true.
 
-weight(_S, start) -> 1;
+weight(_S, initialize) -> 1;
 weight(_S, _Cmd) -> 10.
 
 prop_fsm() ->
@@ -211,7 +215,10 @@ fake_account_gen(Owner) ->
 %% -- API-spec ---------------------------------------------------------------
 api_spec() ->
     #api_spec{ language = erlang, mocking = eqc_mocking,
-               modules = [ lager_spec(), noise_layer_spec(), aec_chain_spec() ] }.
+               modules = [ lager_spec(), noise_layer_spec(),
+                           aec_chain_spec(),
+                           aec_next_nonce_spec(),
+                           aetx_env_spec() ] }.
 
 lager_spec() ->
     #api_module{ name = lager, fallback = lager_mock }.
