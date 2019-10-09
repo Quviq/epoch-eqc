@@ -20,8 +20,15 @@
 -compile([export_all, nowarn_export_all]).
 
 %% Possibly make this into a parameterized module
-models() ->
-  [ txs_core_eqc, txs_oracles_eqc, txs_spend_eqc, txs_names_eqc ].
+models(HardForks) ->
+  [ {txs_core_eqc, maps:merge(#{hard_forks => HardForks}, txs_core_eqc:initial_state())},
+     txs_oracles_eqc, txs_spend_eqc, txs_names_eqc ].
+
+%% hidden and for stats, but should not be needed
+model_atoms() ->
+  lists:map(fun({M, _}) -> M;
+               (M) -> M
+            end, models(dummy)).
 
 
 %% --- Calling the SUT ---------------------------------------------
@@ -69,13 +76,14 @@ apply_transaction(Height, Tx) ->
 
 
 prop_txs() ->
-    prop_txs(3).
+  Forks = #{<<"1">> => 0, <<"2">> => 3, <<"3">> => 6, <<"4">> => 9},
+  prop_txs(Forks).
 
-prop_txs(Fork) ->
-    propsetup(Fork,
+prop_txs(Forks) ->
+    propsetup(Forks,
     eqc:dont_print_counterexample(
     in_parallel(
-    ?FORALL(Cmds, more_commands(5, eqc_merge_statem:merge_commands(?MODULE, models())),
+    ?FORALL(Cmds, more_commands(5, eqc_merge_statem:merge_commands(?MODULE, models(Forks))),
     begin
         put(trees, undefined),
         {H, S, Res} = run_commands(Cmds),
@@ -94,7 +102,8 @@ prop_txs(Fork) ->
 %% Terrrible. I need to know all Kinds before property runs to make this work: bleh.
 stats(Features, Prop) ->
   {Atoms, Rest} = lists:partition(fun is_atom/1, Features),
-  Kinds = lists:usort(lists:map(fun(T) -> element(1, T) end, Rest) ++ eqc_statem:apply({eqc_merge_statem, ?MODULE, models()}, all_command_names, [])),
+  Kinds = lists:usort(lists:map(fun(T) -> element(1, T) end, Rest) ++
+                        eqc_statem:apply({eqc_merge_statem, ?MODULE, model_atoms()}, all_command_names, [])),
   aggregate(with_title(atoms), Atoms,
      aggregate_feats(Kinds, Rest, Prop)).
 
@@ -104,13 +113,13 @@ aggregate_feats([Tag | Kinds], Features, Prop) ->
     %% io:format("Tag ~p Tuples ~p\n",[Tag, Tuples]),
     aggregate(with_title(Tag), Tuples, aggregate_feats(Kinds, Rest, Prop)).
 
-propsetup(Fork, Prop) ->
+propsetup(Forks, Prop) ->
     ?SETUP(
     fun() ->
             _ = application:load(aecore),
             application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
             %% compile_contracts(),
-            HardForksTeardown = setup_hard_forks(#{<<"1">> => 0, <<"2">> => Fork, <<"3">> => 2*Fork, <<"4">> => 3*Fork}),
+            HardForksTeardown = setup_hard_forks(Forks),
             DataDirTeardown = setup_data_dir(),
             fun() ->
                     DataDirTeardown(),
