@@ -417,7 +417,7 @@ is_expired_query(S, QueryId) ->
     end.
 
 valid_fee(H, #{ fee := Fee }) ->
-    Fee >= 20000 * minimum_gas_price(H).   %% not precise, but we don't generate fees in the shady range
+    Fee >= 20000 * tx_utils:minimum_gas_price(H).   %% not precise, but we don't generate fees in the shady range
 
 valid_ttl(Height, {block, H}) ->
     H > Height;
@@ -426,9 +426,6 @@ valid_ttl(_, {delta, _}) ->
 
 
 %% -- Generators -------------------------------------------------------------
-minimum_gas_price(H) ->
-    aec_governance:minimum_gas_price(H).
-
 gen_nonce() ->
     weighted_default({49, good}, {1, {bad, elements([-1, 1, -5, 5, 10000])}}).
 
@@ -446,9 +443,9 @@ gen_non_oracle_account(New, Existing, #{oracles := Os} = S) ->
     oneof(Keys ++ [txs_spend_eqc:gen_account_key(New, Existing, S)]).
 
 gen_fee(H) ->
-    frequency([{29, ?LET(F, choose(20000, 30000), F * minimum_gas_price(H))},
+    frequency([{29, ?LET(F, choose(20000, 30000), F * tx_utils:minimum_gas_price(H))},
                 {1,  ?LET(F, choose(0, 15000), F)},   %%  too low (and very low for hard fork)
-                {1,  ?LET(F, choose(0, 15000), F * minimum_gas_price(H))}]).    %% too low
+                {1,  ?LET(F, choose(0, 15000), F * tx_utils:minimum_gas_price(H))}]).    %% too low
 
 gen_query_fee() ->
     choose(10, 1000).

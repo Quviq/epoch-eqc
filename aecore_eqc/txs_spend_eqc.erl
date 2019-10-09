@@ -145,7 +145,6 @@ check_balance(S, Key, Amount) ->
       Account#account.amount >= Amount
   end.
 
-
 on_account(Key, Fun, S = #{accounts := Accounts}) ->
     Upd = fun(Acc = #account{ key = Key1 }) when Key1 == Key -> Fun(Acc);
              (Acc) -> Acc end,
@@ -198,7 +197,7 @@ account_nonce(#account{nonce = Nonce}) ->
     Nonce.
 
 valid_fee(H, #{ fee := Fee }) ->
-    Fee >= 20000 * minimum_gas_price(H).   %% not precise, but we don't generate fees in the shady range
+    Fee >= 20000 * tx_utils:minimum_gas_price(H).   %% not precise, but we don't generate fees in the shady range
 
 
 account(S, Key) ->
@@ -206,8 +205,6 @@ account(S, Key) ->
 
 
 %% -- Generators -------------------------------------------------------------
-minimum_gas_price(H) ->
-    aec_governance:minimum_gas_price(H).
 
 gen_account_key(New, Exist, #{accounts := Accounts, keys := Keys}) ->
     case [ Key || Key <- maps:keys(Keys), not lists:keymember(Key, #account.key, Accounts) ] of
@@ -228,11 +225,11 @@ gen_spend_amount(#account{ amount = X }) ->
     weighted_default({49, round(X / 5)}, {1, choose(0, 10000000)}).
 
 gen_fee(H) ->
-    frequency([{29, ?LET(F, choose(20000, 30000), F * minimum_gas_price(H))},
+    frequency([{29, ?LET(F, choose(20000, 30000), F * tx_utils:minimum_gas_price(H))},
                 {1,  ?LET(F, choose(0, 15000), F)},   %%  too low (and very low for hard fork)
-                {1,  ?LET(F, choose(0, 15000), F * minimum_gas_price(H))}]).    %% too low
+                {1,  ?LET(F, choose(0, 15000), F * tx_utils:minimum_gas_price(H))}]).    %% too low
 
 gen_fee_above(H, Amount) ->
-    frequency([{29, ?LET(F, choose(Amount, Amount + 10000), F * minimum_gas_price(H))},
+    frequency([{29, ?LET(F, choose(Amount, Amount + 10000), F * tx_utils:minimum_gas_price(H))},
                 {1,  ?LET(F, choose(0, Amount - 5000), F)},   %%  too low (and very low for hard fork)
-                {1,  ?LET(F, choose(0, Amount - 5000), F * minimum_gas_price(H))}]).    %% too low
+                {1,  ?LET(F, choose(0, Amount - 5000), F * tx_utils:minimum_gas_price(H))}]).    %% too low
