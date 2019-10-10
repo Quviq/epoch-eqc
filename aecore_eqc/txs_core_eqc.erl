@@ -22,7 +22,7 @@
 
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
-    #{keys => #{}, fees => []}.
+  #{keys => #{}, fees => []}.
 
 patron() ->
     #{ public := Pubkey, secret := Privkey } =
