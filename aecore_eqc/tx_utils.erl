@@ -3,6 +3,7 @@
 -include_lib("eqc/include/eqc.hrl").
 -compile([export_all, nowarn_export_all]).
 
+-define(LIMA, true).
 
 %% Governance API
 protocol_at_height(HardForks, Height) ->
@@ -12,6 +13,11 @@ minimum_gas_price(HardForks, Height) ->
     aec_governance:minimum_gas_price(protocol_at_height(HardForks, Height)).
 
 
+%% in case of lima-rc, fall back to old definitions
+minimum_gas_price(Protocol) when ?LIMA ->
+    {ok, Forks} = application:get_env(aecore, hard_forks),
+    Height = maps:get(integer_to_binary(Protocol), Forks),
+    aec_governance:minimum_gas_price(Height);
 minimum_gas_price(Protocol) ->
     aec_governance:minimum_gas_price(Protocol).
 
@@ -21,6 +27,9 @@ minimum_gas_price(Protocol) ->
 %% Apply operations on all trees being at Height going to Height + 1
 %% If we bump protocol, we need to updtae the trees with additional accounts and contracts
 %% Only when Height + 1 is in different protocol
+pre_transformations(HardForks, Trees, Height) when ?LIMA ->
+    TxEnv = aetx_env:tx_env(Height + 1),
+    aec_trees:perform_pre_transformations(Trees, TxEnv);
 pre_transformations(HardForks, Trees, Height) ->
     Protocol = protocol_at_height(HardForks, Height),
     TxEnv = aetx_env:tx_env(Height + 1),
@@ -42,8 +51,8 @@ protocol_name(P)  ->
 %% the calling location, but just make sure we have enough info in state.
 
 
-valid_fee(#{hard_forks := Forks, height := H}, #{ fee := Fee }) ->
-    Fee >= 20000 * minimum_gas_price(Forks, H).   %% not precise, but we don't generate fees in the shady range
+valid_fee(#{protocol := P}, #{ fee := Fee }) ->
+    Fee >= 20000 * minimum_gas_price(P).   %% not precise, but we don't generate fees in the shady range
 
 %% Shared generators
 
