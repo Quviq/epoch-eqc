@@ -28,7 +28,7 @@ minimum_gas_price(Protocol) ->
 %% If we bump protocol, we need to updtae the trees with additional accounts and contracts
 %% Only when Height + 1 is in different protocol
 pre_transformations(HardForks, Trees, Height) when ?LIMA ->
-    TxEnv = aetx_env:tx_env(Height + 1),
+    TxEnv = aetx_env:tx_env(Height),
     aec_trees:perform_pre_transformations(Trees, TxEnv);
 pre_transformations(HardForks, Trees, Height) ->
     Protocol = protocol_at_height(HardForks, Height),

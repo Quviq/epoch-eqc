@@ -210,16 +210,16 @@ ns_claim_next(S = #{height := Height}, _Value, [Sender, Tx] = Args) ->
           case find_auction(S, Name) of
             false ->
               remove_preclaim(Tx,
-                              reserve_fee(Fee,
-                                          bump_and_charge(Sender, Fee + NameFee,
-                                                          add(auctions, NewBid, S))));
+                reserve_fee(Fee,
+                bump_and_charge(Sender, Fee + NameFee,
+                add(auctions, NewBid, S))));
             #auction{claimer = PrevBidder,
                      bid = PrevBid} ->
               reserve_fee(Fee,
-                          credit(PrevBidder, PrevBid,
-                                 bump_and_charge(Sender, Fee + NameFee,
-                                                 add(auctions, NewBid,
-                                                     remove(auctions, Name, #auction.name, S)))))
+                credit(PrevBidder, PrevBid,
+                bump_and_charge(Sender, Fee + NameFee,
+                add(auctions, NewBid,
+                remove(auctions, Name, #auction.name, S)))))
           end
       end;
     _ -> S
