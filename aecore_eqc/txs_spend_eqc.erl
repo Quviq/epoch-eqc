@@ -11,6 +11,8 @@
 
 -compile([export_all, nowarn_export_all]).
 
+-import(tx_utils, [gen_fee/1]).
+
 -record(account, {key, amount, nonce}).
 
 %% -- State and state functions ----------------------------------------------
@@ -26,7 +28,7 @@ spend_pre(S) ->
 %% here we should add spending to oracle and contract
 %% aeser_id:specialize_type(Recv),
 %% names are always accounts, hard coded in tx_processor
-spend_args(#{height := Height} = S) ->
+spend_args(#{protocol := Protocol} = S) ->
     ?LET([Sender, To], [gen_account_key(1, 49, S),
                              frequency([{10, {account,  gen_account_key(2, 1, S)}},
                                         {2, {oracle, gen_account_key(1, 49, S)}},      %% There is no check account really is an oracle!
@@ -55,15 +57,15 @@ spend_args(#{height := Height} = S) ->
                         aeser_id:create(name, aens_hash:name_hash(Name))
                 end,
             amount => gen_spend_amount(account(S, Sender)),
-            fee => gen_fee(maps:get(hard_forks, S), Height),
+            fee => gen_fee(Protocol),
             nonce => gen_nonce(),
             payload => utf8()}]).
 
-spend_valid(#{height := Height} = S, [Sender, {ReceiverTag, Receiver}, Tx]) ->
+spend_valid(S, [Sender, {ReceiverTag, Receiver}, Tx]) ->
     is_account(S, Sender)
     andalso maps:get(nonce, Tx) == good
     andalso check_balance(S, Sender, maps:get(amount, Tx) + maps:get(fee, Tx))
-    andalso valid_fee(maps:get(hard_forks, S), Height, Tx)
+    andalso tx_utils:valid_fee(S, Tx)
     andalso case ReceiverTag of
                 account -> true;
                 oracle -> true; %% an account is generated if oracle does not exsists
@@ -196,9 +198,6 @@ account_key(#account{key = Key}) ->
 account_nonce(#account{nonce = Nonce}) ->
     Nonce.
 
-valid_fee(Forks, H, #{ fee := Fee }) ->
-    Fee >= 20000 * tx_utils:minimum_gas_price(Forks, H).   %% not precise, but we don't generate fees in the shady range
-
 
 account(S, Key) ->
     lists:keyfind(Key, #account.key, maps:get(accounts, S, #{})).
@@ -223,13 +222,3 @@ gen_spend_amount(false) ->
     choose(0, 10000000);
 gen_spend_amount(#account{ amount = X }) ->
     weighted_default({49, round(X / 5)}, {1, choose(0, 10000000)}).
-
-gen_fee(Forks, H) ->
-    frequency([{29, ?LET(F, choose(20000, 30000), F * tx_utils:minimum_gas_price(Forks, H))},
-                {1,  ?LET(F, choose(0, 15000), F)},   %%  too low (and very low for hard fork)
-                {1,  ?LET(F, choose(0, 15000), F * tx_utils:minimum_gas_price(Forks,H))}]).    %% too low
-
-gen_fee_above(Forks, H, Amount) ->
-    frequency([{29, ?LET(F, choose(Amount, Amount + 10000), F * tx_utils:minimum_gas_price(Forks, H))},
-                {1,  ?LET(F, choose(0, Amount - 5000), F)},   %%  too low (and very low for hard fork)
-                {1,  ?LET(F, choose(0, Amount - 5000), F * tx_utils:minimum_gas_price(Forks, H))}]).    %% too low

@@ -74,6 +74,7 @@ initial_trees() ->
 init_next(S, _Value, []) ->
     {PA, Secret, PAmount} = patron(),
     S#{height   => 0,
+       protocol => 1,
        accounts => [#account{key = PA, amount = PAmount, nonce = 1}],
        keys => maps:put(PA, Secret, maps:get(keys, S))}.
 
@@ -109,8 +110,9 @@ mine_call(#{height := Height, hard_forks := Forks}, [Blocks]) ->
     put(trees, Trees1),
     ok.
 
-mine_next(#{height := Height} = S, _Value, [Blocks]) ->
-    S#{height   => Height + Blocks}.
+mine_next(#{height := Height, hard_forks := Forks} = S, _Value, [Blocks]) ->
+    S#{height   => Height + Blocks,
+       protocol => tx_utils:protocol_at_height(Forks, Height + Blocks)}.
 
 mine_features(_S, [_B], _Res) ->
     [mining].

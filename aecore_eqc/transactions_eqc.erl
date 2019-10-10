@@ -24,7 +24,7 @@ models(HardForks) ->
   [ {txs_core_eqc, maps:merge(#{hard_forks => HardForks}, txs_core_eqc:initial_state())}
     %% , txs_oracles_eqc,
   , txs_spend_eqc
-    %% , txs_names_eqc
+  , txs_names_eqc
   ].
 
 %% hidden and for stats, but should not be needed
@@ -102,6 +102,8 @@ prop_txs(Forks) ->
 
 
 
+stats(Fs, Prop) ->
+  aggregate(Fs, Prop);
 %% Terrrible. I need to know all Kinds before property runs to make this work: bleh.
 stats(Features, Prop) ->
   {Atoms, Rest} = lists:partition(fun is_atom/1, Features),
