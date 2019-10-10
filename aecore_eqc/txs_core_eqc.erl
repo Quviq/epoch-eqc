@@ -18,7 +18,7 @@
 -compile([export_all, nowarn_export_all]).
 -define(PatronAmount, 1000000000000000000000001).  %% read from file
 
--record(account,  {key, amount, nonce}).
+-record(account, {key, amount, nonce}).
 
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
@@ -101,11 +101,11 @@ mine_args(_) ->
     [?LET(Blocks, frequency([{10, 1}, {1, 10}, {1, 100}, {2, 480}, {1, 1000}, {1, 10000}, {1, 25000}]),
           ?SHRINK(Blocks, [choose(1, Blocks) || Blocks =/= 1]))].
 
-mine_call(#{height := Height}, [Blocks]) ->
+mine_call(#{height := Height, hard_forks := Forks}, [Blocks]) ->
     Trees  = get(trees),
     Trees1 = lists:foldl(
-        fun(H, T) -> aec_trees:perform_pre_transformations(T, H + 1) end,
-        Trees, lists:seq(Height, Height + Blocks - 1)),
+        fun(H, Ts) -> tx_utils:pre_transformations(Forks, Ts, H) end,
+        Trees, lists:seq(Height + 1, Height + Blocks)),
     put(trees, Trees1),
     ok.
 

@@ -55,7 +55,7 @@ spend_args(#{height := Height} = S) ->
                         aeser_id:create(name, aens_hash:name_hash(Name))
                 end,
             amount => gen_spend_amount(account(S, Sender)),
-            fee => gen_fee(Height),
+            fee => gen_fee(maps:get(hard_forks, S), Height),
             nonce => gen_nonce(),
             payload => utf8()}]).
 
@@ -63,7 +63,7 @@ spend_valid(#{height := Height} = S, [Sender, {ReceiverTag, Receiver}, Tx]) ->
     is_account(S, Sender)
     andalso maps:get(nonce, Tx) == good
     andalso check_balance(S, Sender, maps:get(amount, Tx) + maps:get(fee, Tx))
-    andalso valid_fee(Height, Tx)
+    andalso valid_fee(maps:get(hard_forks, S), Height, Tx)
     andalso case ReceiverTag of
                 account -> true;
                 oracle -> true; %% an account is generated if oracle does not exsists
@@ -196,8 +196,8 @@ account_key(#account{key = Key}) ->
 account_nonce(#account{nonce = Nonce}) ->
     Nonce.
 
-valid_fee(H, #{ fee := Fee }) ->
-    Fee >= 20000 * tx_utils:minimum_gas_price(H).   %% not precise, but we don't generate fees in the shady range
+valid_fee(Forks, H, #{ fee := Fee }) ->
+    Fee >= 20000 * tx_utils:minimum_gas_price(Forks, H).   %% not precise, but we don't generate fees in the shady range
 
 
 account(S, Key) ->
@@ -224,12 +224,12 @@ gen_spend_amount(false) ->
 gen_spend_amount(#account{ amount = X }) ->
     weighted_default({49, round(X / 5)}, {1, choose(0, 10000000)}).
 
-gen_fee(H) ->
-    frequency([{29, ?LET(F, choose(20000, 30000), F * tx_utils:minimum_gas_price(H))},
+gen_fee(Forks, H) ->
+    frequency([{29, ?LET(F, choose(20000, 30000), F * tx_utils:minimum_gas_price(Forks, H))},
                 {1,  ?LET(F, choose(0, 15000), F)},   %%  too low (and very low for hard fork)
-                {1,  ?LET(F, choose(0, 15000), F * tx_utils:minimum_gas_price(H))}]).    %% too low
+                {1,  ?LET(F, choose(0, 15000), F * tx_utils:minimum_gas_price(Forks,H))}]).    %% too low
 
-gen_fee_above(H, Amount) ->
-    frequency([{29, ?LET(F, choose(Amount, Amount + 10000), F * tx_utils:minimum_gas_price(H))},
+gen_fee_above(Forks, H, Amount) ->
+    frequency([{29, ?LET(F, choose(Amount, Amount + 10000), F * tx_utils:minimum_gas_price(Forks, H))},
                 {1,  ?LET(F, choose(0, Amount - 5000), F)},   %%  too low (and very low for hard fork)
-                {1,  ?LET(F, choose(0, Amount - 5000), F * tx_utils:minimum_gas_price(H))}]).    %% too low
+                {1,  ?LET(F, choose(0, Amount - 5000), F * tx_utils:minimum_gas_price(Forks, H))}]).    %% too low

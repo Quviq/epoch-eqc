@@ -21,8 +21,11 @@
 
 %% Possibly make this into a parameterized module
 models(HardForks) ->
-  [ {txs_core_eqc, maps:merge(#{hard_forks => HardForks}, txs_core_eqc:initial_state())},
-     txs_oracles_eqc, txs_spend_eqc, txs_names_eqc ].
+  [ {txs_core_eqc, maps:merge(#{hard_forks => HardForks}, txs_core_eqc:initial_state())}
+    %% , txs_oracles_eqc,
+  , txs_spend_eqc
+    %% , txs_names_eqc
+  ].
 
 %% hidden and for stats, but should not be needed
 model_atoms() ->
@@ -76,7 +79,7 @@ apply_transaction(Height, Tx) ->
 
 
 prop_txs() ->
-  Forks = #{<<"1">> => 0, <<"2">> => 3, <<"3">> => 6, <<"4">> => 9},
+  Forks = #{1=> 0, 2 => 3, 3 => 6, 4 => 9},
   prop_txs(Forks).
 
 prop_txs(Forks) ->
@@ -141,7 +144,8 @@ setup_data_dir() ->
             ok = application:unset_env(setup, data_dir)
     end.
 
-setup_hard_forks(X) ->
+setup_hard_forks(Forks) ->
+    X = maps:from_list([ {integer_to_binary(K), V} || {K, V} <- maps:to_list(Forks)]),
     %% Not asserting that configuration parameter is undefined so to ease experimenting in Erlang shell.
     ok = application:set_env(aecore, hard_forks, X),
     fun() ->
