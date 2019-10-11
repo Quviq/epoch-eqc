@@ -18,13 +18,14 @@
                     ]).
 
 -compile([export_all, nowarn_export_all]).
+-only_positive(false).
 
 %% Possibly make this into a parameterized module
 models(HardForks) ->
   [ {txs_core_eqc, maps:merge(#{hard_forks => HardForks}, txs_core_eqc:initial_state())}
-    %% , txs_oracles_eqc,
-  , txs_spend_eqc
   , txs_names_eqc
+  , txs_oracles_eqc
+  , txs_spend_eqc
   ].
 
 %% hidden and for stats, but should not be needed

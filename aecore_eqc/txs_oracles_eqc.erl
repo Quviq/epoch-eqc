@@ -11,6 +11,8 @@
 -include_lib("eqc/include/eqc_statem.hrl").
 
 -compile([export_all, nowarn_export_all]).
+-import(tx_utils, [gen_fee/1, valid_fee/2]).
+-import(txs_spend_eqc, [is_account/2]).
 
 -record(query, {sender, symb_id, id, fee, response_ttl, query_ttl, response_due, expired = false}).
 -record(oracle, {id, qfee, oracle_ttl}).
@@ -42,7 +44,6 @@ common_postcond(Correct, Res) ->
 %% This will generate warnings:
 %%    Warning: multi_mine_next unused (no multi_mine_command or multi_mine_args defined).
 %%    Warning: multi_mine_features unused (no multi_mine_command or multi_mine_args defined).
-%% Make sure that in the feature we can switch that off.
 mine_next(#{height := Height} = S, _Value, [Blocks]) ->
     ExpiredQs = expired_queries(S, Height + Blocks),
     lists:foldl(
@@ -60,14 +61,14 @@ mine_features(#{height := Height} = S, [Blocks], _Res) ->
 register_oracle_pre(S) ->
     maps:is_key(accounts, S).
 
-register_oracle_args(S = #{height := Height}) ->
+register_oracle_args(S = #{protocol := Protocol}) ->
      ?LET(Sender, gen_non_oracle_account(1, 49, S),
           [Sender,
                 #{account_id => aeser_id:create(account, Sender),
                   query_format    => <<"send me any string"/utf8>>,
                   response_format => <<"boolean()"/utf8>>,
                   query_fee       => gen_query_fee(),
-                  fee => gen_fee(Height),
+                  fee => gen_fee(Protocol),
                   nonce => gen_nonce(),
                   oracle_ttl => frequency([{9, {delta, 1001}}, {1, {delta, elements([0, 1, 2])}},
                                            {1, {block, choose(0,1000)}}]),
@@ -77,7 +78,7 @@ register_oracle_valid(S = #{height := Height}, [Sender, Tx]) ->
     is_account(S, Sender)
     andalso check_balance(S, Sender, maps:get(fee, Tx))
     andalso maps:get(nonce, Tx) == good
-    andalso valid_fee(Height, Tx)
+    andalso valid_fee(S, Tx)
     andalso valid_ttl(Height, maps:get(oracle_ttl, Tx))
     andalso (not is_oracle(S, Sender) orelse oracle_ttl(S, Sender) < Height).
     %% Very nice shrinking example if removing 'oracle_ttl(S, Sender) < Height'
@@ -112,14 +113,14 @@ register_oracle_features(S, [_Sender, Tx] = Args, Res) ->
 extend_oracle_pre(S) ->
     maps:is_key(accounts, S).
 
-extend_oracle_args(S = #{height := Height}) ->
+extend_oracle_args(S = #{protocol := Protocol}) ->
     ?LET({OracleId, DeltaTTL},
          {gen_oracle_account(1, 49, S), gen_ttl()},  %% TTL always relative
          [OracleId,
           #{oracle_id  => aeser_id:create(oracle, OracleId),
             nonce      => gen_nonce(),
             oracle_ttl => {delta, DeltaTTL},
-            fee        => gen_fee(Height)
+            fee        => gen_fee(Protocol)
            }]).
 
 
@@ -128,7 +129,7 @@ extend_oracle_valid(S = #{height := Height}, [Oracle, Tx]) ->
     andalso is_oracle(S, Oracle)
     andalso maps:get(nonce, Tx) == good
     andalso check_balance(S, Oracle, maps:get(fee, Tx))
-    andalso valid_fee(Height, Tx)
+    andalso valid_fee(S, Tx)
     andalso oracle_ttl(S, Oracle) >= Height.
 
 extend_oracle_tx(S, [Sender, Tx]) ->
@@ -156,7 +157,7 @@ extend_oracle_features(S, Args, Res) ->
 query_oracle_pre(S) ->
      maps:is_key(accounts, S).
 
-query_oracle_args(#{height := Height} = S) ->
+query_oracle_args(#{protocol := Protocol} = S) ->
      ?LET({Sender, Oracle},
           {txs_spend_eqc:gen_account_key(1, 49, S), gen_oracle_account(1, 49, S)},
           begin
@@ -172,7 +173,7 @@ query_oracle_args(#{height := Height} = S) ->
                  query_fee => gen_query_fee(QueryFee),
                  query_ttl => weighted_default({10, {delta, choose(1,5)}}, {1, {block, choose(0,1000)}}),
                  response_ttl =>  {delta, choose(1,5)},  %% Always relavtive (function clause if not
-                 fee => gen_fee(Height),
+                 fee => gen_fee(Protocol),
                  nonce => gen_nonce()
                 }]
           end).
@@ -185,7 +186,7 @@ query_oracle_valid(S = #{height := Height}, [Sender, Oracle, _SymId, Tx]) ->
     andalso is_oracle(S, Oracle)
     andalso maps:get(nonce, Tx) == good
     andalso check_balance(S, Sender, maps:get(fee, Tx) + maps:get(query_fee, Tx))
-    andalso valid_fee(Height, Tx)
+    andalso valid_fee(S, Tx)
     andalso valid_ttl(Height, maps:get(query_ttl, Tx))
     andalso valid_ttl(Height, maps:get(response_ttl, Tx))
     andalso oracle_query_fee(S, Oracle) =< maps:get(query_fee, Tx)
@@ -228,13 +229,13 @@ query_oracle_features(S, [_Sender, _Oracle, _SymId, Tx] = Args, Res) ->
 response_oracle_pre(S) ->
      maps:is_key(queries, S).
 
-response_oracle_args(#{height := Height} = S) ->
+response_oracle_args(#{protocol := Protocol} = S) ->
      ?LET(QueryId, choose(1, length(maps:get(queries, S, [])) + 1),
           [QueryId, resolve_query_id(S, QueryId, {elements(maps:keys(maps:get(keys, S))), nat(), elements(maps:keys(maps:get(keys, S)))}),
            #{
              response => weighted_default({9, <<"yes, you can">>}, {1, utf8()}),
              response_ttl => gen_query_response_ttl(S, QueryId),
-             fee => gen_fee(Height),
+             fee => gen_fee(Protocol),
              nonce => gen_nonce()
             }]).
 
@@ -252,7 +253,7 @@ response_oracle_valid(S = #{height := Height}, [QueryId, FakeId, Tx]) ->
     andalso is_oracle(S, Oracle)
     andalso maps:get(nonce, Tx) == good
     andalso check_balance(S, Oracle,  maps:get(fee, Tx))
-    andalso valid_fee(Height, Tx)
+    andalso valid_fee(S, Tx)
     andalso is_query(S, QueryId)
     andalso query_query_ttl(S, QueryId) >= Height
     andalso query_response_ttl(S, QueryId) == maps:get(response_ttl, Tx)
@@ -360,9 +361,6 @@ remove(Tag, X, I, S) ->
 %% --- local helpers ------
 
 
-is_account(S, Key) ->
-    txs_spend_eqc:is_account(S, Key).
-
 reserve_fee(Fee, S) ->
     txs_spend_eqc:reserve_fee(Fee, S).
 
@@ -416,9 +414,6 @@ is_expired_query(S, QueryId) ->
         Query -> Query#query.expired
     end.
 
-valid_fee(H, #{ fee := Fee }) ->
-    Fee >= 20000 * tx_utils:minimum_gas_price(H).   %% not precise, but we don't generate fees in the shady range
-
 valid_ttl(Height, {block, H}) ->
     H > Height;
 valid_ttl(_, {delta, _}) ->
@@ -441,11 +436,6 @@ gen_non_oracle_account(New, Existing, #{oracles := Os} = S) ->
     %% remove Oracles from accounts before searching
     Keys =  txs_spend_eqc:account_keys(S) -- [ O#oracle.id || O <- Os],
     oneof(Keys ++ [txs_spend_eqc:gen_account_key(New, Existing, S)]).
-
-gen_fee(H) ->
-    frequency([{29, ?LET(F, choose(20000, 30000), F * tx_utils:minimum_gas_price(H))},
-                {1,  ?LET(F, choose(0, 15000), F)},   %%  too low (and very low for hard fork)
-                {1,  ?LET(F, choose(0, 15000), F * tx_utils:minimum_gas_price(H))}]).    %% too low
 
 gen_query_fee() ->
     choose(10, 1000).
