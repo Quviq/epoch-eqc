@@ -56,7 +56,7 @@ spend_args(#{protocol := Protocol} = S) ->
               {name, Name} ->
                 aeser_id:create(name, aens_hash:name_hash(Name))
             end,
-          amount => gen_spend_amount(account(S, Sender)),
+          amount => gen_spend_amount(S, Sender),
           fee => gen_fee(Protocol),
           nonce => gen_nonce(),
           payload => utf8()}]).
@@ -69,7 +69,7 @@ spend_valid(S, [Sender, {ReceiverTag, Receiver}, Tx]) ->
     andalso case ReceiverTag of
               account -> true;
               oracle -> true; %% an account is generated if oracle does not exsists
-              contract -> true;
+              contract -> txs_contracts_eqc:is_payable_contract(S, Receiver);
               name     -> maps:is_key(Receiver, maps:get(named_accounts, S, #{}))
             end.
 
@@ -218,7 +218,10 @@ gen_account_key(New, Exist, #{accounts := Accounts, keys := Keys}) ->
 gen_nonce() ->
   weighted_default({49, good}, {1, {bad, elements([-1, 1, -5, 5, 10000])}}).
 
-gen_spend_amount(false) ->
-  choose(0, 10000000);
-gen_spend_amount(#account{ amount = X }) ->
-  weighted_default({49, round(X / 5)}, {1, choose(0, 10000000)}).
+gen_spend_amount(S, Key) ->
+  case account(S, Key) of
+    false ->
+      choose(0, 10000000);
+    Account ->
+      weighted_default({49, round(Account#account.amount / 5)}, {1, choose(0, 10000000)})
+  end.

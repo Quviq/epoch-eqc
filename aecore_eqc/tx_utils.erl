@@ -5,6 +5,15 @@
 
 -define(LIMA, false).
 
+-define(ABI_AEVM_1, 1).
+-define(ABI_FATE_1, 3).
+
+-define(ROMA_PROTOCOL_VSN,    1).
+-define(MINERVA_PROTOCOL_VSN, 2).
+-define(FORTUNA_PROTOCOL_VSN, 3).
+-define(LIMA_PROTOCOL_VSN,    4).
+-define(IRIS_PROTOCOL_VSN,    5).
+
 %% Governance API
 protocol_at_height(HardForks, Height) ->
     lists:last([ P || {P, H} <- maps:to_list(HardForks), H =< Height]).
@@ -38,11 +47,11 @@ pre_transformations(HardForks, Trees, Height) ->
 %% Utility
 
 protocol_name(P)  ->
-    maps:get(P, #{1 => roma,
-                  2 => minerva,
-                  3 => fortuna,
-                  4 => lima,
-                  5 => iris
+    maps:get(P, #{?ROMA_PROTOCOL_VSN => roma,
+                  ?MINERVA_PROTOCOL_VSN => minerva,
+                  ?FORTUNA_PROTOCOL_VSN => fortuna,
+                  ?LIMA_PROTOCOL_VSN => lima,
+                  ?IRIS_PROTOCOL_VSN => iris
                   %% Add additional names here
                  }).
 
@@ -65,3 +74,7 @@ gen_fee_above(Protocol, Amount) ->
     frequency([{29, ?LET(F, choose(Amount, Amount + 10000), F * minimum_gas_price(Protocol))},
                {1,  ?LET(F, choose(0, Amount - 5000), F)},   %%  too low (and very low for hard fork)
                {1,  ?LET(F, choose(0, Amount - 5000), F * minimum_gas_price(Protocol))}]).    %% too low
+
+
+gen_nonce() ->
+    weighted_default({49, good}, {1, {bad, elements([-1, 1, -5, 5, 10000])}}).

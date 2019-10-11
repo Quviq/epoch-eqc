@@ -13,8 +13,9 @@
 
 -compile([export_all, nowarn_export_all]).
 
--import(tx_utils, [gen_fee/1]).
--import(txs_spend_eqc, [is_account/2]).
+-import(tx_utils, [gen_fee/1, gen_nonce/0]).
+-import(txs_spend_eqc, [is_account/2, update_nonce/3,
+                        reserve_fee/2, bump_and_charge/3, check_balance/3, credit/3]).
 
 -define(NAMEFRAGS, ["foo", "longer-name",
                     "31-bytes-minimum-as-auctionname",
@@ -437,11 +438,6 @@ weight(S, ns_transfer) ->
 
 weight(_S, _) -> 0.
 
-%% -- Transactions modifiers
-
-update_nonce(S, Sender, Tx) ->
-  txs_spend_eqc:update_nonce(S, Sender,Tx).
-
 
 %% -- State update and query functions ---------------------------------------
 expired_preclaims(S, Height) ->
@@ -511,18 +507,6 @@ resolve_account(S, {name, Name}) ->
   maps:get(Name, maps:get(named_accounts, S, #{}), false);
 resolve_account(_S, {account, Key}) ->
   Key.
-
-reserve_fee(Fee, S) ->
-  txs_spend_eqc:reserve_fee(Fee, S).
-
-bump_and_charge(Key, Fee, S) ->
-  txs_spend_eqc:bump_and_charge(Key, Fee, S).
-
-credit(Key, Amount, S) ->
-  txs_spend_eqc:credit(Key, Amount, S).
-
-check_balance(S, Sender, Amount) ->
-  txs_spend_eqc:check_balance(S, Sender, Amount).
 
 new_name_and_salt(Ps, Name, Salt) ->
   [ P || P = #preclaim{name = Na, salt = Sa} <- Ps,
@@ -619,8 +603,6 @@ gen_subname() ->
 
 gen_salt() -> choose(270, 280).
 
-gen_nonce() ->
-  weighted_default({49, good}, {1, {bad, elements([-1, 1, -5, 5, 10000])}}).
 
 gen_account(New, Existing, S) ->
   txs_spend_eqc:gen_account_key(New, Existing, S).

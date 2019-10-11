@@ -124,7 +124,7 @@ propsetup(Forks, Prop) ->
     fun() ->
             _ = application:load(aecore),
             application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
-            %% compile_contracts(),
+            [ txs_contracts_eqc:compile_contracts() || lists:member(txs_contracts_eqc, models(Forks)) ],
             HardForksTeardown = setup_hard_forks(Forks),
             DataDirTeardown = setup_data_dir(),
             fun() ->
