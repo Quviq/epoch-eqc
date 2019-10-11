@@ -3,7 +3,7 @@
 -include_lib("eqc/include/eqc.hrl").
 -compile([export_all, nowarn_export_all]).
 
--define(LIMA, true).
+-define(LIMA, false).
 
 %% Governance API
 protocol_at_height(HardForks, Height) ->
@@ -27,12 +27,12 @@ minimum_gas_price(Protocol) ->
 %% Apply operations on all trees being at Height going to Height + 1
 %% If we bump protocol, we need to updtae the trees with additional accounts and contracts
 %% Only when Height + 1 is in different protocol
-pre_transformations(HardForks, Trees, Height) when ?LIMA ->
+pre_transformations(_HardForks, Trees, Height) when ?LIMA ->
     TxEnv = aetx_env:tx_env(Height),
     aec_trees:perform_pre_transformations(Trees, TxEnv);
 pre_transformations(HardForks, Trees, Height) ->
     Protocol = protocol_at_height(HardForks, Height),
-    TxEnv = aetx_env:tx_env(Height + 1),
+    TxEnv = aetx_env:tx_env(Height),
     aec_trees:perform_pre_transformations(Trees, TxEnv, Protocol).
 
 %% Utility
