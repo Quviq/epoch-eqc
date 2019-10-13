@@ -206,12 +206,12 @@ contract_call_args(#{protocol := Protocol, contracts := Contracts} = S) ->
                  }]
                 end ))).
 
-contract_call_pre(S, [_Sender, {CTag, C}, Tx]) ->
-    #{abi_version := ABI, call_data := {F, _, UseGas0, _}} = Tx,
-    C0 = lists:keyfind(C#contract.id, #contract.id, maps:get(contracts, S)),
-        (CTag == invalid orelse ((C0 /= false andalso C0#contract.name == C#contract.name
-                                              andalso C0#contract.vm == C#contract.vm)
-                                 andalso UseGas0 == contract_gas(C#contract.name, F, ABI, maps:get(protocol, S)))).
+%% contract_call_pre(S, [_Sender, {CTag, C}, Tx]) ->
+%%     #{abi_version := ABI, call_data := {F, _, UseGas0, _}} = Tx,
+%%     C0 = lists:keyfind(C#contract.id, #contract.id, maps:get(contracts, S)),
+%%         (CTag == invalid orelse ((C0 /= false andalso C0#contract.name == C#contract.name
+%%                                               andalso C0#contract.vm == C#contract.vm))).
+                             %%    andalso UseGas0 == contract_gas(C#contract.name, F, ABI, maps:get(protocol, S)))).
 
 contract_call_valid(S, [Sender, {ContractTag, Contract}, Tx]) ->
     is_account(S, Sender)
