@@ -17,8 +17,8 @@
 -include_lib("eqc/include/eqc_statem.hrl").
 
 -compile([export_all, nowarn_export_all]).
--define(PatronAmount, 100000000000001).  %% read from file
--define(NAMEFRAGS, ["foo", "bar", "baz"]).
+-define(PatronAmount, 10000000000000000000001).  %% read from file
+-define(NAMEFRAGS, ["aaa", "bbbbbb", "cccccccccc", "ddddddddddddddd", "eeeeeeeeee", "ffffffffffffffffffffffff"]).
 
 -define(SOPHIA_ROMA,      1).
 -define(SOPHIA_MINERVA,   2).
@@ -34,22 +34,25 @@
 -define(FORTUNA_PROTOCOL_VSN, 3).
 -define(LIMA_PROTOCOL_VSN,    4).
 
--record(account, {key, amount, nonce, names_owned = []}).
--record(preclaim,{name, salt, height, claimer, protocol}).
--record(claim,{name, height, expires_by, protected_height,  claimer, protocol}).
--record(query, {sender, id, fee, response_ttl, query_ttl}).
--record(oracle, {id, qfee, oracle_ttl}).
--record(channel, {id, round = 1, amount = 0, reserve = 0, trees, closed = false, lock_period}).
+-record(account,  {key, amount, nonce, names_owned = []}).
+-record(preclaim, {name, salt, height, claimer}).
+-record(auction,  {name, last_bid, claimer, ttl}).
+-record(name,     {name, height, expires_by, protected_height, owner, pointers}).
+-record(query,    {sender, id, fee, response_ttl, query_ttl}).
+-record(oracle,   {id, qfee, oracle_ttl}).
+-record(channel,  {id, round = 1, amount = 0, reserve = 0, trees, closed = false, lock_period}).
 -record(contract, {name, id, amount, deposit, vm, abi, compiler_version, protocol, src, functions}).
 
 %% -- State and state functions ----------------------------------------------
 initial_state() ->
-    #{claims => [], preclaims => [], oracles => [], fees => [],
+    #{names => [], oracles => [], fees => [],
       contracts => [], gaccounts => [], keys => #{}}.
 
 initial_state(HardForks) ->
     maps:put(hard_forks, HardForks, initial_state()).
 
+%% initial_state(Contracts) ->
+%%     maps:put(compiled_contracts, Contracts, initial_state()).
 
 patron() ->
     #{ public := Pubkey, secret := Privkey } =
@@ -186,9 +189,12 @@ mine_features(S, [H], Res) ->
 expired_queries(S, Height) ->
     [ Q || Q <- maps:get(queries, S, []), Q#query.response_ttl =< Height ].
 
-expired_claims(S, Height) ->
-    [ C || C <- maps:get(claims, S, []),
-           C#claim.expires_by + aec_governance:name_protection_period() =< Height ].
+expired_auctions(S, Height) ->
+    [ A || A <- get_auctions(S), A#auction.ttl =< Height ].
+
+expired_names(S, Height) ->
+    [ C || C <- get_names(S),
+           C#name.expires_by + aec_governance:name_protection_period() =< Height ].
 
 expired_solo_close(S, Height) ->
     [ C || C <- maps:get(channels, S, []),
@@ -219,9 +225,10 @@ multi_mine(Height, Blocks) ->
     ok.
 
 multi_mine_next(#{height := Height, accounts := Accounts} = S, _Value, [_H, Blocks]) ->
-    ExpiredQs = expired_queries(S, Height + Blocks - 1),
-    ExpiredClaims = expired_claims(S, Height + Blocks - 1),
-    ExpiredNames = [ C#claim.name || C <- ExpiredClaims ],
+    ExpiredQs       = expired_queries(S, Height + Blocks - 1),
+    ExpiredAuctions = expired_auctions(S, Height + Blocks - 1),
+    ExpiredNames    = expired_names(S, Height + Blocks - 1),
+    NewNames        = [ auction_to_name(A) || A <- ExpiredAuctions ],
     Accounts1 = lists:foldl(
         fun(Q, As) -> case lists:keyfind(Q#query.sender, #account.key, As) of
                         false -> As;
@@ -232,13 +239,18 @@ multi_mine_next(#{height := Height, accounts := Accounts} = S, _Value, [_H, Bloc
     S#{height   => Height + Blocks,
        accounts => Accounts1,
        queries  => maps:get(queries, S, []) -- ExpiredQs,
-       claims => maps:get(claims, S, []) -- ExpiredClaims,
+       names    => (maps:get(names, S, []) -- (ExpiredAuctions ++ ExpiredNames)) ++ NewNames,
        named_accounts =>
-           maps:without(ExpiredNames, maps:get(named_accounts, S, #{}))
+           maps:without([ C#name.name || C <- ExpiredNames ], maps:get(named_accounts, S, #{}))
       }.
 
+auction_to_name(#auction{ name = Name, claimer = Claimer, ttl = Height }) ->
+    #name{ name = Name, owner = Claimer, height = Height,
+           expires_by = Height + aec_governance:name_claim_max_expiration(),
+           pointers = #{} }.
+
 multi_mine_features(S, [H, B], _Res) ->
-    [{mine, name_expired} || expired_claims(S, H+B-1) =/= [] ] ++
+    %% [{mine, name_expired} || expired_claims(S, H+B-1) =/= [] ] ++
     [{mine, solo_close_unlocked} || expired_solo_close(S, H+B) =/= [] ] ++
     [{mine, response_ttl} || expired_queries(S, H+B) =/= [] ] ++
     [multi_mine].
@@ -1165,7 +1177,7 @@ ns_preclaim_pre(S) ->
 
 ns_preclaim_args(#{height := Height} = S) ->
      ?LET([{SenderTag, Sender}, Name, Salt],
-          [gen_account(1, 49, S), gen_name(), gen_salt()],
+          [gen_account(1, 49, S), gen_name(S), gen_salt()],
           [Height, {SenderTag, Sender#account.key}, {Name, Salt},
            #{account_id => aeser_id:create(account, Sender#account.key),
              fee => gen_fee(S),
@@ -1176,7 +1188,7 @@ ns_preclaim_args(#{height := Height} = S) ->
 
 ns_preclaim_pre(S, [Height, {_, Sender}, {Name, Salt}, Tx]) ->
     %% Let us not test the unlikely case that someone provides the same name with the same salt
-    [present || #preclaim{name = N, salt = St} <- maps:get(preclaims, S, []), N == Name, St == Salt] == []
+    [present || #preclaim{name = N, salt = St} <- get_preclaims(S), N == Name, St == Salt] == []
         andalso aeser_id:create(commitment, aens_hash:commitment_hash(Name, Salt)) == maps:get(commitment_id, Tx)
         andalso correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
 
@@ -1199,14 +1211,8 @@ ns_preclaim_next(#{height := Height} = S, _, [_Height, {_, Sender}, {Name, Salt}
         false -> S;
         true  ->
             #{ fee := Fee } = Tx,
-            Preclaim = #preclaim{name    = Name,
-                                 salt    = Salt,
-                                 height  = Height,
-                                 claimer = Sender,
-				 protocol = aec_hard_forks:protocol_effective_at_height(Height)},
-            reserve_fee(Fee,
-            bump_and_charge(Sender, Fee,
-                add(preclaims, Preclaim, S)))
+            Preclaim = #preclaim{name = Name, salt = Salt, height = Height, claimer = Sender},
+            reserve_fee(Fee, bump_and_charge(Sender, Fee, add(names, Preclaim, S)))
     end.
 
 ns_preclaim_features(S, [_Height, {_, _Sender}, {_Name,_Salt}, _Tx] = Args, Res) ->
@@ -1214,18 +1220,18 @@ ns_preclaim_features(S, [_Height, {_, _Sender}, {_Name,_Salt}, _Tx] = Args, Res)
     [{correct, if Correct -> ns_preclaim; true -> false end},
      {ns_preclaim, Res} ].
 
-
 %% --- Operation: claim ---
 ns_claim_pre(S) ->
-    maps:is_key(accounts, S) andalso maps:get(preclaims, S, []) /= [].
+    maps:is_key(accounts, S) andalso get_preclaims(S) /= [].
 
 %% @doc ns_claim_args - Argument generator
 ns_claim_args(S = #{height := Height}) ->
-     ?LET({Name, Salt, {SenderTag, Sender}}, gen_preclaim(S),
+     ?LET({Name, Salt, {SenderTag, Sender}}, gen_claim(S),
           [Height, {SenderTag, Sender#account.key},
            #{account_id => aeser_id:create(account, Sender#account.key),
              name => Name,
              name_salt => Salt,
+             name_fee => gen_name_fee(S, Name, Salt /= 0),
              fee => gen_fee(S),
              nonce => gen_nonce(Sender)}]).
 
@@ -1233,30 +1239,46 @@ ns_claim_args(S = #{height := Height}) ->
 ns_claim_pre(S, [Height, {_STag, Sender}, Tx]) ->
     correct_height(S, Height) andalso valid_nonce(S, Sender, Tx).
 
-ns_claim_valid(S, [Height, {_, Sender}, Tx]) ->
+ns_claim_valid(S, [Height, {_, Sender}, Tx = #{name_fee := NFee}]) ->
     is_account(S, Sender)
     andalso correct_nonce(S, Sender, Tx)
-    andalso check_balance(S, Sender, maps:get(fee, Tx) + aec_governance:name_claim_locked_fee())
+    andalso check_balance(S, Sender, maps:get(fee, Tx) + name_fee(NFee))
     andalso valid_fee(S, Tx)
-    andalso is_valid_preclaim(S, Tx, Sender, Height).
+    andalso valid_name_fee(S, Tx)
+    andalso (is_valid_preclaim(S, Tx, Sender, Height)
+             orelse is_valid_auction(S, Tx, Height)).
 
-is_valid_preclaim(S = #{preclaims := Ps}, Tx = #{name := Name, name_salt := Salt}, Claimer, Height) ->
-    case [ PC || PC = #preclaim{name = N, salt = Sa, claimer = C} <- Ps,
+is_valid_preclaim(S, Tx = #{name := Name, name_salt := Salt}, Claimer, Height) ->
+    case [ PC || PC = #preclaim{name = N, salt = Sa, claimer = C} <- get_preclaims(S),
                  Name == N, Salt == Sa, Claimer == C ] of
         [] -> false;
         [#preclaim{ height = H }] ->
             H + aec_governance:name_claim_preclaim_delta() =< Height
-            andalso Height < H +  aec_governance:name_preclaim_expiration()
-            andalso valid_name(Tx)
+            andalso Height =< H + aec_governance:name_preclaim_expiration()
+            andalso valid_name(S, Tx)
             andalso not is_claimed(S, Name)
     end.
 
+is_valid_auction(S, #{name := Name, name_fee := NFee}, Height) ->
+    case get_auction(Name, S) of
+        false -> false;
+        #auction{ ttl = TTL, last_bid = LB } ->
+            TTL >= Height andalso NFee >= LB + (5 * (LB div 100))
+    end.
+
 % names may not have dots in between, only at the end (.test)
-valid_name(Tx) ->
+valid_name(S, Tx) ->
+    P = protocol_at_state(S),
     case string:lexemes(maps:get(name,Tx), ".") of
-        [_, <<"test">>] -> true;
+        [_, <<"test">>] -> P < ?LIMA_PROTOCOL_VSN;
+        [_, <<"aet">>]  -> P >= ?LIMA_PROTOCOL_VSN;
         _ -> false
     end.
+
+valid_name_fee(S, #{ name := Name, name_fee := NFee }) ->
+    P = protocol_at_state(S),
+    (P < ?LIMA_PROTOCOL_VSN andalso NFee == prelima)
+    orelse (P >= ?LIMA_PROTOCOL_VSN andalso is_integer(NFee) andalso NFee >= name_claim_fee(Name, P)).
 
 ns_claim_adapt(#{height := Height} = S, [_Height, {SenderTag, Sender}, Tx]) ->
     [Height, {SenderTag, Sender}, adapt_nonce(S, Sender, Tx)];
@@ -1266,30 +1288,46 @@ ns_claim_adapt(_, _) ->
 ns_claim(Height, _Sender, Tx) ->
     apply_transaction(Height, aens_claim_tx, Tx).
 
-ns_claim_next(#{height := Height} = S, _, [_Height, {_, Sender}, Tx] = Args) ->
+ns_claim_next(#{height := Height} = S, _, [_, {_, Sender}, #{ name_salt := N } = Tx] = Args) ->
     case ns_claim_valid(S, Args) of
         false -> S;
-        true  ->
-            #{ fee := Fee, name := Name } = Tx,
-            Claim = #claim{ name         = Name,
-                            height       = Height,
-                            expires_by   = Height + aec_governance:name_claim_max_expiration(),
-                            claimer      = Sender,
-			    protocol = aec_hard_forks:protocol_effective_at_height(Height) },
-            remove_preclaim(Tx,
-            reserve_fee(Fee,
-            bump_and_charge(Sender, Fee + aec_governance:name_claim_locked_fee(),
-                add(claims, Claim, S))))
+        true ->
+            P = protocol_at_state(S),
+            #{ fee := Fee, name := Name, name_fee := NFee } = Tx,
+            case name_claim_bid_timeout(Name, P) of
+                0 ->
+                    Claim = #name{ name       = Name,
+                                   height     = Height,
+                                   expires_by = Height + aec_governance:name_claim_max_expiration(),
+                                   owner      = Sender,
+                                   pointers   = #{} },
+                    remove_preclaim(Tx, reserve_fee(Fee,
+                        bump_and_charge(Sender, Fee + name_fee(NFee), add(names, Claim, S))));
+                TTL when N > 0 -> %% First bid
+                    Claim = #auction{ name     = Name,
+                                      last_bid = NFee,
+                                      ttl      = Height + TTL,
+                                      claimer  = Sender },
+                    remove_preclaim(Tx, reserve_fee(Fee,
+                        bump_and_charge(Sender, Fee + name_fee(NFee), add(names, Claim, S))));
+                TTL ->
+                    Auction0 = get_auction(Name, S),
+                    Auction1 = #auction{ name     = Name,
+                                         last_bid = NFee,
+                                         ttl      = Height + TTL,
+                                         claimer  = Sender },
+                    reserve_fee(Fee, bump_and_charge(Sender, Fee + name_fee(NFee),
+                        credit(Auction0#auction.claimer, Auction0#auction.last_bid, update_auction(Auction1, S))))
+            end
     end.
 
-ns_claim_features(S, [Height, {_, _Sender}, Tx] = Args, Res) ->
+name_fee(prelima) -> aec_governance:name_claim_locked_fee();
+name_fee(NFee) when is_integer(NFee) -> NFee.
+
+ns_claim_features(S, [_Height, {_, _Sender}, _Tx] = Args, Res) ->
     Correct = ns_claim_valid(S, Args),
     [{correct, if Correct -> ns_claim; true -> false end},
-     {ns_claim, Res}] ++
-  	[ {protocol, ns_claim,
- 	   aec_hard_forks:protocol_effective_at_height(Height) -
-	       get_preclaim_protocol(Tx,S)} ||
- 	    Correct ].
+     {ns_claim, Res}].
 
 %% --- Operation: claim_update ---
 ns_update_pre(S) ->
@@ -1297,7 +1335,7 @@ ns_update_pre(S) ->
 
 ns_update_args(#{height := Height} = S) ->
      ?LET({{Name, {SenderTag, Sender}}, Pointers},
-          {gen_name_claim(S), gen_pointers(S)},
+          {gen_name_and_sender(S), gen_pointers(S)},
           [Height, Name, {SenderTag, Sender#account.key}, Pointers,
            #{account_id => aeser_id:create(account, Sender#account.key),
              name_id => aeser_id:create(name, aens_hash:name_hash(Name)),
@@ -1353,21 +1391,21 @@ ns_update_next(S, _, [Height, Name, {_, Sender}, Pointers, Tx] = Args) ->
                  end,
             reserve_fee(Fee,
             bump_and_charge(Sender, Fee,
-                update_claim_height(Name, Height, TTL, S1)))
+                update_name_height(Name, Height, TTL, S1)))
     end.
 
-ns_update_features(S, [_Height, _Name, _Sender, Pointers, _Tx] = Args, Res) ->
+ns_update_features(S, [_Height, _Name, _Sender, _Pointers, _Tx] = Args, Res) ->
     Correct = ns_update_valid(S, Args),
     [{correct, if Correct -> ns_update; true -> false end},
-     {ns_update, Res}] ++
-        [{ns_update, [ Kind || {Kind, _} <- Pointers]}].
+     {ns_update, Res}].
+        %[{ns_update, [ Kind || {Kind, _} <- Pointers]}].
 
 %% --- Operation: ns_revoke ---
 ns_revoke_pre(S) ->
     maps:is_key(accounts, S).
 
 ns_revoke_args(#{height := Height} = S) ->
-     ?LET({Name, {SenderTag, Sender}}, gen_name_claim(S),
+     ?LET({Name, {SenderTag, Sender}}, gen_name_and_sender(S),
           [Height, {SenderTag, Sender#account.key}, Name,
            #{account_id => aeser_id:create(account, Sender#account.key),
              name_id => aeser_id:create(name, aens_hash:name_hash(Name)),
@@ -1406,15 +1444,10 @@ ns_revoke_next(S, _Value, [Height, {_SenderTag, Sender}, Name, Tx] = Args) ->
                 revoke_claim(Name, Height, S))))
     end.
 
-ns_revoke_features(S, [Height, {_SenderTag, Sender}, Name, _Tx] = Args, Res) ->
+ns_revoke_features(S, [_Height, {_SenderTag, _Sender}, _Name, _Tx] = Args, Res) ->
     Correct = ns_revoke_valid(S, Args),
     [{correct, if Correct -> ns_revoke; true -> false end},
-     {ns_revoke, Res}] ++
-  	[ {protocol, ns_revoke,
- 	   aec_hard_forks:protocol_effective_at_height(Height) -
-	       get_claim_protocol({Name, Sender}, S)} ||
- 	    Correct
-	].
+     {ns_revoke, Res}].
 
 
 %% --- Operation: ns_transfer ---
@@ -1423,7 +1456,7 @@ ns_transfer_pre(S) ->
 
 ns_transfer_args(#{height := Height} = S) ->
     ?LET({{Name, {SenderTag, Sender}}, {ReceiverTag, Receiver}},
-         {gen_name_claim(S), gen_account(1, 49, S)},
+         {gen_name_and_sender(S), gen_account(1, 49, S)},
          ?LET(To, oneof([account, {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++ [<<"ta.test">>])}]),
               [Height, {SenderTag, Sender#account.key},
                case To of
@@ -1722,7 +1755,7 @@ contract_call_features(S, [Height, {_, _Sender}, {_ContractTag, Contract}, Tx] =
 weight(_S, spend) -> 10;
 weight(S, newkey) -> max(1, 5 - maps:size(maps:get(keys, S)));
 weight(S, mine)  ->
-    case maps:get(preclaims, S, []) of
+    case maps:get(names, S, []) of
         [] -> 1;
         _  -> 20 end;
 weight(_S, multi_mine) -> 3;
@@ -1746,24 +1779,28 @@ weight(S, response_oracle)  ->
 weight(S, ns_preclaim) ->
     case maps:get(preclaims, S, []) of
         [] -> 10;
-        _  -> 3 end;
-weight(S, ns_claim)    ->
+        _  -> 2 end;
+weight(S, ns_claim) ->
     case good_preclaims(S) of
         [] -> 1;
         _  -> 10 end;
 weight(S, ns_update) ->
-    case maps:get(claims, S, []) of
+    case get_names(S) of
         [] -> 1;
         _  -> 9 end;
 weight(S, ns_revoke) ->
-    case maps:get(claims, S, []) of
+    case get_names(S) of
         [] -> 1;
         _  -> 3 end;
 weight(S, ns_transfer) ->
-    case maps:get(claims, S, []) of
+    case get_names(S) of
         [] -> 1;
         _  -> 5 end;
-weight(_S, channel_create) -> 5;
+weight(S, channel_create) ->
+    case maps:get(channels, S, []) of
+        [] -> 10;
+        _  -> 1
+    end;
 weight(S, channel_deposit) ->
     case maps:get(channels, S, []) of
         [] -> 0;
@@ -1789,8 +1826,11 @@ weight(S, channel_settle) ->
         [] -> 0;
         Hs -> 5 * (length([ He || He <- Hs, maps:get(height, S, 0) >= He ]) + 1)
     end;
-weight(_S, contract_create) ->
-    10;
+weight(S, contract_create) ->
+    case maps:get(contracts, S, []) of
+        [] -> 10;
+        _  -> 2
+    end;
 weight(S, contract_call) ->
     case maps:get(contracts, S, []) of
         [] -> 0;
@@ -1863,7 +1903,6 @@ aggregate_feats([Tag | Kinds], Features, Prop) ->
                                  end || Tuple <- Tuples ], aggregate_feats(Kinds, Rest, Prop)).
 
 %% -- State update and query functions ---------------------------------------
-
 lookup_name(S, Name) ->
     case lists:keyfind(account, 1, maps:get(Name, maps:get(named_accounts, S, #{}))) of
         {_, Key} -> Key;
@@ -1934,17 +1973,9 @@ on_oracle(Id, Fun, S = #{ oracles := Oracles }) ->
 remove_query(Id, S) ->
     remove(queries, Id, #query.id, S).
 
-remove_preclaim(#{name := Na, name_salt := Sa}, S = #{preclaims := Ps}) ->
-    S#{preclaims := [ P || P = #preclaim{name = Na0, salt = Sa0} <- Ps,
-                           Na0 /= Na orelse Sa0 /= Sa ]}.
-
-get_preclaim_protocol(#{name := Na, name_salt := Sa}, #{preclaims := Ps}) ->
-    hd([P#preclaim.protocol || P = #preclaim{name = Na0, salt = Sa0} <- Ps,
-	   Na0 == Na andalso Sa0 == Sa]).
-
-get_claim_protocol({Na, Sender}, #{claims := Cs}) ->
-    hd([C#claim.protocol || C = #claim{name = Na0, claimer = Sa0} <- Cs,
-	   Na0 == Na andalso Sa0 == Sender]).
+remove_preclaim(#{name := Na, name_salt := Sa}, S = #{ names := Ns }) ->
+    S#{names := Ns -- [ P || P = #preclaim{name = Na0, salt = Sa0} <- get_preclaims(S),
+                             Na0 == Na, Sa0 == Sa ]}.
 
 get(S, Tag, Key, I) ->
     lists:keyfind(Key, I, maps:get(Tag, S)).
@@ -1989,22 +2020,34 @@ close_channel(CId, {settle, Locked}, S) ->
 
 
 transfer_name(NewOwner, Name, S) ->
-    on_claim(Name, fun(C) -> C#claim{ claimer = NewOwner } end, S).
+    on_name(Name, fun(C) -> C#name{ owner = NewOwner } end, S).
 
-on_claim(Name, Fun, S = #{ claims := Claims }) ->
-    Upd = fun(C = #claim{ name = N }) when Name == N -> Fun(C);
+get_preclaims(#{ names := Ns }) ->
+    [ PC || PC = #preclaim{} <- Ns ].
+
+get_names(#{ names := Ns }) ->
+    [ A || A = #name{} <- Ns ].
+
+get_auctions(#{ names := Ns }) ->
+    [ A || A = #auction{} <- Ns ].
+
+get_auction(Name, S) ->
+    lists:keyfind(Name, #auction.name, get_auctions(S)).
+
+update_auction(A, S = #{ names := Ns }) ->
+    A0 = get_auction(A#auction.name, S),
+    S#{ names := (Ns -- [A0]) ++ [A] }.
+
+on_name(Name, Fun, S = #{ names := Claims }) ->
+    Upd = fun(C = #name{ name = N }) when Name == N -> Fun(C);
              (C) -> C end,
-    S#{ claims := lists:map(Upd, Claims) }.
+    S#{ names := lists:map(Upd, Claims) }.
 
-update_claim_height(Name, Height, TTL, S) ->
-    on_claim(Name, fun(C) -> C#claim{ expires_by = Height + TTL}
-                   end, S).
+update_name_height(Name, Height, TTL, S) ->
+    on_name(Name, fun(C) -> C#name{ expires_by = Height + TTL} end, S).
 
 revoke_claim(Name, Height, S) ->
-    on_claim(Name, fun(C) ->
-                        C#claim{ expires_by = Height - 1}
-                           %% trick, after a revoke, the name cannot be used any more on that height or heigher
-                    end, S).
+    on_name(Name, fun(C) -> C#name{ expires_by = Height - 1} end, S).
 
 remove_named_account(Name, S) ->
     S#{ named_accounts => maps:remove(Name, maps:get(named_accounts, S, #{})) }.
@@ -2014,28 +2057,28 @@ add_named_account(Name, Acc, S) ->
 
 %% --- local helpers ------
 
-is_valid_name(#{claims := Names}, Name, Height) ->
-    case lists:keyfind(Name, #claim.name, Names) of
+is_valid_name(S, Name, Height) ->
+    case lists:keyfind(Name, #name.name, get_names(S)) of
         false -> false;
-        Claim -> Height =< Claim#claim.expires_by
+        N     -> Height =< N#name.expires_by
     end.
 
-is_valid_name_account(#{claims := Names} = S, Name, Height) ->
-    case lists:keyfind(Name, #claim.name, Names) of
+is_valid_name_account(S, Name, Height) ->
+    case lists:keyfind(Name, #name.name, get_names(S)) of
         false -> false;
-        Claim ->
-            Height =< Claim#claim.expires_by andalso
+        N ->
+            Height =< N#name.expires_by andalso
                 case maps:get(Name, maps:get(named_accounts, S, #{}), undefined) of
                     undefined -> false;
                     Pointers -> lists:keyfind(account, 1, Pointers) /= false
                 end
     end.
 
-owns_name(#{claims := Names, height := Height}, Who, Name) ->
-    case lists:keyfind(Name, #claim.name, Names) of
+owns_name(S = #{height := Height}, Who, Name) ->
+    case lists:keyfind(Name, #name.name, get_names(S)) of
         false -> false;
-        Claim -> Claim#claim.claimer == Who
-                 andalso Claim#claim.expires_by >= Height
+        N     -> N#name.owner == Who
+                  andalso N#name.expires_by >= Height
     end.
 
 correct_name_id(Name, NameId) ->
@@ -2165,14 +2208,16 @@ correct_round(S, CId, #{round := Round}) ->
     (channel(S, CId))#channel.closed == false andalso
     (channel(S, CId))#channel.round < Round.
 
-is_claimed(#{claims := Cs}, Name) ->
-    lists:keymember(Name, #claim.name, Cs).
+is_claimed(S, Name) ->
+    lists:keymember(Name, #name.name, get_names(S))
+    orelse lists:keymember(Name, #auction.name, get_auctions(S)).
 
 non_oracle_accounts(#{accounts := As, oracles := Os}) ->
     [ A || A = #account{ key = K } <- As, not lists:keymember(K, 1, Os) ].
 
-good_preclaims(#{ preclaims := Ps, height := H}) ->
-    [ P || P = #preclaim{ height = H0 } <- Ps, H0 < H ].
+good_preclaims(S = #{ height := H}) ->
+    [ P || P = #preclaim{ height = H0 } <- get_preclaims(S), H0 < H ] ++
+    get_auctions(S).
 
 correct_height(#{height := Height0}, Height1) ->
     Height0 == Height1.
@@ -2206,7 +2251,6 @@ apply_transaction(Height, TxMod, TxArgs) ->
                 _ ->
                     Env
             end,
-
 
     try aetx:process(Tx, Trees, Env2) of
         {ok, NewTrees, _NewEnv} ->
@@ -2277,28 +2321,35 @@ gen_new_oracle_account(S) ->
                              {1,  gen_account(1, 9, S)})
     end.
 
-gen_preclaim(#{preclaims := []} = S) ->
-    {gen_name(), gen_salt(), gen_account(1, 1, S)};
-gen_preclaim(#{preclaims := Ps, accounts := As} = S) ->
-    weighted_default(
-        {39, ?LET(#preclaim{name = N, salt = Salt, claimer = C}, elements(Ps),
-                  begin
-                    A = {existing, lists:keyfind(C, #account.key, As)},
-                    frequency([{1, {N, Salt+1, A}}, {1, {gen_name(), Salt, A}}, {37, {N, Salt, A}}])
-                  end)},
-        {1, {gen_name(), gen_salt(), gen_account(1, 1, S)}}).
+gen_claim(S = #{ accounts := As }) ->
+    case get_preclaims(S) ++ get_auctions(S) of
+        [] -> {gen_name(S), gen_salt(), gen_account(1, 1, S)};
+        Es ->
+            weighted_default(
+                {39, ?LET(E, elements(Es),
+                          begin
+                            {Name, Salt, Claimer} =
+                                case E of
+                                    #preclaim{name = N, salt = Sa, claimer = C} -> {N, Sa, C};
+                                    #auction{name = N, claimer = C}             -> {N, 0, C}
+                                end,
+                            A = {existing, lists:keyfind(Claimer, #account.key, As)},
+                            frequency([{1, {Name, Salt+1, A}}, {1, {gen_name(S), Salt, A}}, {98, {Name, Salt, A}}])
+                          end)},
+                {1, {gen_name(S), gen_salt(), gen_account(1, 1, S)}})
+    end.
 
-gen_name_claim(#{claims := []} = S) ->
-    {gen_name(), gen_account(1, 1, S)};
-gen_name_claim(#{claims := Cs, accounts := As} = S) ->
-    weighted_default(
-        {39, ?LET(#claim{name = N, claimer = C}, elements(Cs),
-                  begin
-                    A = {existing, lists:keyfind(C, #account.key, As)},
-                    frequency([{1, {gen_name(), A}}, {1, {N, gen_account(0, 1, S)}}, {38, {N, A}}])
-                  end)},
-        {1, {gen_name(), gen_account(1, 1, S)}}).
-
+gen_name_and_sender(S = #{ accounts := As }) ->
+    case get_names(S) of
+        [] -> {gen_name(S), gen_account(1, 1, S)};
+        Ns -> weighted_default(
+                {39, ?LET(#name{name = N, owner = C}, elements(Ns),
+                          begin
+                            A = {existing, lists:keyfind(C, #account.key, As)},
+                            frequency([{1, {gen_name(S), A}}, {1, {N, gen_account(0, 1, S)}}, {38, {N, A}}])
+                          end)},
+                {1, {gen_name(S), gen_account(1, 1, S)}})
+    end.
 
 unique_name(List) ->
     ?LET([W],
@@ -2316,14 +2367,17 @@ gen_spend_amount(#account{ amount = X }) when X == 0 ->
 gen_spend_amount(#account{ amount = X }) ->
     weighted_default({49, round(X / 5)}, {1, choose(0, 10000000)}).
 
-gen_name() ->
+gen_name(S) ->
+    ?LET(Reg, gen_registrar(S),
     ?LET(NFs, frequency([{1, non_empty(list(elements(?NAMEFRAGS)))},
                          {90, [elements(?NAMEFRAGS)]}]),
-    return(iolist_to_binary(lists:join(".", NFs ++ ["test"])))).
+         return(iolist_to_binary(lists:join(".", NFs ++ [Reg]))))).
 
-gen_name(S) ->
-    frequency([{90, elements(maps:keys(maps:get(names, S, #{})) ++ [<<"ta.test">>])},
-               {1, gen_name()}]).
+gen_registrar(S) ->
+    case protocol_at_state(S) of
+        P when P < ?LIMA_PROTOCOL_VSN -> weighted_default({49, "test"}, {1, "aet"});
+        _                             -> weighted_default({49, "aet"}, {1, "test"})
+    end.
 
 gen_state_channel_id(S) ->
     gen_state_channel_id(S, fun(_) -> true end).
@@ -2368,6 +2422,31 @@ gen_fee_above(S, Amount) ->
                {1,  ?LET(F, choose(0, Amount - 5000), F * minimum_gas_price(S))}]).    %% too low
 
 
+gen_name_fee(S, Name, FirstBid) ->
+    P = protocol_at_state(S),
+    case P < ?LIMA_PROTOCOL_VSN of
+        true  -> frequency([{99, prelima}, {1, choose(1, 1000000)}]);
+        false when FirstBid -> frequency([{99, name_claim_fee(Name, P)},
+                                          {1, prelima}]);
+        false ->
+            case get_auction(Name, S) of
+                #auction{ last_bid = LB } -> frequency([{98, LB + 6 * (LB div 100)}, {1, LB}, {1, prelima}]);
+                false -> name_claim_fee(Name, P)
+            end
+    end.
+
+name_claim_fee(Name, P) ->
+    try aec_governance:name_claim_fee(Name, P)
+    catch _:_ -> 1000000000000000 end.
+
+name_claim_bid_timeout(Name, P) ->
+    try aec_governance:name_claim_bid_timeout(Name, P)
+    catch _:_ -> 1000000000000000 end.
+
+name_length(Name) ->
+    {ok, AsciiName} = aens_utils:to_ascii(Name),
+    {ok, Domain} = aens_utils:name_domain(AsciiName),
+    size(AsciiName) - size(Domain) - 1.
 
 gen_query_fee() ->
     choose(10, 1000).
@@ -2494,10 +2573,10 @@ contract_gas(authorize_nonce, <<"nonce_correct">>, ?ABI_FATE_1, _) -> 108;
 contract_gas(_, _, _, _) -> 1000.
 
 contract_tx_fee(Type, Name, ABI) when is_atom(ABI) -> contract_tx_fee(Type, Name, abi_to_int(ABI));
-contract_tx_fee(create, identity, ?ABI_AEVM_1)        -> 75000 + 20 * 1187;
-contract_tx_fee(create, identity, ?ABI_FATE_1)        -> 75000 + 20 * 179;
-contract_tx_fee(create, authorize_nonce, ?ABI_AEVM_1) -> 75000 + 20 * 1363;
-contract_tx_fee(create, authorize_nonce, ?ABI_FATE_1) -> 75000 + 20 * 212;
+contract_tx_fee(create, identity, ?ABI_AEVM_1)        -> 75000 + 20 * 1200;
+contract_tx_fee(create, identity, ?ABI_FATE_1)        -> 75000 + 20 * 200;
+contract_tx_fee(create, authorize_nonce, ?ABI_AEVM_1) -> 75000 + 20 * 1400;
+contract_tx_fee(create, authorize_nonce, ?ABI_FATE_1) -> 75000 + 20 * 220;
 contract_tx_fee(call, identity, ?ABI_AEVM_1)          -> 450000 + 20 * 220;
 contract_tx_fee(call, identity, ?ABI_FATE_1)          -> 180000 + 20 * 100;
 contract_tx_fee(call, authorize_nonce, ?ABI_AEVM_1)   -> 450000 + 20 * 220;
