@@ -296,12 +296,6 @@ weight(_S, _) -> 0.
 free_accounts(S) ->
     length(maps:get(accounts, S)) - length(maps:get(oracles, S)).
 
-%% -- Transactions modifiers
-
-update_nonce(S, Sender, Tx) ->
-    txs_spend_eqc:update_nonce(S, Sender,Tx).
-
-
 %% -- State update and query functions ---------------------------------------
 
 expired_queries(S, Height) ->

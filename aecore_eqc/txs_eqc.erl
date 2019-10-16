@@ -3,10 +3,6 @@
 -include_lib("eqc/include/eqc.hrl").
 -include_lib("eqc/include/eqc_statem.hrl").
 -include("txs_eqc.hrl").
-%% -import(eqc_statem, [more_commands/2, run_commands/1, check_command_names/2,
-%%                      commands_length/1, call_features/1 ]).
-%% -import(eqc_merge_statem, [ pretty_commands/4  %% Overwrite with specific pretty_commands
-%%                     ]).
 
 -compile([export_all, nowarn_export_all]).
 
@@ -17,12 +13,13 @@ tx_models() ->
   %% , txs_contracts_eqc
   %% , txs_names_eqc
   %% , txs_oracles_eqc
-  , txs_ga_eqc
+  %% , txs_ga_eqc
   ].
 
 initial_state(HFs) ->
+  IS = #{fees => [], hard_forks => HFs},
   lists:foldl(fun(M, S) -> eqc_statem:apply(M, initial_state, [S]) end,
-              #{keys => #{}, fees => [], hard_forks => HFs}, tx_models()).
+              IS, tx_models()).
 
 patron() ->
   #{ public := Pubkey, secret := Privkey } =
@@ -40,7 +37,7 @@ patron() ->
 
 %% --- Operation: init ---
 init_pre(S) ->
-  not maps:is_key(accounts, S).
+  not maps:is_key(accounts, S) andalso not maps:is_key(keys, S).
 
 init_args(_S) ->
   [].
@@ -55,20 +52,27 @@ initial_trees() ->
 
 init_next(S, _Value, []) ->
   {PA, Secret, PAmount} = patron(),
-  S#{height   => 1, protocol => 1,
-     accounts => [#account{key = PA, amount = PAmount}],
-     keys => maps:put(PA, Secret, maps:get(keys, S))}.
+  Keys     = #{ key_0     => #key{ private = Secret, public = PA } },
+  Accounts = #{ account_0 => #account{ key = key_0, amount = PAmount } },
+  S#{height => 1, protocol => 1, accounts => Accounts, keys => Keys}.
 
 %% --- Operation: newkey ---
-newkey_args(_S) ->
-    #{ public := Pubkey, secret := Privkey } = enacl:sign_keypair(),
-    [Pubkey, Privkey].
+newkey_pre(S) ->
+  maps:is_key(keys, S).
+
+newkey_args(#{ keys := Keys }) ->
+  #{ public := Pubkey, secret := Privkey } = enacl:sign_keypair(),
+  [maps:size(Keys), {Pubkey, Privkey}].
 
 newkey(_, _) ->
-    ok.
+  ok.
 
-newkey_next(S = #{keys := Keys}, _Value, [Pubkey, Privkey]) ->
-    S#{keys => Keys#{Pubkey => Privkey}}.
+newkey_next(S, _Value, [Id, {Pubkey, Privkey}]) ->
+  add_key(S, Id, Pubkey, Privkey).
+
+add_key(S = #{keys := Keys}, Id, Pub, Priv) ->
+  KeyId = list_to_atom(lists:concat(["key_", Id])),
+  S#{ keys := Keys#{ KeyId => #key{public = Pub, private = Priv} } }.
 
 %% --- Operation: mine ---
 mine_pre(S) ->
@@ -114,6 +118,7 @@ tx_args(S) ->
   gen_tx(S).
 
 tx_pre(S, [M, Tx, TxData]) ->
+  is_consistent(S, TxData) andalso
   try apply(M, ?pre(Tx), [S, TxData])
   catch _:_ -> true end.
 
@@ -185,11 +190,11 @@ prop_txs(Forks) ->
         put(trees, undefined),
         {H, S, Res} = run_commands(Cmds),
         Height = maps:get(height, S, 0),
-        Accounts = maps:get(accounts, S, []),
+        Accounts = maps:get(accounts, S, #{}),
         check_command_names(Cmds,
             measure(length, commands_length(Cmds),
             measure(height, Height,
-            measure(accounts, length(Accounts),
+            measure(accounts, maps:size(Accounts),
             features(call_features(H),
             stats(call_features(H),
                   pretty_commands(?MODULE, Cmds, {H, S, Res}, Res == ok)))))))
@@ -205,6 +210,35 @@ aggregate_feats([Tag | Kinds], Features, Prop) ->
     aggregate(with_title(Tag), Tuples, aggregate_feats(Kinds, Rest, Prop)).
 
 %% --- Helper functions ---
+
+is_consistent(S, Tx) ->
+  Accs0   = maps:values(maps:get(accounts, S, #{})),
+  Sym     = get_symbolic(Tx),
+
+  KeyIds1 = [ A#account.key || A <- Accs0 ], %% Keys in accounts
+  KeyIds2 = [ K || ?KEY(K) <- Sym ],         %% Keys
+  KeyIds3 = [ K || {_, ?KEY(K)} <- Sym ],    %% Keys in new accounts
+  KeyIds  = KeyIds1 ++ KeyIds2 ++ KeyIds3,
+  Keys   = maps:get(keys, S, #{}),
+
+  AccIds = [ A || ?ACCOUNT(A) <- Sym ],
+  Accs   = maps:get(accounts, S, #{}),
+
+  %% io:format("is_consistent?\n~p ~p\n~p ~p\n~p ~p\n", [KeyIds, Keys, AccIds, Accs, KeyIds3, KeyIds1]),
+  lists:all(fun(K) -> maps:is_key(K, Keys) end, KeyIds)
+    andalso lists:all(fun(A) -> maps:is_key(A, Accs) end, AccIds)
+    andalso (KeyIds3 -- KeyIds1) == KeyIds3.
+
+get_symbolic(?KEY(X))      -> [?KEY(X)];
+get_symbolic({A, ?KEY(X)}) -> [{A, ?KEY(X)}];
+get_symbolic(?ACCOUNT(X))  -> [?ACCOUNT(X)];
+get_symbolic(X) when is_map(X) ->
+  get_symbolic(maps:to_list(X));
+get_symbolic(Xs) when is_list(Xs) ->
+  lists:flatmap(fun get_symbolic/1, Xs);
+get_symbolic(X) when is_tuple(X) ->
+  get_symbolic(tuple_to_list(X));
+get_symbolic(_) -> [].
 
 trees_with_accounts(Accounts) ->
     trees_with_accounts(Accounts, aec_trees:new_without_backend()).

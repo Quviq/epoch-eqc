@@ -14,8 +14,7 @@
 -compile([export_all, nowarn_export_all]).
 
 -include("txs_eqc.hrl").
--import(txs_spend_eqc, [is_account/2, update_nonce/3,
-                        reserve_fee/2, bump_and_charge/3, check_balance/3, credit/3]).
+-import(txs_spend_eqc, [is_account/2, reserve_fee/2, bump_and_charge/3, check_balance/3, credit/3]).
 
 -define(NAMEFRAGS, ["foo", "longer-name",
                     "31-bytes-minimum-as-auctionname",

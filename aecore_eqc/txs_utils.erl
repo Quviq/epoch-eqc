@@ -1,20 +1,14 @@
--module(tx_utils).
+-module(txs_utils).
 
 -include_lib("eqc/include/eqc.hrl").
 -include_lib("eqc/include/eqc_statem.hrl").
 
+-eqc_group_commands(false).
 -compile([export_all, nowarn_export_all]).
 
 -define(LIMA, false).
 
--define(ABI_AEVM_1, 1).
--define(ABI_FATE_1, 3).
-
--define(ROMA_PROTOCOL_VSN,    1).
--define(MINERVA_PROTOCOL_VSN, 2).
--define(FORTUNA_PROTOCOL_VSN, 3).
--define(LIMA_PROTOCOL_VSN,    4).
--define(IRIS_PROTOCOL_VSN,    5).
+-include("txs_data.hrl").
 
 %% Governance API
 protocol_at_height(HardForks, Height) ->
@@ -22,7 +16,6 @@ protocol_at_height(HardForks, Height) ->
 
 minimum_gas_price(HardForks, Height) ->
     aec_governance:minimum_gas_price(protocol_at_height(HardForks, Height)).
-
 
 %% in case of lima-rc, fall back to old definitions
 minimum_gas_price(Protocol) when ?LIMA ->
@@ -49,21 +42,19 @@ pre_transformations(HardForks, Trees, Height) ->
 %% Utility
 
 protocol_name(P)  ->
-    maps:get(P, #{?ROMA_PROTOCOL_VSN => roma,
+    maps:get(P, #{?ROMA_PROTOCOL_VSN    => roma,
                   ?MINERVA_PROTOCOL_VSN => minerva,
                   ?FORTUNA_PROTOCOL_VSN => fortuna,
-                  ?LIMA_PROTOCOL_VSN => lima,
-                  ?IRIS_PROTOCOL_VSN => iris
-                  %% Add additional names here
+                  ?LIMA_PROTOCOL_VSN    => lima,
+                  ?IRIS_PROTOCOL_VSN    => iris
                  }).
 
 %% State depending utility functions
 %% By making the functions depend on the state, we don't need to update
 %% the calling location, but just make sure we have enough info in state.
 
-
 valid_fee(#{protocol := P}, #{ fee := Fee }) ->
-    Fee >= 20000 * minimum_gas_price(P).   %% not precise, but we don't generate fees in the shady range
+    Fee >= 20000 * minimum_gas_price(P).   %% not precise, but we don't generate borderline fees
 
 %% Shared generators
 
@@ -94,6 +85,27 @@ gen_deposit() ->
 
 gen_account(New, Exist, S) ->
   txs_spend_eqc:gen_account_key(New, Exist, S).
+
+%% -- Transactions modifiers
+
+update_nonce(S, Sender, #{nonce := Nonce} = Tx) ->
+  case find_account(S, Sender) of
+    false ->
+      Tx#{nonce => 1};
+    Account ->
+      case Nonce of
+        good ->
+          Tx#{nonce => Account#account.nonce };
+        {bad, N} ->
+          Tx#{nonce => max(0, Account#account.nonce + N) }
+      end
+  end.
+
+find_account(S, ?ACCOUNT(A)) ->
+  maps:get(A, maps:get(accounts, S, #{}), false);
+find_account(S, A) ->
+  maps:get(A, maps:get(accounts, S, #{}), false).
+
 
 %% Common functions
 common_postcond(Correct, Res) ->

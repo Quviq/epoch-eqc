@@ -10,8 +10,7 @@
 -include_lib("eqc/include/eqc_statem.hrl").
 
 -compile([export_all, nowarn_export_all]).
--import(txs_spend_eqc, [is_account/2, update_nonce/3,
-                        reserve_fee/2, bump_and_charge/3, check_balance/3, credit/3]).
+-import(txs_spend_eqc, [is_account/2, reserve_fee/2, bump_and_charge/3, check_balance/3, credit/3]).
 
 -include("txs_eqc.hrl").
 
