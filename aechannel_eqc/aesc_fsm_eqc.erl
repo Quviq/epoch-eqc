@@ -16,7 +16,8 @@
 %% -- State ------------------------------------------------------------------
 initial_state() ->
     #{chain => [aec_headers:new_key_header(0, <<"prevhash">>, <<"0 PrevKeyHash">>, <<"genesis">>, <<"miner">>, <<"beneficiary">>,
-                                          2000, 0, 0, 0, 1)]
+                                          2000, 0, 0, 0, 1)],
+      protocol => 4
      }.
 
 %% -- Common pre-/post-conditions --------------------------------------------
@@ -31,16 +32,30 @@ precondition_common(_S, _Call) ->
 
 %% -- Operations -------------------------------------------------------------
 
-%% --- Operation: init ---
-initiate_pre(_S) ->
-    true.
+%% --- Operation: accounts ---
+accounts_pre(S) ->
+    not maps:is_key(alice, S).
 
-initiate_args(_S) ->
-    ?LET([InitiatorAccount, ResponderAccount], [fake_account_gen(<<"alice">>),
-                                                fake_account_gen(<<"bob">>)],
+accounts_args(_S) ->
+    [#{alice => fake_account_gen(<<"alice">>),
+       bob => fake_account_gen(<<"bob">>)}].
+
+accounts(Accs) ->
+    ok.
+
+accounts_next(S, _Value, [Accounts]) ->
+    maps:merge(S, Accounts).
+
+
+
+%% --- Operation: init ---
+initiate_pre(S) ->
+    maps:is_key(alice, S).
+
+initiate_args(S) ->
     ?LET(Faulty, weighted_default({99, false}, {1, true}),
-    [<<"myhost.com">>, 16123, #{initiator => aec_accounts:pubkey(InitiatorAccount),
-                                responder => aec_accounts:pubkey(ResponderAccount),
+         ["myhost.com", 16123, #{initiator => alice,
+                                 responder => bob,
                                 lock_period => choose(0, 20),
                                 initiator_amount => choose(0, 100),
                                 responder_amount => choose(0, 100),
@@ -48,8 +63,9 @@ initiate_args(_S) ->
                                 push_amount => choose(0, 20)
                                },
      #{faulty => Faulty,
-       alice => InitiatorAccount,
-       bob => ResponderAccount}])).
+            alice => maps:get(alice, S),
+            bob => maps:get(bob, S)  %% Needed because components have no wrap_call
+           }]).
 
 initiate_pre(_S, [_Host, _Port, #{initiator_amount := InitiatorAmount,
                                   responder_amount := ResponderAmount,
@@ -59,9 +75,11 @@ initiate_pre(_S, [_Host, _Port, #{initiator_amount := InitiatorAmount,
     (InitiatorAmount - PushAmount) >= Reserve andalso
         (ResponderAmount + PushAmount) >= Reserve.
 
-
-initiate(Host, Port, Opts, #{faulty := Faulty}) ->
-    case aesc_fsm:initiate(Host, Port, Opts) of
+initiate(Host, Port, #{initiator := I, responder := R} = SymOpts, #{faulty := Faulty} = Symbolic) ->
+    %% Should read it from S, but no wrap_call in component framework
+    Opts = SymOpts#{initiator => aec_accounts:pubkey(maps:get(I, Symbolic)),
+                    responder => aec_accounts:pubkey(maps:get(R, Symbolic))},
+    case aesc_fsm:initiate(list_to_binary(Host), Port, Opts) of
         {ok, Pid} when not Faulty ->
             Pid;
         {ok, Pid} when Faulty ->
@@ -71,19 +89,19 @@ initiate(Host, Port, Opts, #{faulty := Faulty}) ->
             Error
     end.
 
-initiate_callouts(_S, [Host, Port, Opts, #{faulty := Faulty,
-                                           alice := InitiatorAccount,
-                                           bob := ResponderAccount}]) ->
+initiate_callouts(S, [Host, Port, #{initiator := I, responder := R}, #{faulty := Faulty}]) ->
+    IAccount = maps:get(I, S),
+    RAccount = maps:get(R, S),
     ?MATCH_GEN(Connection, oneof([{error, not_connected} || Faulty] ++ [{ok, noise_id}])),
     ?MATCH(AReturn,
-           ?CALLOUT(aec_chain, get_account, [maps:get(initiator, Opts)],
-                    oneof([{error, something} || Faulty ] ++ [ {value, InitiatorAccount} ]))),
+           ?CALLOUT(aec_chain, get_account, [aec_accounts:pubkey(IAccount)],
+                    oneof([{error, something} || Faulty ] ++ [ {value, IAccount} ]))),
     ?MATCH(BReturn,
-           ?CALLOUT(aec_chain, get_account, [maps:get(responder, Opts)],
-                    oneof([{error, something} || Faulty] ++ [ {value, ResponderAccount} ]))),
+           ?CALLOUT(aec_chain, get_account, [aec_accounts:pubkey(RAccount)],
+                    oneof([{error, something} || Faulty] ++ [ {value, RAccount} ]))),
     ?WHEN(BReturn =/= {error, something} andalso AReturn =/= {error, something},
           ?SEQ([
-                ?CALLOUT(aesc_session_noise, connect, [Host, Port, []], Connection),
+                ?CALLOUT(aesc_session_noise, connect, [list_to_binary(Host), Port, []], Connection),
                 ?WHEN(Connection =/= {error, not_connected},
                       ?APPLY(noise_open_channel, []))
                ])).
@@ -96,15 +114,11 @@ noise_open_channel_callouts(S, []) ->
 store_channel_id_next(S, _Value, [Map]) ->
     S#{temporary_channel_id => {call, maps, get, [temporary_channel_id, Map]}}.
 
-initiate_next(S, Value, [_, _, _, #{faulty := Faulty,
-                                     alice := InitiatorAccount,
-                                     bob := ResponderAccount}]) ->
+initiate_next(S, Value, [_, _, _, #{faulty := Faulty}]) ->
     case Faulty of
         true -> S;
         false ->
-            S#{ alice => InitiatorAccount,
-                bob => ResponderAccount,
-                fsm => Value,
+            S#{ fsm => Value,
                 state => initialized }
     end.
 
@@ -145,7 +159,7 @@ chain_mismatch_callouts(#{chain := Chain}, [Fsm, ArgMap]) ->
     ?SEND(?SELF, ?WILDCARD).  %% died
 
 chain_mismatch_next(S, _Value, [_, _]) ->
-    maps:with([chain], S).
+    maps:with([chain, protocol], S).
 
 %% chain_mismatch_process(_S, [Fsm, ArgMap]) ->
 %%     worker.
@@ -167,40 +181,49 @@ channel_accept_args(#{fsm := Fsm, chain := Chain} = S) ->
            , responder_amount       => 0
            , channel_reserve        => 0
            , initiator              => alice
-           , responder              => bob } ].
+           , responder              => bob },
+    #{alice => maps:get(alice, S), bob => maps:get(bob, S)}
+    ].
 
-channel_accept_pre(_S, [_Fsm, _Args]) ->
+channel_accept_pre(_S, [_Fsm, _Args, _]) ->
     true.
 
-channel_accept(Fsm, ArgMap) ->
+channel_accept(Fsm, #{initiator := I, responder := R}  = SymbMap, Symbolic) ->
+    ArgMap = SymbMap#{initiator => aec_accounts:pubkey(maps:get(I, Symbolic)),
+                      responder => aec_accounts:pubkey(maps:get(R, Symbolic))},
     aesc_fsm:message(Fsm, {channel_accept, ArgMap}).
 
-channel_accept_callouts(#{chain := Chain} = S, [Fsm, ArgMap]) ->
+channel_accept_callouts(#{chain := Chain} = S, [Fsm, #{initiator := I, responder := R} = ArgMap, _]) ->
     GenesisHeader = lists:last(Chain),
     %% I create my own representation of environment and whenever code
     %% is using that without calling aetx_env, code will crash as it should!
     Trees = [],
     PinnedHeight = 0,
+    IAccount = maps:get(I, S),
+    RAccount = maps:get(R, S),
+    Protocol = maps:get(protocol, S),
     ?CALLOUT(aec_chain, genesis_hash, [], aec_headers:root_hash(GenesisHeader)),
     ?PAR([?SEQ([
-                ?CALLOUT(aec_chain, get_account, [maps:get(initiator, ArgMap)], {value, maps:get(alice, S)}),
-                ?CALLOUT(aec_next_nonce, pick_for_account, [maps:get(initiator, ArgMap)], {ok, nonce(maps:get(alice, S))}),
+                ?CALLOUT(aec_chain, get_account, [aec_accounts:pubkey(IAccount)], {value, maps:get(alice, S)}),
+                ?CALLOUT(aec_next_nonce, pick_for_account, [aec_accounts:pubkey(IAccount)], {ok, nonce(maps:get(alice, S))}),
                 ?CALLOUT(aec_chain, top_header, [], hd(Chain)),
                 ?CALLOUT(aec_chain, get_key_header_by_height, [PinnedHeight], {ok, GenesisHeader}), %% This needs to be a different one
                 %% This header is now serialized and hashed
                 %% aesc:fsm should be refactored to find the key header instead and use this key header to
                 %% build the env instead of first serializing and then deserializing.... too complex
-                ?CALLOUT(aetx_env, tx_env_and_trees_from_hash, [aetx_contract, ?WILDCARD], {#{height => PinnedHeight}, Trees}),
+                ?CALLOUT(aetx_env, tx_env_and_trees_from_hash, [aetx_contract, ?WILDCARD], {#{height => PinnedHeight,
+                                                                                                   consensus_version => Protocol}, Trees}),
                 ?CALLOUT(aetx_env, height, [?WILDCARD], PinnedHeight),
+                ?CALLOUT(aetx_env, consensus_version, [?WILDCARD], Protocol),
                 ?CALLOUT(aetx_env, height, [?WILDCARD], PinnedHeight)
                ]),
           ?SEND(?SELF, ?WILDCARD)]).
 
 
-channel_accept_next(S, _Value, [_Fsm, _Args]) ->
+channel_accept_next(S, _Value, [_Fsm, _Args, _]) ->
     S.
 
-channel_accept_post(_S, [_Fsm, _Args], _Res) ->
+channel_accept_post(_S, [_Fsm, _Args, _], _Res) ->
     false.
 
 nonce({account, _, _, Nonce, _, _, _}) ->
@@ -270,12 +293,15 @@ fake_account_gen(Owner) ->
 api_spec() ->
     #api_spec{ language = erlang, mocking = eqc_mocking,
                modules = [ lager_spec(), noise_layer_spec(),
-                           aec_chain_spec(),
+                           aec_chain_spec(), lager_spec(),
                            aec_next_nonce_spec(),
                            aetx_env_spec() ] }.
 
 lager_spec() ->
-    #api_module{ name = lager, fallback = lager_mock }.
+    #api_module{ name = lager_eqc, fallback = ?MODULE }.
+
+debug(X, Y) ->
+    io:format("LAGER: "++X, Y).
 
 noise_layer_spec() ->
     #api_module{
@@ -307,5 +333,6 @@ aetx_env_spec() ->
        name = aetx_env,
        functions =
            [ #api_fun{ name = tx_env_and_trees_from_hash, arity = 2},
-             #api_fun{ name = height, arity = 1}
+             #api_fun{ name = height, arity = 1},
+             #api_fun{ name = consensus_version, arity = 1}
            ] }.
