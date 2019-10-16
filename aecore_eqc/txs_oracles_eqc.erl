@@ -11,30 +11,17 @@
 -include_lib("eqc/include/eqc_statem.hrl").
 
 -compile([export_all, nowarn_export_all]).
--import(tx_utils, [gen_fee/1, valid_fee/2]).
 -import(txs_spend_eqc, [is_account/2]).
+-include("txs_eqc.hrl").
 
 -record(query, {sender, symb_id, id, fee, response_ttl, query_ttl, response_due, expired = false}).
 -record(oracle, {id, qfee, oracle_ttl}).
 
 %% -- State and state functions ----------------------------------------------
-initial_state() ->
-    #{oracles => []}.
-
-
-%% -- Common pre-/post-conditions --------------------------------------------
-
-common_postcond(Correct, Res) ->
-    case Res of
-        {error, _} when Correct -> eq(Res, ok);
-        {error, _}              -> true;
-        ok when Correct         -> true;
-        ok                      -> eq(ok, {error, '_'})
-    end.
-
+initial_state(S) ->
+    S#{oracles => []}.
 
 %% -- Operations -------------------------------------------------------------
-
 
 
 %% --- Operation: multi_mine ---
@@ -159,7 +146,7 @@ query_oracle_pre(S) ->
 
 query_oracle_args(#{protocol := Protocol} = S) ->
      ?LET({Sender, Oracle},
-          {txs_spend_eqc:gen_account_key(1, 49, S), gen_oracle_account(1, 49, S)},
+          {gen_account(1, 49, S), gen_oracle_account(1, 49, S)},
           begin
               QueryFee =
                   case oracle(S, Oracle) of
@@ -280,14 +267,11 @@ response_oracle_next(S, _Value, [QueryId, _FakeId, Tx] = Args) ->
 response_oracle_post(S, Args, Res) ->
     common_postcond(response_oracle_valid(S, Args), Res).
 
-
 response_oracle_features(S, [QueryId, _, _Tx] = Args, Res) ->
     Correct = response_oracle_valid(S, Args),
     [{correct, if Correct -> response_oracle; true -> false end},
      {response_oracle, Res}] ++
         [response_expired_query || is_expired_query(S, QueryId)].
-
-
 
 
 %% -- weight ---------------------------------------------------------------
@@ -406,7 +390,9 @@ resolve_query_id(S, QueryId, FakeId) ->
 
 
 is_query(#{queries := Qs}, Q) ->
-    lists:keymember(Q, #query.symb_id, Qs).
+    lists:keymember(Q, #query.symb_id, Qs);
+is_query(_S, _Q) ->
+    false.
 
 is_expired_query(S, QueryId) ->
     case lists:keyfind(QueryId, #query.symb_id, maps:get(queries, S, [])) of
@@ -421,21 +407,18 @@ valid_ttl(_, {delta, _}) ->
 
 
 %% -- Generators -------------------------------------------------------------
-gen_nonce() ->
-    weighted_default({49, good}, {1, {bad, elements([-1, 1, -5, 5, 10000])}}).
-
 gen_oracle_account(New, Existing, S) ->
     case maps:get(oracles, S, []) of
-         [] -> txs_spend_eqc:gen_account_key(1, 1, S);
+         [] -> gen_account(1, 1, S);
          Os -> weighted_default(
                   {Existing, elements([ Id || #oracle{id = Id} <- Os])},
-                  {New,  txs_spend_eqc:gen_account_key(1, 49, S)})
+                  {New,      gen_account(1, 49, S)})
         end.
 
 gen_non_oracle_account(New, Existing, #{oracles := Os} = S) ->
     %% remove Oracles from accounts before searching
     Keys =  txs_spend_eqc:account_keys(S) -- [ O#oracle.id || O <- Os],
-    oneof(Keys ++ [txs_spend_eqc:gen_account_key(New, Existing, S)]).
+    oneof(Keys ++ [gen_account(New, Existing, S)]).
 
 gen_query_fee() ->
     choose(10, 1000).

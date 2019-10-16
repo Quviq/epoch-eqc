@@ -10,55 +10,27 @@
 -include_lib("eqc/include/eqc_statem.hrl").
 
 -compile([export_all, nowarn_export_all]).
--import(tx_utils, [minimum_gas_price/1,
-                   gen_nonce/0]).
 -import(txs_spend_eqc, [is_account/2, update_nonce/3,
                         reserve_fee/2, bump_and_charge/3, check_balance/3, credit/3]).
 
--define(ROMA_PROTOCOL_VSN,    1).
--define(MINERVA_PROTOCOL_VSN, 2).
--define(FORTUNA_PROTOCOL_VSN, 3).
--define(LIMA_PROTOCOL_VSN,    4).
--define(IRIS_PROTOCOL_VSN,    5).
+-include("txs_eqc.hrl").
 
--define(SOPHIA_ROMA,      1).
--define(SOPHIA_MINERVA,   2).
--define(SOPHIA_FORTUNA,   3).
--define(SOPHIA_LIMA_AEVM, 4).
--define(SOPHIA_LIMA_FATE, 5).
 
--define(ABI_AEVM_1, 1).
--define(ABI_FATE_1, 3).
-
--record(contract, {name, id, amount, deposit, vm, abi, compiler_version, protocol, src, functions}).
+-record(contract, {name, id, pubkey, amount, deposit, vm, abi,
+                   compiler_version, protocol, src, functions}).
 
 %% -- State and state functions ----------------------------------------------
-initial_state() ->
-    #{contracts => []}.
-
-%% -- Common pre-/post-conditions --------------------------------------------
-
-common_postcond(Correct, Res) ->
-  case Res of
-    {error, _} when Correct -> eq(Res, ok);
-    {error, _}              -> true;
-    ok when Correct         -> true;
-    ok                      -> eq(ok, {error, Correct})
-  end.
+initial_state(S) ->
+    S#{contracts => []}.
 
 %% -- Operations -------------------------------------------------------------
 
 is_payable_contract(S, C) ->
     case [ Cx#contract.vm || Cx <- maps:get(contracts, S),
-                             Cx#contract.id == C ] of
+                             Cx#contract.id == C orelse Cx#contract.pubkey == C ] of
         [VM] when VM == fate_sophia_1; VM == aevm_sophia_4 -> false;
         _ -> true
     end.
-
-
-
-
-
 
 %% --- Operation: create_contract ---
 contract_create_pre(S) ->
@@ -66,33 +38,34 @@ contract_create_pre(S) ->
 
 contract_create_args(#{protocol := Protocol} = S) ->
     ?LET(Sender, gen_account(1, 100, S),
-    ?LET({Name, CreateProtocol}, {gen_contract(), weighted_default({49, Protocol}, {1, choose(1, Protocol)})},
-    ?LET({Compiler, VM, ABI}, gen_contract_opts(CreateProtocol),
+    ?LET(Name, gen_contract(),
+    ?LET({Compiler, VM, ABI}, gen_contract_opts(Protocol),
         begin
             Fixed   = contract_tx_fee(create, Name, ABI),
             GasUsed = contract_gas(Name, init, ABI, Protocol),
-            [Sender, Name, Compiler,
+            SymName = list_to_atom(lists:concat(["contract_", length(maps:get(contracts, S, []))])),
+            [Sender, Name, SymName, Compiler,
              #{owner_id => aeser_id:create(account, Sender),
                vm_version  => VM,
                abi_version => ABI,
                fee => gen_fee_above(S, Fixed),
-               gas_price => frequency([{1, minimum_gas_price(Protocol) - 1}, {1, 1}, {48, minimum_gas_price(Protocol)}]),
-               gas => frequency([{7, GasUsed}, {1, GasUsed - 1}, {1, GasUsed + 100}, {1, 10}]),
+               gas_price => gen_gas_price(Protocol),
+               gas => gen_gas(GasUsed),
                nonce => gen_nonce(),
-               deposit => nat(),
+               deposit => gen_deposit(),
                amount => txs_spend_eqc:gen_spend_amount(S, Sender)
               }]
         end))).
 
-contract_create_valid(S, [Sender, Name, CompilerVersion, Tx]) ->
-    ABI = maps:get(abi_version, Tx),
-    Fixed   = contract_tx_fee(create, Name, ABI),
+contract_create_valid(S, [Sender, Name, _SymName, CompilerVersion, Tx]) ->
+    ABI      = maps:get(abi_version, Tx),
+    Fixed    = contract_tx_fee(create, Name, ABI),
     Protocol = maps:get(protocol, S),
-    GasUsed = contract_gas(Name, init, ABI, Protocol),
+    Gas      = maps:get(gas, Tx),
     is_account(S, Sender)
     andalso maps:get(nonce, Tx) == good
-    andalso check_balance(S, Sender, maps:get(fee, Tx) + GasUsed * maps:get(gas_price, Tx) +
-                             maps:get(amount, Tx) + maps:get(deposit, Tx))
+    andalso check_balance(S, Sender, maps:get(fee, Tx) + Gas * maps:get(gas_price, Tx) +
+                                     maps:get(amount, Tx) + maps:get(deposit, Tx))
     andalso valid_contract_fee(S, Fixed, Tx)
     andalso check_contract_opts(Protocol, CompilerVersion, maps:get(vm_version, Tx), ABI).
 
@@ -101,27 +74,33 @@ check_contract_opts(?MINERVA_PROTOCOL_VSN, ?SOPHIA_ROMA,      aevm_sophia_2, abi
 check_contract_opts(?MINERVA_PROTOCOL_VSN, ?SOPHIA_MINERVA,   aevm_sophia_2, abi_aevm_1) -> true;
 check_contract_opts(?MINERVA_PROTOCOL_VSN, ?SOPHIA_FORTUNA,   aevm_sophia_2, abi_aevm_1) -> true;
 check_contract_opts(?FORTUNA_PROTOCOL_VSN, ?SOPHIA_ROMA,      aevm_sophia_2, abi_aevm_1) -> true;
+check_contract_opts(?FORTUNA_PROTOCOL_VSN, ?SOPHIA_ROMA,      aevm_sophia_3, abi_aevm_1) -> true;
 check_contract_opts(?FORTUNA_PROTOCOL_VSN, ?SOPHIA_MINERVA,   aevm_sophia_2, abi_aevm_1) -> true;
+check_contract_opts(?FORTUNA_PROTOCOL_VSN, ?SOPHIA_MINERVA,   aevm_sophia_3, abi_aevm_1) -> true;
 check_contract_opts(?FORTUNA_PROTOCOL_VSN, ?SOPHIA_FORTUNA,   aevm_sophia_2, abi_aevm_1) -> true;
 check_contract_opts(?FORTUNA_PROTOCOL_VSN, ?SOPHIA_FORTUNA,   aevm_sophia_3, abi_aevm_1) -> true;
 check_contract_opts(?LIMA_PROTOCOL_VSN,    ?SOPHIA_LIMA_AEVM, aevm_sophia_4, abi_aevm_1) -> true;
 check_contract_opts(?LIMA_PROTOCOL_VSN,    ?SOPHIA_LIMA_FATE, fate_sophia_1, abi_fate_1) -> true;
 check_contract_opts(_, _, _, _) -> false.
 
-contract_create_tx(S, [Sender, Name, CompilerVersion, Tx]) ->
+contract_create_tx(S, Args) ->
+    NTx = contract_create_tx_(S, Args),
+    aect_create_tx:new(NTx).
+
+contract_create_tx_(S, [Sender, Name, _SymName, CompilerVersion, Tx]) ->
     NTx = update_nonce(S, Sender, Tx),
     #{src := Contract, args := Args} = CompiledContract = contract(Name),
     %% This is cheating a bit, but ABI hasn't moved... So use the latest version
     EncVersion = case maps:get(abi_version, NTx) of abi_aevm_1 -> ?SOPHIA_LIMA_AEVM; _ -> ?SOPHIA_LIMA_FATE end,
     {ok, CallData} = aect_test_utils:encode_call_data(EncVersion, Contract, "init", Args),
     Code = maps:get({code, CompilerVersion}, CompiledContract),
-    NTx1  = maps:update_with(vm_version, fun vm_to_int/1, NTx),
+    NTx1 = maps:update_with(vm_version, fun vm_to_int/1, NTx),
     NTx2 = maps:update_with(abi_version, fun abi_to_int/1, NTx1),
-    aect_create_tx:new(NTx2#{code => Code, call_data => CallData}).
+    NTx2#{code => Code, call_data => CallData}.
 
 %% Since the nonce is part of the contract ID, shrinking a contract create could possibly work, but then it will
 %% no longer be called by a contract call, since the create ID has changed!
-contract_create_next(S, _Value, [Sender, Name,
+contract_create_next(S, _Value, [Sender, Name, ContractId,
                                  CompilerVersion, Tx] = Args) ->
     case contract_create_valid(S, Args) of
         false -> S;
@@ -134,13 +113,14 @@ contract_create_next(S, _Value, [Sender, Name,
                 true ->
                     %% Account must exist
                     Nonce = txs_spend_eqc:account_nonce(txs_spend_eqc:account(S, Sender)),
-                    ContractId = {call, aect_contracts, compute_contract_pubkey, [Sender, Nonce]},
+                    ContractPK = aect_contracts:compute_contract_pubkey(Sender, Nonce),
                     reserve_fee(Fee + GasUsed * GasPrice,
                                 bump_and_charge(Sender,
                                                 Fee + GasUsed * GasPrice + Amount + Deposit,
                                                 add(contracts,
                                                     #contract{name = Name,
                                                               id = ContractId,
+                                                              pubkey = ContractPK,
                                                               amount = Amount,
                                                               deposit = Deposit,
                                                               vm = Vm,
@@ -159,9 +139,9 @@ contract_create_post(S, Args, Res) ->
   common_postcond(contract_create_valid(S, Args), Res).
 
 
-contract_create_features(S, [_Sender, Name, CompilerVersion, Tx] = Args, Res) ->
-    Correct = contract_create_valid(S, Args) andalso maps:get(gas, Tx) >= contract_gas(Name, init, maps:get(abi_version, Tx),
-                                                                                       maps:get(protocol, S)),
+contract_create_features(S, [_Sender, Name, _SymName, CompilerVersion, Tx] = Args, Res) ->
+    Correct = contract_create_valid(S, Args)
+                andalso maps:get(gas, Tx) >= contract_gas(Name, init, maps:get(abi_version, Tx), maps:get(protocol, S)),
     [{correct, if Correct -> contract_create; true -> false end},
      {contract_create, Res},
      {contract_compiler, CompilerVersion},
@@ -177,58 +157,55 @@ contract_call_pre(S) ->
 %% But not so in aect_call_tx
 %% Most likely determined by the contract's VM version!
 contract_call_args(#{protocol := Protocol, contracts := Contracts} = S) ->
-     ?LET([Sender, {ContractTag, Contract}],
-          [gen_account(1, 100, S), gen_contract_id(1, 100, Contracts)],
-          ?LET(ABI, gen_abi(Contract#contract.abi),
-          ?LET({Func, As, _},
-               case ContractTag of
-                   invalid -> {<<"main">>, [], <<>>};
-                   _ -> oneof(Contract#contract.functions)
-               end,
-               begin
-               UseGas = contract_gas(Contract#contract.name, Func, ABI, maps:get(protocol, S)),
-               [Sender, {ContractTag, Contract},
-                #{caller_id => aeser_id:create(account, Sender),   %% could also be a contract!
-                  contract_id =>
-                      case ContractTag of
-                          {name, Name} -> aeser_id:create(name, aens_hash:name_hash(Name));
-                          _ -> aeser_id:create(contract, Contract#contract.id)   %% handles symbolic calls!
-                      end,
-                  abi_version => abi_to_int(ABI),
-                  fee => gen_fee_above(S, contract_tx_fee(call, Contract#contract.name, ABI)),
-                  gas_price => frequency([{1,minimum_gas_price(Protocol) - 1}, {1, 1}, {89, minimum_gas_price(Protocol)}]),
-                  gas => frequency([{7, UseGas + 10},
-                                    %% {1, UseGas-1},
-                                    {1, 2*UseGas}, {1, 1}]),
-                  nonce => gen_nonce(),
-                  amount => nat(),
-                  call_data => {Func, As, UseGas, contract_payable_fun(Contract#contract.name, Func, Contract#contract.vm)}
-                 }]
-                end ))).
+    ?LET([Sender, {ContractTag, Contract}],
+         [gen_account(1, 100, S), gen_contract_id(1, 100, Contracts)],
+         ?LET(ABI, gen_abi(Contract#contract.abi),
+         ?LET({Func, As, _},
+              case ContractTag of
+                  invalid -> {<<"main">>, [], <<>>};
+                  _ -> oneof(Contract#contract.functions)
+              end,
+              begin
+              UseGas = contract_gas(Contract#contract.name, Func, ABI, maps:get(protocol, S)),
+              [Sender, {ContractTag, Contract#contract.id, Contract#contract.name, Contract#contract.vm},
+               #{caller_id   => aeser_id:create(account, Sender),
+                 abi_version => abi_to_int(ABI),
+                 fee         => gen_fee_above(S, contract_tx_fee(call, Contract#contract.name, ABI)),
+                 gas_price   => gen_gas_price(Protocol),
+                 gas         => gen_gas(UseGas),
+                 nonce       => gen_nonce(),
+                 amount      => nat(),
+                 call_data   => {Func, As, UseGas, contract_payable_fun(Contract#contract.name, Func, Contract#contract.vm)}
+                }]
+               end ))).
 
-%% contract_call_pre(S, [_Sender, {CTag, C}, Tx]) ->
-%%     #{abi_version := ABI, call_data := {F, _, UseGas0, _}} = Tx,
-%%     C0 = lists:keyfind(C#contract.id, #contract.id, maps:get(contracts, S)),
-%%         (CTag == invalid orelse ((C0 /= false andalso C0#contract.name == C#contract.name
-%%                                               andalso C0#contract.vm == C#contract.vm))).
-                             %%    andalso UseGas0 == contract_gas(C#contract.name, F, ABI, maps:get(protocol, S)))).
+contract_call_pre(S, [_Sender, {CTag, CId, CName, CVM}, Tx]) ->
+    %% #{abi_version := ABI, call_data := {F, _, UseGas0, _}} = Tx,
+    C0 = lists:keyfind(CId, #contract.id, maps:get(contracts, S)),
+    (CTag == invalid orelse ((C0 /= false andalso C0#contract.name == CName andalso C0#contract.vm == CVM))).
+                                %% andalso UseGas0 == contract_gas(C#contract.name, F, ABI, maps:get(protocol, S)))).
 
-contract_call_valid(S, [Sender, {ContractTag, Contract}, Tx]) ->
+contract_call_valid(S, [Sender, {ContractTag, CId, CName, CVM}, Tx]) ->
+    Contract = lists:keyfind(CId, #contract.id, maps:get(contracts, S)),
+    #{abi_version := ABI, call_data := {F, _, _, _}} = Tx,
     is_account(S, Sender)
     andalso ContractTag == valid
     andalso maps:get(nonce, Tx) == good
     andalso check_balance(S, Sender, maps:get(fee, Tx) + maps:get(gas, Tx) * maps:get(gas_price, Tx))
-    andalso valid_contract_fee(S, contract_tx_fee(call, Contract#contract.name, maps:get(abi_version, Tx)), Tx)
-    andalso maps:get(abi_version, Tx) == abi_to_int(Contract#contract.abi).
+    andalso valid_contract_fee(S, contract_tx_fee(call, Contract#contract.name, ABI), Tx)
+    andalso is_valid_gas(CName, F, ABI, CVM, maps:get(protocol, S), maps:get(gas, Tx))
+    andalso ABI == abi_to_int(Contract#contract.abi).
 
-contract_call_tx(S, [Sender, {invalid, _Contract}, Tx]) ->
-    contract_call_with_data(S, Sender, Tx#{call_data => <<"Blubber">>});
-contract_call_tx(S, [Sender, {valid, Contract}, #{call_data := {Func, As, _, _}} = Tx]) ->
-    ContractSrc = Contract#contract.src,
+contract_call_tx(S, [Sender, {invalid, _CId, _CName, _CVM}, Tx]) ->
+    ContractId = aeser_id:create(contract, <<0:256>>),
+    contract_call_with_data(S, Sender, Tx#{call_data => <<"Blubber">>, contract_id => ContractId});
+contract_call_tx(S, [Sender, {valid, CId, _CName, _CVM}, #{call_data := {Func, As, _, _}} = Tx]) ->
+    C = lists:keyfind(CId, #contract.id, maps:get(contracts, S)),
+    ContractId = aeser_id:create(contract, C#contract.pubkey),
     BinaryAs = [ to_binary(A) || A <- As],
     EncVersion = case maps:get(abi_version, Tx) of 1 -> ?SOPHIA_LIMA_AEVM; _ -> ?SOPHIA_LIMA_FATE end,
-    {ok, CallData} = aect_test_utils:encode_call_data(EncVersion, ContractSrc, Func, BinaryAs),
-    contract_call_with_data(S, Sender, Tx#{call_data => CallData}).
+    {ok, CallData} = aect_test_utils:encode_call_data(EncVersion, C#contract.src, Func, BinaryAs),
+    contract_call_with_data(S, Sender, Tx#{call_data => CallData, contract_id => ContractId}).
 
 contract_call_with_data(S, Sender, Tx) ->
     NTx = update_nonce(S, Sender, Tx),
@@ -268,28 +245,25 @@ contract_call_post(S, Args, Res) ->
   common_postcond(contract_call_valid(S, Args), Res).
 
 
-contract_call_features(S, [_Sender, {_ContractTag, Contract}, Tx] = Args, Res) ->
+contract_call_features(S, [_Sender, {_, _, CName, _}, Tx] = Args, Res) ->
     Correct = contract_call_valid(S, Args),
     #{gas := Gas, call_data := {Func, _As, UseGas, _}} = Tx,
     [{correct, if Correct -> contract_call; true -> false end}] ++
-     [{contract_call_fun, Contract#contract.name} || Correct andalso Gas >= UseGas ] ++
-     [{contract_call, Res}] ++
-        [ {protocol, contract_call, Func, maps:get(protocol, S) - Contract#contract.protocol} ||
-            Correct andalso Gas >= UseGas ].
-
-
+     [{contract_call_fun, CName} || Correct andalso Gas >= UseGas ] ++
+     [{contract_call, Res}].
 
 
 %% -- Property ---------------------------------------------------------------
 
-weight(_S, contract_create) ->
-    10;
+weight(S, contract_create) ->
+    case maps:get(contracts, S, []) of
+      [] -> 10;
+      _  -> 2 end;
 weight(S, contract_call) ->
     case maps:get(contracts, S, []) of
         [] -> 0;
         _  -> 10 end;
 weight(_S, _) -> 0.
-
 
 compile_contracts() ->
     %% read and compile contracts once (and use them in parallel
@@ -332,29 +306,18 @@ valid_account(S, {Tag, Key}) ->
     IsA = is_account(S, Key),
     (IsA andalso Tag == existing) orelse (not IsA andalso Tag == new).
 
-
-
 valid_contract_fee(S, Fixed, #{ fee := Fee, gas_price := GasPrice }) ->
     GasPrice >= minimum_gas_price(maps:get(protocol, S))
         andalso Fee >= Fixed * minimum_gas_price(maps:get(protocol, S)).
 
-
-%% strict_equal(X, Y) ->
-%%      case X == Y of
-%%          true -> X;
-%%          false -> exit({different, X, Y})
-%%      end.
-
-%% hash_equal(X, Y) ->
-%%      case {X, Y} of
-%%          {{ok, L}, {ok, R}} ->
-%%              case aec_trees:hash(L) == aec_trees:hash(R) of
-%%                  true -> X;
-%%                  false -> exit({hash_differs, X, Y})
-%%              end;
-%%          {E, E} -> E;
-%%          _ -> exit({different, X, Y})
-%%      end.
+is_valid_gas(Name, Fun, ABI, VM, P, Gas) ->
+    GasUse = contract_gas(Name, Fun, ABI, P),
+    %% io:format("XXX: ~p ~p ~p ~p\n", [Fun, VM, GasUse, Gas - GasUse]),
+    case {lists:member(VM, [aevm_sophia_1, aevm_sophia_2]), Gas - GasUse} of
+      {true, N} when N < 0, N > -3, P < ?LIMA_PROTOCOL_VSN -> Fun /= <<"nonce_correct">>;
+      {true, N} when N < 0, N > -163, P >= ?LIMA_PROTOCOL_VSN -> Fun /= <<"nonce_correct">>;
+      _ -> true
+    end.
 
 
 abi_to_int(abi_raw)    -> 0;
@@ -372,27 +335,11 @@ vm_to_int(N)             -> N.
 
 %% -- Generators -------------------------------------------------------------
 
-gen_account(New, Existing, S) ->
-  txs_spend_eqc:gen_account_key(New, Existing, S).
-
 unique_name(List) ->
     ?LET([W],
          noshrink(?SUCHTHAT([Word],
                             eqc_erlang_program:words(1), not lists:member(Word, List))),
          W).
-
-
-gen_fee(S) ->
-    frequency([{48, ?LET(F, choose(20000, 30000), F * minimum_gas_price(S))},
-               {1,  ?LET(F, choose(0, 15000), F)},   %%  too low (and very low for hard fork)
-               {1,  ?LET(F, choose(0, 15000), F * minimum_gas_price(S))}]).    %% too low
-
-gen_fee_above(S, Amount) ->
-    frequency([{48, ?LET(F, choose(Amount, Amount + 10000), F * minimum_gas_price(S))},
-               {1,  ?LET(F, choose(0, Amount - 5000), F)},   %%  too low (and very low for hard fork)
-               {1,  ?LET(F, choose(0, Amount - 5000), F * minimum_gas_price(S))}]).    %% too low
-
-
 
 gen_ttl() ->
     choose(5, 50).
@@ -479,10 +426,10 @@ contract_tx_fee(Type, Name, ABI) when is_atom(ABI) -> contract_tx_fee(Type, Name
 contract_tx_fee(create, identity, ?ABI_AEVM_1)        -> 75000 + 20 * 1200;
 contract_tx_fee(create, identity, ?ABI_FATE_1)        -> 75000 + 20 * 200;
 contract_tx_fee(create, authorize_nonce, ?ABI_AEVM_1) -> 75000 + 20 * 1400;
-contract_tx_fee(create, authorize_nonce, ?ABI_FATE_1) -> 75000 + 20 * 220;
-contract_tx_fee(call, identity, ?ABI_AEVM_1)          -> 450000 + 20 * 220;
+contract_tx_fee(create, authorize_nonce, ?ABI_FATE_1) -> 75000 + 20 * 230;
+contract_tx_fee(call, identity, ?ABI_AEVM_1)          -> 450000 + 20 * 230;
 contract_tx_fee(call, identity, ?ABI_FATE_1)          -> 180000 + 20 * 100;
-contract_tx_fee(call, authorize_nonce, ?ABI_AEVM_1)   -> 450000 + 20 * 220;
+contract_tx_fee(call, authorize_nonce, ?ABI_AEVM_1)   -> 450000 + 20 * 230;
 contract_tx_fee(call, authorize_nonce, ?ABI_FATE_1)   -> 180000 + 20 * 100;
 contract_tx_fee(_, _, _)                              -> 450000 + 20 * 1000.
 

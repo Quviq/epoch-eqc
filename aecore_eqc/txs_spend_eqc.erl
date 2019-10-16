@@ -11,13 +11,13 @@
 
 -compile([export_all, nowarn_export_all]).
 
--import(tx_utils, [gen_fee/1]).
+-import(txs_ga_eqc, [is_ga/2, credit_ga/2]).
 
--record(account, {key, amount, nonce}).
+-include("txs_eqc.hrl").
+
 
 %% -- State and state functions ----------------------------------------------
-initial_state() ->
-  #{}.
+initial_state(S) -> S.
 
 %% -- Common pre-/post-conditions --------------------------------------------
 
@@ -31,34 +31,23 @@ spend_pre(S) ->
 spend_args(#{protocol := Protocol} = S) ->
   ?LET([Sender, To], [gen_account_key(1, 49, S),
                       frequency([{10, {account,  gen_account_key(2, 1, S)}},
-                                 {2, {oracle, gen_account_key(1, 49, S)}},      %% There is no check account really is an oracle!
-                                 %% {1, {contract, gen_contract_id(1, 100, maps:get(contracts, S))}},
-                                 {2, {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++
-                                                       [N || {N, _} <- maps:get(protected_names, S, [])] ++
-                                                       [<<"ta.test">>])}}
-                                ])],
-       [Sender,
-        case To of
-          {account, Receiver} -> {account, Receiver};
-          {oracle,  Receiver} -> {oracle, Receiver};
-          {contract, ContractId} -> {contract, ContractId};
-          {name, Name} -> {name, Name}
-        end,
+                                 {2, {oracle, gen_account_key(1, 49, S)}}] ++      %% There is no check account really is an oracle!
+                                [{2, {name, gen_name(S)}} || maps:get(named_accounts, S, #{}) /= #{} ] ++
+                                [{1, {contract, gen_contract_id(1, 49, maps:get(contracts, S))}} || maps:get(contracts, S, []) /= []]
+                               )]
+       ,
+       [Sender, To,
         #{sender_id => aeser_id:create(account, Sender),  %% The sender is asserted to never be a name.
           recipient_id =>
             case To of
-              {account, Receiver} ->
-                aeser_id:create(account, Receiver);
-              {oracle, Receiver} ->
-                aeser_id:create(oracle, Receiver);
-              {contract, ContractId} ->
-                aeser_id:create(contract, ContractId);
-              {name, Name} ->
-                aeser_id:create(name, aens_hash:name_hash(Name))
+              {account, Receiver}    -> aeser_id:create(account, Receiver);
+              {oracle, Receiver}     -> aeser_id:create(oracle, Receiver);
+              {contract, ContractId} -> aeser_id:create(contract, ContractId);
+              {name, Name}           -> aeser_id:create(name, aens_hash:name_hash(Name))
             end,
-          amount => gen_spend_amount(S, Sender),
-          fee => gen_fee(Protocol),
-          nonce => gen_nonce(),
+          amount  => gen_spend_amount(S, Sender),
+          fee     => gen_fee(Protocol),
+          nonce   => gen_nonce(),
           payload => utf8()}]).
 
 spend_valid(S, [Sender, {ReceiverTag, Receiver}, Tx]) ->
@@ -67,8 +56,8 @@ spend_valid(S, [Sender, {ReceiverTag, Receiver}, Tx]) ->
     andalso check_balance(S, Sender, maps:get(amount, Tx) + maps:get(fee, Tx))
     andalso tx_utils:valid_fee(S, Tx)
     andalso case ReceiverTag of
-              account -> true;
-              oracle -> true; %% an account is generated if oracle does not exsists
+              account  -> true;
+              oracle   -> true; %% an account is generated if oracle does not exist
               contract -> txs_contracts_eqc:is_payable_contract(S, Receiver);
               name     -> maps:is_key(Receiver, maps:get(named_accounts, S, #{}))
             end.
@@ -96,17 +85,11 @@ spend_next(S, _Value, [Sender, TaggedReceiver, Tx] = Args) ->
   end.
 
 spend_post(S, Args, Res) ->
-  Correct = spend_valid(S, Args),
-  case Res of
-    {error, _} when Correct -> eq(Res, ok);
-    {error, _}              -> true;
-    ok when Correct         -> true;
-    ok                      -> eq(ok, {error, '_'})
-  end.
+  common_postcond(spend_valid(S, Args), Res).
 
 spend_features(S, [Sender, {Tag, Receiver}, _Tx] = Args, Res) ->
   Correct = spend_valid(S, Args),
-  [{correct,  if Correct -> spend; true -> false end}] ++
+  [{correct, if Correct -> spend; true -> false end}] ++
     [ {spend_to, self} || Sender == Receiver andalso Correct] ++
     [ {spend_to, Tag} || Sender =/= Receiver andalso Correct] ++
     [ {spend, Res}].
@@ -115,7 +98,10 @@ spend_features(S, [Sender, {Tag, Receiver}, _Tx] = Args, Res) ->
 
 
 %% -- weight ---------------------------------------------------------------
-weight(_S, spend) -> 20;
+weight(S, spend) ->
+  case maps:get(accounts, S, []) of
+    [] -> 20;
+    Xs -> max(3, 10 - length(Xs)) end;
 weight(_S, _) -> 0.
 
 %% -- Transactions modifiers
@@ -136,9 +122,9 @@ update_nonce(S, Sender, #{nonce := Nonce} = Tx) ->
 %% -- State update and query functions ---------------------------------------
 
 
-resolve_account(S, {name, Name}) -> maps:get(Name, maps:get(named_accounts, S, #{}), false);
+resolve_account(S, {name, Name})    -> maps:get(Name, maps:get(named_accounts, S, #{}), false);
 resolve_account(_, {contract, Key}) -> {contract, Key};
-resolve_account(_, {_, Key})     -> Key.
+resolve_account(_, {_, Key})        -> Key.
 
 check_balance(S, Key, Amount) ->
   case account(S, Key) of
@@ -157,7 +143,12 @@ credit(Key, Amount, S = #{ accounts := Accounts }) ->
     true ->
       on_account(Key, fun(Acc) -> Acc#account{ amount = Acc#account.amount + Amount } end, S);
     false ->
-      S#{ accounts => Accounts ++ [#account{ key = Key, amount = Amount, nonce = 1 }] }
+      case is_ga(S, Key) of
+        true ->
+          credit_ga(Key, Amount, S);
+        false ->
+          S#{ accounts => Accounts ++ [#account{ key = Key, amount = Amount, nonce = 1 }] }
+      end
   end.
 
 credit_contract(_Key, _Amount, S = #{ contracts := _Contracts}) ->
@@ -198,13 +189,11 @@ account_key(#account{key = Key}) ->
 account_nonce(#account{nonce = Nonce}) ->
   Nonce.
 
-
 account(S, Key) ->
   lists:keyfind(Key, #account.key, maps:get(accounts, S, #{})).
 
 
 %% -- Generators -------------------------------------------------------------
-
 gen_account_key(New, Exist, #{accounts := Accounts, keys := Keys}) ->
   case [ Key || Key <- maps:keys(Keys), not lists:keymember(Key, #account.key, Accounts) ] of
     [] ->
@@ -215,8 +204,13 @@ gen_account_key(New, Exist, #{accounts := Accounts, keys := Keys}) ->
         {New,   oneof(NewKeys)})
   end.
 
-gen_nonce() ->
-  weighted_default({49, good}, {1, {bad, elements([-1, 1, -5, 5, 10000])}}).
+gen_contract_id(Invalid, Valid, Contracts) ->
+  frequency([{Invalid, noshrink(binary(32))},
+             {Valid, ?LET(C, elements(Contracts), element(4, C))}]).
+
+gen_name(S) ->
+  frequency([{49, elements(maps:keys(maps:get(named_accounts, S, #{})))},
+             {1,  elements([N || {N, _} <- maps:get(protected_names, S, [])] ++ [<<"ta.test">>])}]).
 
 gen_spend_amount(S, Key) ->
   case account(S, Key) of

@@ -1,6 +1,8 @@
 -module(tx_utils).
 
 -include_lib("eqc/include/eqc.hrl").
+-include_lib("eqc/include/eqc_statem.hrl").
+
 -compile([export_all, nowarn_export_all]).
 
 -define(LIMA, false).
@@ -66,15 +68,39 @@ valid_fee(#{protocol := P}, #{ fee := Fee }) ->
 %% Shared generators
 
 gen_fee(Protocol) ->
-    frequency([{29, ?LET(F, choose(20000, 30000), F * minimum_gas_price(Protocol))},
+    frequency([{98, ?LET(F, choose(20000, 30000), F * minimum_gas_price(Protocol))},
                {1,  ?LET(F, choose(0, 15000), F)},   %%  too low (and very low for hard fork)
                {1,  ?LET(F, choose(0, 15000), F * minimum_gas_price(Protocol))}]).    %% too low
 
 gen_fee_above(Protocol, Amount) ->
-    frequency([{29, ?LET(F, choose(Amount, Amount + 10000), F * minimum_gas_price(Protocol))},
+    frequency([{98, ?LET(F, choose(Amount, Amount + 10000), F * minimum_gas_price(Protocol))},
                {1,  ?LET(F, choose(0, Amount - 5000), F)},   %%  too low (and very low for hard fork)
                {1,  ?LET(F, choose(0, Amount - 5000), F * minimum_gas_price(Protocol))}]).    %% too low
 
-
 gen_nonce() ->
     weighted_default({49, good}, {1, {bad, elements([-1, 1, -5, 5, 10000])}}).
+
+gen_gas_price(Protocol) ->
+    frequency([{48, minimum_gas_price(Protocol)},
+               {1,  minimum_gas_price(Protocol) - 1},
+               {1,  1}]).
+
+gen_gas(GasUsed) ->
+    %% frequency([{40, GasUsed}, {8, GasUsed + 3000000}, {1, max(50, GasUsed - 200)}, {1, 10}]).
+    frequency([{1, ?LET(Delta, choose(0, 10), GasUsed + Delta)}, {1, ?LET(Delta, choose(1, 250), max(1, GasUsed - Delta))}]).
+
+gen_deposit() ->
+    frequency([{8, 0}, {2, choose(1, 100000000000000)}]).
+
+gen_account(New, Exist, S) ->
+  txs_spend_eqc:gen_account_key(New, Exist, S).
+
+%% Common functions
+common_postcond(Correct, Res) ->
+    case Res of
+        {error, _} when Correct -> eq(Res, ok);
+        {error, _}              -> true;
+        ok when Correct         -> true;
+        ok                      -> eq(ok, {error, '_'})
+    end.
+
