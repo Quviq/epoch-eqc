@@ -215,7 +215,9 @@ channel_accept_callouts(#{chain := Chain} = S, [Fsm, #{initiator := I, responder
                                                                                                    consensus_version => Protocol}, Trees}),
                 ?CALLOUT(aetx_env, height, [?WILDCARD], PinnedHeight),
                 ?CALLOUT(aetx_env, consensus_version, [?WILDCARD], Protocol),
-                ?CALLOUT(aetx_env, height, [?WILDCARD], PinnedHeight)
+                ?CALLOUT(aetx_env, height, [?WILDCARD], PinnedHeight),
+                ?CALLOUT(aec_chain, top_header, [], hd(Chain)),
+                ?CALLOUT(aec_chain, top_header, [], hd(Chain))
                ]),
           ?SEND(?SELF, ?WILDCARD)]).
 
