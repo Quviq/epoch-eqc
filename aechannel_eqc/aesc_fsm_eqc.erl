@@ -246,10 +246,14 @@ prop_fsm() ->
     ?SETUP(
         fun() ->
                 %% Setup mocking, etc.
-                eqc_mocking:start_mocking(api_spec()),
+                {ok, _} = eqc_mocking:start_mocking(api_spec()),
+                ok = lager_mock:start(),
                 %% Return the teardwown function
                 fun() ->
-                        eqc_mocking:stop_mocking()
+                        eqc_mocking:stop_mocking(),
+                        lager_mock:print(),
+                        lager_mock:stop(),
+                        ok
                 end
         end,
     ?FORALL(Cmds, commands(?MODULE),
@@ -269,18 +273,15 @@ start_supervisor() ->
     unlink(Supervisor).
 
 setup() ->
-    io:format("SETUP~n", []),
     %% ensure we start clean
     cleanup(),
     %% stop the server if running
-    lager_mock:start(),
     application:start(gproc),
     start_supervisor(),
     ok.
 
 cleanup() ->
-    io:format("CLEANUP~n", []),
-    Processes = [aesc_fsm_sup, lager_mock],
+    Processes = [aesc_fsm_sup],
     lists:map(
      fun(Name) ->
         case whereis(Name) of
