@@ -53,7 +53,7 @@ initiate_pre(S) ->
     maps:is_key(alice, S).
 
 initiate_args(S) ->
-    ?LET(Faulty, weighted_default({99, false}, {1, true}),
+    ?LET(Faulty, weighted_default({99, false}, {0, true}),
          ["myhost.com", 16123, #{initiator => alice,
                                  responder => bob,
                                 lock_period => choose(0, 20),
@@ -217,16 +217,21 @@ channel_accept_callouts(#{chain := Chain} = S, [Fsm, #{initiator := I, responder
                 ?CALLOUT(aetx_env, consensus_version, [?WILDCARD], Protocol),
                 ?CALLOUT(aetx_env, height, [?WILDCARD], PinnedHeight),
                 ?CALLOUT(aec_chain, top_header, [], hd(Chain)),
+                ?CALLOUT(aec_chain, top_header, [], hd(Chain)),
+                ?CALLOUT(aec_chain, top_header, [], hd(Chain)),
+                ?CALLOUT(aec_chain, top_header, [], hd(Chain)),
+                ?CALLOUT(aec_chain, top_header, [], hd(Chain)),
                 ?CALLOUT(aec_chain, top_header, [], hd(Chain))
                ]),
-          ?SEND(?SELF, ?WILDCARD)]).
+          ?SEND(?SELF,  {aesc_fsm, ?WILDCARD, #{info => channel_accept, tag => info, type => report}})]),
+    ?SEND(?SELF,  {aesc_fsm, ?WILDCARD, #{info => ?WILDCARD, tag => create_tx, type => sign}}).   %% signed Tx.
 
 
 channel_accept_next(S, _Value, [_Fsm, _Args, _]) ->
     S.
 
-channel_accept_post(_S, [_Fsm, _Args, _], _Res) ->
-    false.
+channel_accept_post(_S, [_Fsm, _Args, _], Res) ->
+    eq(Res, ok).
 
 nonce({account, _, _, Nonce, _, _, _}) ->
     Nonce.
