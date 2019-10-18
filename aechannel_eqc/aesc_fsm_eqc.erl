@@ -15,9 +15,9 @@
 
 %% -- State ------------------------------------------------------------------
 initial_state() ->
-    #{chain => [aec_headers:new_key_header(0, <<"prevhash">>, <<"0 PrevKeyHash">>, <<"genesis">>, <<"miner">>, <<"beneficiary">>,
-                                          2000, 0, 0, 0, 1)],
-      protocol => 4
+    #{ chain => [aec_headers:new_key_header(0, <<"prevhash">>, <<"0 PrevKeyHash">>, <<"genesis">>, <<"miner">>, <<"beneficiary">>,
+                                          2000, 0, 0, 0, default, 1)]
+     , protocol => 4
      }.
 
 %% -- Common pre-/post-conditions --------------------------------------------
@@ -248,13 +248,13 @@ prop_fsm() ->
                 %% Setup mocking, etc.
                 eqc_mocking:start_mocking(api_spec()),
                 %% Return the teardwown function
-                fun() -> ok end
+                fun() ->
+                        eqc_mocking:stop_mocking()
+                end
         end,
     ?FORALL(Cmds, commands(?MODULE),
     begin
-        %% stop the server if running
-        application:start(gproc),
-        start_supervisor(),
+        setup(),
         {H, S, Res} = run_commands(Cmds),
         cleanup(),
         check_command_names(Cmds,
@@ -265,18 +265,30 @@ prop_fsm() ->
     end))).
 
 start_supervisor() ->
-    case whereis(aesc_fsm_sup) of
-        undefined -> ok;
-        Pid -> exit(Pid, kill)
-    end,
     {ok, Supervisor} = aesc_fsm_sup:start_link(),
     unlink(Supervisor).
 
+setup() ->
+    io:format("SETUP~n", []),
+    %% ensure we start clean
+    cleanup(),
+    %% stop the server if running
+    lager_mock:start(),
+    application:start(gproc),
+    start_supervisor(),
+    ok.
+
 cleanup() ->
-    case whereis(aesc_fsm_sup) of
-        undefined -> ok;
-        Pid -> exit(Pid, kill)
-    end.
+    io:format("CLEANUP~n", []),
+    Processes = [aesc_fsm_sup, lager_mock],
+    lists:map(
+     fun(Name) ->
+        case whereis(Name) of
+            undefined -> ok;
+            Pid -> exit(Pid, kill)
+        end
+     end, Processes),
+    ok.
 
 fake_account_gen(Owner) ->
     Pad = 32 - size(Owner),
@@ -293,17 +305,20 @@ fake_account_gen(Owner) ->
 
 %% -- API-spec ---------------------------------------------------------------
 api_spec() ->
-    #api_spec{ language = erlang, mocking = eqc_mocking,
-               modules = [ lager_spec(), noise_layer_spec(),
-                           aec_chain_spec(), lager_spec(),
-                           aec_next_nonce_spec(),
-                           aetx_env_spec() ] }.
+    #api_spec{ language = erlang
+             , mocking = eqc_mocking
+             , modules = [ noise_layer_spec()
+                         , aec_chain_spec()
+                         , aec_next_nonce_spec()
+                         , aetx_env_spec()
+                         , lager_spec()
+                         ]
+             }.
 
 lager_spec() ->
-    #api_module{ name = lager_eqc, fallback = ?MODULE }.
-
-debug(X, Y) ->
-    io:format("LAGER: "++X, Y).
+    #api_module{ name = lager
+               , fallback = lager_mock
+               }.
 
 noise_layer_spec() ->
     #api_module{
