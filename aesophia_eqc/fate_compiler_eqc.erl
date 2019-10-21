@@ -17,8 +17,9 @@ run(Code, Contract, Function0, Arguments) ->
         Call  = make_call(Contract, Function, Arguments),
         Spec  = dummy_spec(),
         case aefa_fate:run_with_cache(Call, Spec, Cache) of
-            {ok, ES}      -> aefa_engine_state:accumulator(ES);
-            {error, E, _} -> {error, binary_to_list(E)}
+            {ok, ES}       -> aefa_engine_state:accumulator(ES);
+            {error, E, _}  -> {error, binary_to_list(E)};
+            {revert, E, _} -> {error, binary_to_list(E)}
         end
     catch _:Err ->
         {'EXIT', Err, erlang:get_stacktrace()}
@@ -28,7 +29,7 @@ compile_contract(Code) ->
     compile_contract(Code, []).
 
 compile_contract(Code, Options) ->
-    {ok, Ast} = aeso_parser:string(Code),
+    Ast       = aeso_parser:string(Code),
     TypedAst  = aeso_ast_infer_types:infer(Ast, Options),
     FCode     = aeso_ast_to_fcode:ast_to_fcode(TypedAst, Options),
     Fate      = aeso_fcode_to_fate:compile(FCode, Options),
