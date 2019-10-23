@@ -287,8 +287,8 @@ is_valid_gas(Name, Fun, ABI, VM, P, Gas) ->
     GasUse = contract_gas(Name, Fun, ABI, P),
     %% io:format("XXX: ~p ~p ~p ~p\n", [Fun, VM, Gas, GasUse]),
     case {lists:member(VM, [aevm_sophia_1, aevm_sophia_2]), Gas - GasUse} of
-      {true, N} when N < 0, N > -4, P < ?LIMA_PROTOCOL_VSN -> Fun /= <<"check_nonce">> andalso Fun /= <<"n_checks">>;
-      {true, N} when N < 0, N > -323, P >= ?LIMA_PROTOCOL_VSN -> Fun /= <<"check_nonce">> andalso Fun /= <<"n_checks">>;
+      {true, N} when N < 0, N > -4, P < ?LIMA_PROTOCOL_VSN -> Fun /= "check_nonce" andalso Fun /= "n_checks";
+      {true, N} when N < 0, N > -323, P >= ?LIMA_PROTOCOL_VSN -> Fun /= "check_nonce" andalso Fun /= "n_checks";
       _ -> true
     end.
 
@@ -374,18 +374,18 @@ fake_contract_id() ->
   #contract{ pubkey    = <<12345:256>>,
              abi       = abi_raw,
              vm        = aevm_sophia_1,
-             functions = [{<<"foo">>, []}] }.
+             functions = [{"foo", []}] }.
 
 %% Add srcs dynamically for the compilers available
 contracts() ->
     Static =
         [#{name => identity,
            args => [],
-           functions => [{<<"main">>, [choose(-100, 1000)]}]
+           functions => [{"main", [choose(-100, 1000)]}]
           },
          #{name => authorize_nonce,
            args => [],
-           functions => [{<<"check_nonce">>, [nat()]}, {<<"n_checks">>, []}]
+           functions => [{"check_nonce", [nat()]}, {"n_checks", []}]
           }
         ],
     [ begin
@@ -402,17 +402,17 @@ contracts() ->
 contract_gas(Contract, Fun, ABI, P) when is_atom(ABI) -> contract_gas(Contract, Fun, abi_to_int(ABI), P);
 contract_gas(identity, init, ?ABI_AEVM_1, _) -> 193;
 contract_gas(identity, init, ?ABI_FATE_1, _) -> 56;
-contract_gas(identity, <<"main">>, ?ABI_AEVM_1, _) -> 192;
-contract_gas(identity, <<"main">>, ?ABI_FATE_1, _) -> 11;
+contract_gas(identity, "main", ?ABI_AEVM_1, _) -> 192;
+contract_gas(identity, "main", ?ABI_FATE_1, _) -> 11;
 
 contract_gas(authorize_nonce, init, ?ABI_AEVM_1, _) -> 417;
 contract_gas(authorize_nonce, init, ?ABI_FATE_1, _) -> 103;
-contract_gas(authorize_nonce, <<"check_nonce">>, ?ABI_AEVM_1, P) when P < ?LIMA_PROTOCOL_VSN -> 414;
-contract_gas(authorize_nonce, <<"check_nonce">>, ?ABI_AEVM_1, _) -> 734;
-contract_gas(authorize_nonce, <<"check_nonce">>, ?ABI_FATE_1, _) -> 135;
-contract_gas(authorize_nonce, <<"n_checks">>, ?ABI_AEVM_1, P) when P < ?LIMA_PROTOCOL_VSN -> 357;
-contract_gas(authorize_nonce, <<"n_checks">>, ?ABI_AEVM_1, _) -> 677;
-contract_gas(authorize_nonce, <<"n_checks">>, ?ABI_FATE_1, _) -> 21;
+contract_gas(authorize_nonce, "check_nonce", ?ABI_AEVM_1, P) when P < ?LIMA_PROTOCOL_VSN -> 414;
+contract_gas(authorize_nonce, "check_nonce", ?ABI_AEVM_1, _) -> 734;
+contract_gas(authorize_nonce, "check_nonce", ?ABI_FATE_1, _) -> 135;
+contract_gas(authorize_nonce, "n_checks", ?ABI_AEVM_1, P) when P < ?LIMA_PROTOCOL_VSN -> 357;
+contract_gas(authorize_nonce, "n_checks", ?ABI_AEVM_1, _) -> 677;
+contract_gas(authorize_nonce, "n_checks", ?ABI_FATE_1, _) -> 21;
 contract_gas(_, _, _, _) -> 1000.
 
 contract_tx_fee(S, Type, Name, ABI) when is_atom(ABI) ->
@@ -435,9 +435,9 @@ size_gas(call, _, ?ABI_AEVM_1)                 -> 230;
 size_gas(call, _, ?ABI_FATE_1)                 -> 110;
 size_gas(_, _, _)                              -> 1000.
 
-contract_payable_fun(authorize_nonce, <<"n_checks">>, VM) ->
+contract_payable_fun(authorize_nonce, "n_checks", VM) ->
     VM /= aevm_sophia_4 andalso VM /= fate_sophia_1;
-contract_payable_fun(authorize_nonce, <<"check_nonce">>, VM) ->
+contract_payable_fun(authorize_nonce, "check_nonce", VM) ->
     VM /= aevm_sophia_4 andalso VM /= fate_sophia_1;
 contract_payable_fun(_, _, _) -> true.
 
