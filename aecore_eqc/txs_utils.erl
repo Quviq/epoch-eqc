@@ -78,20 +78,37 @@ gen_gas_price(Protocol) ->
 
 gen_gas(GasUsed) ->
     %% frequency([{40, GasUsed}, {8, GasUsed + 3000000}, {1, max(50, GasUsed - 200)}, {1, 10}]).
-    frequency([{1, ?LET(Delta, choose(0, 10), GasUsed + Delta)}, {1, ?LET(Delta, choose(1, 250), max(1, GasUsed - Delta))}]).
+    frequency([{18, ?LET(Delta, choose(0, 10), GasUsed + Delta)},
+               {2, ?LET(Delta, choose(0, 10), GasUsed + 3000000 + Delta)},
+               {1, 10},
+               {1, ?LET(Delta, choose(1, 250), max(1, GasUsed - Delta))}]).
 
 gen_deposit() ->
     frequency([{8, 0}, {2, choose(1, 100000000000000)}]).
 
 gen_account(New, Exist, S) ->
-  txs_spend_eqc:gen_account_key(New, Exist, S).
+  txs_spend_eqc:gen_account_id(New, Exist, S).
+
+gen_account(New, Exist, S, Filter) ->
+  txs_spend_eqc:gen_account_id(New, Exist, S, Filter).
+
+gen_contract(New, Exist, S) ->
+  txs_contracts_eqc:gen_contract_id(New, Exist, S).
+
+gen_oracle(New, Exist, S) ->
+  txs_oracles_eqc:gen_oracle_id(New, Exist, S).
 
 %% -- Transactions modifiers
 
 update_nonce(S, Sender, #{nonce := Nonce} = Tx) ->
-  case find_account(S, Sender) of
+  case get_account(S, Sender) of
     false ->
       Tx#{nonce => 1};
+    #account{ ga = #ga{} } ->
+      case Nonce of
+        good     -> Tx#{ nonce => 0 };
+        {bad, N} -> Tx#{ nonce => abs(N) }
+      end;
     Account ->
       case Nonce of
         good ->
@@ -101,13 +118,94 @@ update_nonce(S, Sender, #{nonce := Nonce} = Tx) ->
       end
   end.
 
-find_account(S, ?ACCOUNT(A)) ->
-  maps:get(A, maps:get(accounts, S, #{}), false);
-find_account(S, A) ->
-  maps:get(A, maps:get(accounts, S, #{}), false).
+%% -- Accounts handling
+check_balance(S, AccId, Amount) ->
+  case get_account(S, AccId) of
+    false   -> false;
+    #account{ amount = Amount1 } -> Amount1 >= Amount %% + 100000000000000000000
+  end.
+
+credit(AccId, Amount, S = #{ accounts := Accounts }) ->
+  case get_account(S, AccId) of
+    Acc = #account{ amount = Amount1 } ->
+      update_account(S, AccId, Acc#account{ amount = Amount1 + Amount });
+    false ->
+      {NewId, ?KEY(Key)} = AccId,
+      S#{ accounts => Accounts#{NewId => #account{ key = Key, amount = Amount } } }
+  end.
+
+charge(Key, Amount, S) -> credit(Key, -Amount, S).
+
+bump_nonce(AccId, S) ->
+  Acc = #account{ nonce = Nonce } = get_account(S, AccId),
+  update_account(S, AccId, Acc#account{ nonce = Nonce + 1 }).
+
+reserve_fee(Fee, S = #{fees := Fees, height := H}) ->
+  S#{fees => Fees ++ [{Fee, H}]}.
+
+bump_and_charge(AccId, Fee, S) ->
+  bump_nonce(AccId, charge(AccId, Fee, S)).
+
+is_account(S = #{ with_ga := true }, A) ->
+  false /= get_account(S, A);
+is_account(S, A) ->
+  case get_account(S, A) of
+    #account{ ga = #ga{} } -> false;
+    _                      -> true
+  end.
 
 
-%% Common functions
+get_account(S, ?ACCOUNT(A)) ->
+  maps:get(A, maps:get(accounts, S), false);
+get_account(_S, _) ->
+  false.
+
+get_account_nonce(S, ?ACCOUNT(A)) ->
+  #account{ nonce = Nonce } = maps:get(A, maps:get(accounts, S, #{})),
+  Nonce.
+
+get_account_key(S, ?ACCOUNT(A)) ->
+  #account{ key = Key } = maps:get(A, maps:get(accounts, S, #{})),
+  get_pubkey(S, Key);
+get_account_key(S, {_A, Key}) ->
+  get_pubkey(S, Key);
+get_account_key(_S, <<_:32/unit:8>> = Key) ->
+  Key.
+
+get_pubkey(S, ?KEY(Key)) ->
+  get_pubkey(S, Key);
+get_pubkey(S, Key) when is_atom(Key) ->
+  #key{ public = PK } = maps:get(Key, maps:get(keys, S)),
+  PK.
+
+update_account(S, ?ACCOUNT(A), Acc) -> update_account(S, A, Acc);
+update_account(S = #{ accounts := As }, A, Acc) ->
+  S#{ accounts := As#{ A => Acc } }.
+
+resolve_account(S, {name, Name})    ->
+  case maps:get(Name, maps:get(named_accounts, S, #{}), false) of
+    false           -> false;
+    A = ?ACCOUNT(_)   -> A;
+    A = {Ax, ?KEY(_)} -> case get_account(S, ?ACCOUNT(Ax)) of
+                           false      -> A;
+                           #account{} -> ?ACCOUNT(Ax)
+                         end
+  end;
+resolve_account(_, {contract, Key}) -> {contract, Key};
+resolve_account(_, {_, Key})        -> Key.
+
+is_ga(S, A = ?ACCOUNT(_)) -> is_ga_account(S, A);
+is_ga(S, O = ?ORACLE(_))  -> is_ga(S, txs_oracles_eqc:get_oracle_account(S, O));
+is_ga(S, Q = ?QUERY(_))   -> is_ga(S, txs_oracles_eqc:get_query_oracle(S, Q));
+is_ga(_S, X) -> error({todo, X}).
+
+is_ga_account(S, AccId) ->
+  case get_account(S, AccId) of
+    #account{ ga = #ga{} } -> true;
+    _                      -> false
+  end.
+
+%% --- Common eqc functions
 common_postcond(Correct, Res) ->
     case Res of
         {error, _} when Correct -> eq(Res, ok);

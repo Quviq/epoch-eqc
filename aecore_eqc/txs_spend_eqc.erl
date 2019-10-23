@@ -11,8 +11,6 @@
 
 -compile([export_all, nowarn_export_all]).
 
--import(txs_ga_eqc, [is_ga/2, credit_ga/2]).
-
 -include("txs_eqc.hrl").
 
 %% -- State and state functions ----------------------------------------------
@@ -30,18 +28,16 @@ spend_pre(S) ->
 spend_args(#{protocol := Protocol} = S) ->
   ?LET([Sender, To], [gen_account_id(1, 49, S),
                       frequency([{10, {account, gen_account_id(2, 1, S)}},
-                                 {0, {oracle, gen_account_id(1, 49, S)}}] ++      %% There is no check account really is an oracle!
-                                [{2, {name, gen_name(S)}} || maps:get(named_accounts, S, #{}) /= #{} ] ++
-                                [{1, {contract, gen_contract_id(1, 49, maps:get(contracts, S))}} || maps:get(contracts, S, []) /= []]
+                                 {2, {oracle, gen_account_id(1, 49, S)}}] ++      %% There is no check account really is an oracle!
+                                [{2, {name, gen_name(S)}}                || maps:get(named_accounts, S, #{}) /= #{} ] ++
+                                [{1, {contract, gen_contract(1, 49, S)}} || maps:get(contracts, S, #{}) /= #{}]
                                )]
        ,
        [Sender, To,
-        #{%sender_id => Sender,  %% The sender is asserted to never be a name.
-          %recipient_id => To,
-          amount  => gen_spend_amount(S, Sender),
-          fee     => gen_fee(Protocol),
-          nonce   => gen_nonce(),
-          payload => utf8()}]).
+        #{ amount  => gen_spend_amount(S, Sender),
+           fee     => gen_fee(Protocol),
+           nonce   => gen_nonce(),
+           payload => utf8() }]).
 
 spend_valid(S, [Sender, {ReceiverTag, Receiver}, Tx]) ->
   is_account(S, Sender)
@@ -61,7 +57,10 @@ spend_tx(S, [Sender, Recipient, Tx0]) ->
   SenderId    = aeser_id:create(account, get_account_key(S, Sender)),
   RecipientId =
     case Recipient of
-      {account, RId} -> aeser_id:create(account, get_account_key(S, RId))
+      {account,  RId} -> aeser_id:create(account, get_account_key(S, RId));
+      {oracle,   RId} -> aeser_id:create(oracle, get_account_key(S, RId));
+      {contract, C}   -> aeser_id:create(contract, txs_contracts_eqc:get_contract_key(S, C));
+      {name,     N}   -> aeser_id:create(name, aens_hash:name_hash(N))
     end,
 
   aec_spend_tx:new(Tx1#{ sender_id => SenderId, recipient_id => RecipientId }).
@@ -102,82 +101,38 @@ weight(S, spend) ->
 weight(_S, _) -> 0.
 
 %% -- State update and query functions ---------------------------------------
-resolve_account(S, {name, Name})    -> maps:get(Name, maps:get(named_accounts, S, #{}), false);
-resolve_account(_, {contract, Key}) -> {contract, Key};
-resolve_account(_, {_, Key})        -> Key.
 
-check_balance(S, AccId, Amount) ->
-  case get_account(S, AccId) of
-    false   -> false;
-    #account{ amount = Amount1 } -> Amount1 >= Amount %% + 100000000000000000000
-  end.
 
-credit(AccId, Amount, S = #{ accounts := Accounts }) ->
-  case get_account(S, AccId) of
-    Acc = #account{ amount = Amount1 } ->
-      update_account(S, AccId, Acc#account{ amount = Amount1 + Amount });
-    false ->
-      {NewId, ?KEY(Key)} = AccId,
-      S#{ accounts => Accounts#{NewId => #account{ key = Key, amount = Amount } } }
-  end.
-
+%% --- local helpers ------
 credit_contract(_Key, _Amount, S = #{ contracts := _Contracts}) ->
   S.
 
-charge(Key, Amount, S) -> credit(Key, -Amount, S).
-
-bump_nonce(AccId, S) ->
-  Acc = #account{ nonce = Nonce } = get_account(S, AccId),
-  update_account(S, AccId, Acc#account{ nonce = Nonce + 1 }).
-
-reserve_fee(Fee, S = #{fees := Fees, height := H}) ->
-  S#{fees => Fees ++ [{Fee, H}]}.
-
-bump_and_charge(AccId, Fee, S) ->
-  bump_nonce(AccId, charge(AccId, Fee, S)).
-
-is_account(S, A) ->
-  false /= get_account(S, A).
-
-get_account(S, ?ACCOUNT(A)) ->
-  maps:get(A, maps:get(accounts, S), false);
-get_account(_S, _) ->
-  false.
-
-get_account_key(S, ?ACCOUNT(A)) ->
-  #account{ key = Key } = maps:get(A, maps:get(accounts, S, #{})),
-  get_pubkey(S, Key);
-get_account_key(S, {_A, Key}) ->
-  get_pubkey(S, Key).
-
-get_pubkey(S, ?KEY(Key)) ->
-  get_pubkey(S, Key);
-get_pubkey(S, Key) when is_atom(Key) ->
-  #key{ public = PK } = maps:get(Key, maps:get(keys, S)),
-  PK.
-
-update_account(S, ?ACCOUNT(A), Acc) -> update_account(S, A, Acc);
-update_account(S = #{ accounts := As }, A, Acc) ->
-  S#{ accounts := As#{ A => Acc } }.
-
-%% --- local helpers ------
-
-
 %% -- Generators -------------------------------------------------------------
-gen_account_id(New, Exist, #{accounts := Accounts, keys := Keys}) ->
+
+gen_account_id(New, Exist, S = #{ with_ga := true }) ->
+  gen_account_id(New, Exist, S, fun(A) -> is_ga_account(S, ?ACCOUNT(A)) end);
+gen_account_id(New, Exist, S) ->
+  gen_account_id(New, Exist, S, fun(A) -> not is_ga_account(S, ?ACCOUNT(A)) end).
+
+gen_account_id(New, Exist, #{accounts := Accounts, keys := Keys}, Filter) ->
   case [ Key || Key <- maps:keys(Keys), not lists:keymember(Key, #account.key, maps:values(Accounts)) ] of
     [] ->
-      ?LET(A, elements(maps:keys(Accounts)), ?ACCOUNT(A));
+      ?LET(A, gen_account_id(maps:keys(Accounts), Filter), ?ACCOUNT(A));
     NewKeys ->
-      NewId = list_to_atom(lists:concat(["account_", maps:size(Accounts)])),
       weighted_default(
-        {Exist, ?LET(A, elements(maps:keys(Accounts)), ?ACCOUNT(A))},
-        {New,   {NewId, ?LET(K, elements(NewKeys), ?KEY(K))}})
+        {Exist, ?LET(A, gen_account_id(maps:keys(Accounts), Filter), ?ACCOUNT(A))},
+        {New,   ?LET(K, elements(NewKeys), {mk_acc_id(K), ?KEY(K)})})
   end.
 
-gen_contract_id(Invalid, Valid, Contracts) ->
-  frequency([{Invalid, noshrink(binary(32))},
-             {Valid, ?LET(C, elements(Contracts), element(4, C))}]).
+gen_account_id(As, Filter) ->
+  case lists:filter(Filter, As) of
+    []  -> elements(As);
+    As1 -> weighted_default({29, elements(As1)}, {1, elements(As)})
+  end.
+
+mk_acc_id(K) ->
+  StrId = lists:last(string:lexemes(atom_to_list(K), "_")),
+  list_to_atom("account_" ++ StrId).
 
 gen_name(S) ->
   frequency([{49, elements(maps:keys(maps:get(named_accounts, S, #{})))},

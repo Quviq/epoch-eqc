@@ -14,12 +14,9 @@
 -compile([export_all, nowarn_export_all]).
 
 -include("txs_eqc.hrl").
--import(txs_spend_eqc, [is_account/2, reserve_fee/2, bump_and_charge/3, check_balance/3, credit/3]).
 
--define(NAMEFRAGS, ["foo", "longer-name",
-                    "31-bytes-minimum-as-auctionname",
-                    "this-name-is-32-bytes-ascii-name",
-                    "this-name-is-more-than-32-bytes-ascii-name"  %% do not enter auction
+-define(NAMEFRAGS, ["aaa", "bbbbbbb", "ccccccccccc",
+                    "ddddddddddddddd", "eeeeeeeeeeeeeeeee", "ffffffffffffffff"
                    ]).
 
 -record(preclaim,{name, salt, height, claimer, protocol, expires_by}).
@@ -39,9 +36,16 @@ initial_state(S) ->
 %% -- Operations -------------------------------------------------------------
 
 mine_next(#{height := Height} = S, _Value, [Blocks]) ->
+  %% This isn't entirely faithful - if we preclaim, claim, preclaim
+  %% the exact same {name, salt} the preclaim will expire early...
   ExpiredPreclaims = expired_preclaims(S, Height + Blocks),
   ExpiredClaims = expired_claims(S, Height + Blocks),
-  ExpiredNames = [ {C#claim.name, C#claim.expires_by + aec_governance:name_protection_period()} || C <- ExpiredClaims ],
+  %% Revoke does set `expires_by` in the past... Fix that here.
+  ProtectPeriod = fun(C) ->
+                      FixRevoked = if C#claim.expires_by == Height - 1 -> 1; true -> 0 end,
+                      C#claim.expires_by + aec_governance:name_protection_period() + FixRevoked
+                  end,
+  ExpiredNames = [ {C#claim.name, ProtectPeriod(C)} || C <- ExpiredClaims ],
   ExpiredProtected = expired_protection(S, Height + Blocks),
   ExpiredAuctions = expired_auctions(S, Height + Blocks),
   S#{preclaims => maps:get(preclaims, S, []) -- ExpiredPreclaims,
@@ -72,29 +76,29 @@ auction_to_claim(#auction{name = Name, expires_by = Height, claimer = Claimer}) 
 ns_preclaim_pre(S) ->
   maps:is_key(accounts, S).
 
-%% We cannot reject invalid names here, because we only get teh hash of it.
-ns_preclaim_args(S = #{protocol := Protocol}) ->
-  ?LET([Sender, Name, Salt],
-       [gen_account(1, 49, S), gen_name(), gen_salt()],
-       [Sender, {Name, Salt},
-        #{account_id => aeser_id:create(account, Sender),
-          fee => gen_fee(Protocol),
-          commitment_id =>
-            aeser_id:create(commitment,
-                            aens_hash:commitment_hash(Name, Salt)),
+%% We cannot reject invalid names here, because we only get the hash of it.
+ns_preclaim_args(S = #{protocol := P}) ->
+  ?LET([Account, Name, Salt],
+       [gen_account(1, 49, S), gen_name(P), gen_salt()],
+       [Account, {Name, Salt},
+        #{fee => gen_fee(P),
           nonce => gen_nonce()}]).
 
-ns_preclaim_valid(S, [Sender, {Name, Salt}, Tx]) ->
-  valid([{account, is_account(S, Sender)},
-         {balance, check_balance(S, Sender, maps:get(fee, Tx))},
+ns_preclaim_valid(S, [Account, {Name, Salt}, Tx]) ->
+  valid([{account, is_account(S, Account)},
+         {balance, check_balance(S, Account, maps:get(fee, Tx))},
          {nonce, maps:get(nonce, Tx) == good},
          {fee, tx_utils:valid_fee(S, Tx)},
-         {new_name_and_salt, new_name_and_salt(maps:get(preclaims, S, []), Name, Salt)}]).
+         {new_name_and_salt, new_name_and_salt(maps:get(preclaims, S, []), Name, Salt)}
+        ]).
 
-ns_preclaim_tx(S, [Sender, {_Name, _Salt}, Tx]) ->
-  aens_preclaim_tx:new(update_nonce(S, Sender, Tx)).
+ns_preclaim_tx(S, [Account, {Name, Salt}, Tx]) ->
+  Tx1       = update_nonce(S, Account, Tx),
+  AccountId = aeser_id:create(account, get_account_key(S, Account)),
+  CommitId  = aeser_id:create(commitment, aens_hash:commitment_hash(Name, Salt)),
+  aens_preclaim_tx:new(Tx1#{ account_id => AccountId, commitment_id => CommitId }).
 
-ns_preclaim_next(S = #{height := Height}, _Value, [Sender, {Name, Salt}, Tx] = Args) ->
+ns_preclaim_next(S = #{height := Height}, _Value, [Account, {Name, Salt}, Tx] = Args) ->
   case ns_preclaim_valid(S, Args) of
     true  ->
       #{ fee := Fee } = Tx,
@@ -102,10 +106,10 @@ ns_preclaim_next(S = #{height := Height}, _Value, [Sender, {Name, Salt}, Tx] = A
                            salt    = Salt,
                            height  = Height,
                            expires_by = Height + aec_governance:name_preclaim_expiration(),
-                           claimer = Sender,
+                           claimer = Account,
                            protocol = aec_hard_forks:protocol_effective_at_height(Height)},
       reserve_fee(Fee,
-                  bump_and_charge(Sender, Fee,
+                  bump_and_charge(Account, Fee,
                                   add(preclaims, Preclaim, S)));
     _ -> S
   end.
@@ -113,47 +117,47 @@ ns_preclaim_next(S = #{height := Height}, _Value, [Sender, {Name, Salt}, Tx] = A
 ns_preclaim_post(S, Args, Res) ->
   common_postcond(ns_preclaim_valid(S, Args), Res).
 
-ns_preclaim_features(S, [_Sender, {_Name, _Salt}, _Tx] = Args, Res) ->
+ns_preclaim_features(S, [_Account, {_Name, _Salt}, _Tx] = Args, Res) ->
   Correct = ns_preclaim_valid(S, Args),
   [{correct, case Correct of true -> ns_preclaim; _ -> false end},
    {ns_preclaim, Res} ].
 
 %% --- Operation: ns_claim ---
 ns_claim_pre(S) ->
-  maps:is_key(accounts, S) andalso maps:get(preclaims, S, []) /= [].
+  maps:is_key(accounts, S) andalso maps:get(auctions, S) ++ maps:get(preclaims, S, []) /= [].
 
 ns_claim_args(S = #{protocol := Protocol}) ->
-  ?LET({Name, Salt, Sender}, gen_claim(S),
-       [Sender,
-        #{account_id => aeser_id:create(account, Sender),
-          name => Name,
+  ?LET({Name, Salt, Account}, gen_claim(S),
+       [Account,
+        #{name => Name,
           name_salt => Salt,
           fee => gen_fee(Protocol),
           name_fee => gen_name_claim_fee(S, Name),
           nonce => gen_nonce()}]).
 
-ns_claim_valid(S = #{height := Height}, [Sender, #{name := Name} = Tx]) ->
+ns_claim_valid(S = #{height := Height}, [Account, #{name := Name} = Tx]) ->
   Protocol = aec_hard_forks:protocol_effective_at_height(Height),
-  valid([{account, is_account(S, Sender)},
-         {balance, check_balance(S, Sender, maps:get(fee, Tx) + name_fee(Tx))},
+  valid([{account, is_account(S, Account)},
+         {balance, check_balance(S, Account, maps:get(fee, Tx) + name_fee(Tx))},
          {nonce, maps:get(nonce, Tx) == good},
          {fee, tx_utils:valid_fee(S, Tx)},
-         {preclaim, is_valid_preclaim(Protocol, S, Tx, Sender)},  %% after Lima Salt distinguishes
-         {valid_name,  valid_name(Protocol, maps:get(name,Tx))},
+         {preclaim, is_valid_preclaim(Protocol, S, Tx, Account)},  %% after Lima Salt distinguishes
+         {valid_name, valid_name(Protocol, maps:get(name,Tx))},
          {unclaimed, not is_claimed(S, Name)},
          {unprotected, not is_protected(S, Name)},
          {valid_name_fee, is_valid_name_fee(Protocol, Name, maps:get(name_fee, Tx))},
          {valid_bid, is_valid_bid(Protocol, S, Name, maps:get(name_fee, Tx))}]).
 
-ns_claim_tx(S, [Sender, Tx]) ->
-  Protocol = aec_hard_forks:protocol_effective_at_height(maps:get(height, S)),
-  FixTx = case maps:get(name_fee, Tx) == prelima orelse Protocol < 4 of
+ns_claim_tx(S = #{ protocol := P }, [Account, Tx]) ->
+  FixTx = case maps:get(name_fee, Tx) == prelima orelse P < ?LIMA_PROTOCOL_VSN of
             true -> maps:remove(name_fee, Tx);
             false -> Tx
           end,
-  aens_claim_tx:new(update_nonce(S, Sender, FixTx)).
+  Tx1       = update_nonce(S, Account, FixTx),
+  AccountId = aeser_id:create(account, get_account_key(S, Account)),
+  aens_claim_tx:new(Tx1#{ account_id => AccountId }).
 
-ns_claim_next(S = #{height := Height}, _Value, [Sender, Tx] = Args) ->
+ns_claim_next(S = #{height := Height}, _Value, [Account, Tx] = Args) ->
   case ns_claim_valid(S, Args) of
     true  ->
       #{ fee := Fee, name := Name} = Tx,
@@ -163,30 +167,30 @@ ns_claim_next(S = #{height := Height}, _Value, [Sender, Tx] = Args) ->
           Claim = #claim{name    = Name,
                          height  = Height,
                          expires_by = Height + aec_governance:name_claim_max_expiration(),
-                         claimer = Sender,
+                         claimer = Account,
                          protocol = Protocol},
           remove_preclaim(Tx,
             reserve_fee(Fee,
-              bump_and_charge(Sender, Fee + name_fee(Tx), add(claims, Claim, S))));
+              bump_and_charge(Account, Fee + name_fee(Tx), add(claims, Claim, S))));
         Timeout ->
           NameFee = maps:get(name_fee, Tx),
           NewBid = #auction{name = Name,
                             height = Height,
                             expires_by = Height + Timeout,
                             bid = NameFee,
-                            claimer = Sender,
+                            claimer = Account,
                             protocol = Protocol},
           S1 = add(auctions, NewBid, remove(auctions, Name, #auction.name, S)),
           case find_auction(S, Name) of
             false ->
               remove_preclaim(Tx,
                 reserve_fee(Fee,
-                  bump_and_charge(Sender, Fee + NameFee, S1)));
+                  bump_and_charge(Account, Fee + NameFee, S1)));
             #auction{claimer = PrevBidder,
                      bid = PrevBid} ->
               reserve_fee(Fee,
                 credit(PrevBidder, PrevBid,
-                  bump_and_charge(Sender, Fee + NameFee, S1)))
+                  bump_and_charge(Account, Fee + NameFee, S1)))
           end
       end;
     _ -> S
@@ -195,21 +199,20 @@ ns_claim_next(S = #{height := Height}, _Value, [Sender, Tx] = Args) ->
 ns_claim_post(S, Args, Res) ->
   common_postcond(ns_claim_valid(S, Args), Res).
 
-
-ns_claim_features(S =  #{height := Height}, [_Sender, Tx] = Args, Res) ->
+ns_claim_features(S =  #{height := Height}, [_Account, Tx] = Args, Res) ->
   Correct = ns_claim_valid(S, Args),
   Name = maps:get(name, Tx),
   Salt = maps:get(name_salt, Tx),
   [{correct, if Correct -> ns_claim; true -> false end},
    {ns_claim, Res}] ++
-    [{ns_claim, maps:get(name, Tx)} || Res == ok] ++
-    [{ns_claim, {name_in_auction, if Salt == 0 -> right_salt;
+    [{ns_claim_, maps:get(name, Tx)} || Res == ok] ++
+    [{ns_claim_, {name_in_auction, if Salt == 0 -> right_salt;
                                      true -> wrong_salt end}} ||
       find_auction(S, Name) =/= false ] ++
-    [{ns_claim, {already_claimed, if Salt == 0 -> zero_salt;
+    [{ns_claim_, {already_claimed, if Salt == 0 -> zero_salt;
                                      true -> salt end}} ||
       is_claimed_name(S, Name) ] ++
-    [ {ns_claim, {protocol,
+    [ {ns_claim_, {protocol,
                   aec_hard_forks:protocol_effective_at_height(Height) -
                     get_preclaim_protocol(Tx,S)}} || Correct andalso Salt =/= 0 ].
 
@@ -219,47 +222,51 @@ ns_update_pre(S) ->
   maps:is_key(accounts, S).
 
 ns_update_args(S = #{protocol := Protocol}) ->
-  ?LET({{Name, Sender}, Pointers},
+  ?LET({{Name, Account}, Pointers},
        {gen_claimed_name(S), gen_pointers(S)},
-       [Name, Sender, Pointers,
-        #{account_id => aeser_id:create(account, Sender),
-          name_id => aeser_id:create(name, aens_hash:name_hash(Name)),
+       [Account, Name, Pointers,
+        #{name_id => aeser_id:create(name, aens_hash:name_hash(Name)),
           name_ttl => frequency([{10, nat()}, {1, 36000}, {10, 25000}, {1, choose(30000, 60000)}]),
           client_ttl => nat(),
           fee => gen_fee(Protocol),
-          nonce => gen_nonce(),
-          pointers =>
-            [ case Kind of
-                account -> aens_pointer:new(<<"account_pubkey">>, aeser_id:create(account, Key));  %% only then named account
-                oracle -> aens_pointer:new(<<"oracle">>, aeser_id:create(oracle, Key));
-                fake -> aens_pointer:new(<<"fake">>, aeser_id:create(account, Key))
-                        %% We need create. Otherwise crashes for unknown types, because specialize type in aeser_id is used.
-                        %% This means that such a transaction cannot be created (which makes sense if serialization of it is undefined
-              end || {Kind, Key} <- Pointers ]
+          nonce => gen_nonce()
          }]).
 
-ns_update_valid(S, [Name, Sender, _Pointers, Tx]) ->
-  valid([{account, is_account(S, Sender)},
-         {balance, check_balance(S, Sender, maps:get(fee, Tx) + aec_governance:name_claim_locked_fee())},
+ns_update_valid(S, [Account, Name, _Pointers, Tx]) ->
+  valid([{account, is_account(S, Account)},
+         {balance, check_balance(S, Account, maps:get(fee, Tx) + aec_governance:name_claim_locked_fee())},
          {nonce, maps:get(nonce, Tx) == good},
          {fee, tx_utils:valid_fee(S, Tx)},
          {name_expiry, maps:get(name_ttl, Tx) =< aec_governance:name_claim_max_expiration()},
          {claimed_name, is_claimed_name(S, Name)},
-         {owner, owns_name(S, Sender, Name)}]).
+         {owner, owns_name(S, Account, Name)}]).
 
-ns_update_tx(S, [_Name, Sender, _Pointers, Tx]) ->
-  aens_update_tx:new(update_nonce(S, Sender, Tx)).
+ns_update_tx(S, [Account, _Name, Pointers, Tx]) ->
+  Tx1       = update_nonce(S, Account, Tx),
+  AccountId = aeser_id:create(account, get_account_key(S, Account)),
+  Pointers1 = [ aens_pointer_new(S, Kind, Key) || {Kind, Key} <- Pointers ],
+  aens_update_tx:new(Tx1#{ account_id => AccountId, pointers => Pointers1 }).
 
-ns_update_next(#{height := Height} = S, _, [Name, Sender, Pointers, Tx] = Args) ->
+aens_pointer_new(_S, fake, Key) -> aens_pointer_new(fake, Key);
+aens_pointer_new(S, oracle, Key = ?ORACLE(_)) ->
+  aens_pointer_new(oracle, txs_oracles_eqc:get_oracle_key(S, Key));
+aens_pointer_new(S, Kind,  Key) ->
+  aens_pointer_new(Kind, get_account_key(S, Key)).
+
+aens_pointer_new(account, Id) -> aens_pointer:new(<<"account_pubkey">>, aeser_id:create(account, Id));
+aens_pointer_new(oracle,  Id) -> aens_pointer:new(<<"oracle">>,         aeser_id:create(oracle,  Id));
+aens_pointer_new(fake,    Id) -> aens_pointer:new(<<"fake">>,           aeser_id:create(account, Id)).
+
+ns_update_next(#{height := Height} = S, _, [Account, Name, Pointers, Tx] = Args) ->
   case ns_update_valid(S, Args) of
     true  ->
       #{ fee := Fee, name_ttl := TTL } = Tx,
       S1 = case lists:keyfind(account, 1, Pointers) of
              false -> remove_named_account(Name, S);
-             {_, Key}  -> add_named_account(Name, Key, S)
+             {_, AccId} -> add_named_account(Name, AccId, S)
            end,
       reserve_fee(Fee,
-                  bump_and_charge(Sender, Fee,
+                  bump_and_charge(Account, Fee,
                                   update_claim_height(Name, Height, TTL, S1)));
     _ -> S
   end.
@@ -267,11 +274,11 @@ ns_update_next(#{height := Height} = S, _, [Name, Sender, Pointers, Tx] = Args) 
 ns_update_post(S, Args, Res) ->
   common_postcond(ns_update_valid(S, Args), Res).
 
-ns_update_features(S, [_Name, _Sender, Pointers, _Tx] = Args, Res) ->
+ns_update_features(S, [_Account, _Name, Pointers, _Tx] = Args, Res) ->
   Correct = ns_update_valid(S, Args),
   [{correct, case Correct of true -> ns_update; _ -> false end},
    {ns_update, Res}] ++
-    [{ns_update, [ Kind || {Kind, _} <- Pointers]}].
+    [{ns_update_, [ Kind || {Kind, _} <- Pointers]}].
 
 
 %% --- Operation: ns_revoke ---
@@ -279,31 +286,32 @@ ns_revoke_pre(S) ->
   maps:is_key(accounts, S).
 
 ns_revoke_args(#{protocol := Protocol} = S) ->
-  ?LET({Name, Sender}, gen_claimed_name(S),
-       [Sender, Name,
-        #{account_id => aeser_id:create(account, Sender),
-          name_id => aeser_id:create(name, aens_hash:name_hash(Name)),
+  ?LET({Name, Account}, gen_claimed_name(S),
+       [Account, Name,
+        #{name_id => aeser_id:create(name, aens_hash:name_hash(Name)),
           fee => gen_fee(Protocol),
           nonce => gen_nonce()
          }]).
 
-ns_revoke_valid(S, [Sender, Name, Tx]) ->
-  valid([{account, is_account(S, Sender)},
-         {balance, check_balance(S, Sender, maps:get(fee, Tx))},
+ns_revoke_valid(S, [Account, Name, Tx]) ->
+  valid([{account, is_account(S, Account)},
+         {balance, check_balance(S, Account, maps:get(fee, Tx))},
          {nonce, maps:get(nonce, Tx) == good},
          {fee, tx_utils:valid_fee(S, Tx)},
          {claimed_name, is_claimed_name(S, Name)},
-         {owner, owns_name(S, Sender, Name)}]).
+         {owner, owns_name(S, Account, Name)}]).
 
-ns_revoke_tx(S, [Sender, _Name, Tx]) ->
-  aens_revoke_tx:new(update_nonce(S, Sender, Tx)).
+ns_revoke_tx(S, [Account, _Name, Tx]) ->
+  Tx1       = update_nonce(S, Account, Tx),
+  AccountId = aeser_id:create(account, get_account_key(S, Account)),
+  aens_revoke_tx:new(Tx1#{ account_id => AccountId }).
 
-ns_revoke_next(#{height := Height} = S, _Value, [Sender, Name, Tx] = Args) ->
+ns_revoke_next(#{height := Height} = S, _Value, [Account, Name, Tx] = Args) ->
     case ns_revoke_valid(S, Args) of
         true  ->
             #{ fee := Fee } = Tx,
             reserve_fee(Fee,
-            bump_and_charge(Sender, Fee,
+            bump_and_charge(Account, Fee,
                 remove_named_account(Name,
                                      revoke_claim(Name, Height, S))));
       _ -> S
@@ -313,13 +321,13 @@ ns_revoke_post(S, Args, Res) ->
   common_postcond(ns_revoke_valid(S, Args), Res).
 
 
-ns_revoke_features(#{height := Height} = S, [Sender, Name, _Tx] = Args, Res) ->
+ns_revoke_features(#{height := Height} = S, [Account, Name, _Tx] = Args, Res) ->
   Correct = ns_revoke_valid(S, Args),
   [{correct, case Correct of true -> ns_revoke; _ -> false end},
    {ns_revoke, Res}] ++
     [ {protocol, ns_revoke,
        aec_hard_forks:protocol_effective_at_height(Height) -
-         get_claim_protocol({Name, Sender}, S)} ||
+         get_claim_protocol({Name, Account}, S)} ||
       Correct == true
     ].
 
@@ -328,45 +336,46 @@ ns_transfer_pre(S) ->
   maps:is_key(accounts, S).
 
 ns_transfer_args(#{protocol := Protocol} = S) ->
-  ?LET({{Name, Sender}, To},
+  ?LET({{Name, Account}, To},
        {gen_claimed_name(S),
-        oneof([{account, gen_account(1, 49, S)},
-               {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++ [<<"ta.test">>, <<"ta.aet">>])}])},
-       [Sender, To, Name,
-        #{account_id => aeser_id:create(account, Sender),  %% The sender is asserted to never be a name.
-          recipient_id =>
-            case To of
-              {account, Receiver} ->
-                aeser_id:create(account, Receiver);
-              {name, ToName} ->
-                aeser_id:create(name, aens_hash:name_hash(ToName))
-            end,
-          name_id => aeser_id:create(name, aens_hash:name_hash(Name)),
+        oneof([{account, gen_account(1, 49, S)}, %% TODO better generator
+               {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++ [<<"ta.test">>, <<"ta.chain">>])}])},
+       [Account, To, Name,
+        #{name_id => aeser_id:create(name, aens_hash:name_hash(Name)),
           fee => gen_fee(Protocol),
           nonce => gen_nonce()
          }]).
 
-ns_transfer_valid(S, [Sender, To, Name, Tx]) ->
-  valid([{account, is_account(S, Sender)},
-         {balance, check_balance(S, Sender, maps:get(fee, Tx))},
+ns_transfer_valid(S, [Account, To, Name, Tx]) ->
+  valid([{account, is_account(S, Account)},
+         {balance, check_balance(S, Account, maps:get(fee, Tx))},
          {nonce, maps:get(nonce, Tx) == good},
          {fee, tx_utils:valid_fee(S, Tx)},
          {claimed_name, is_claimed_name(S, Name)},
-         {owner, owns_name(S, Sender, Name)},
+         {owner, owns_name(S, Account, Name)},
          {receiver_account,
           resolve_account(S, To) =/= false} %%  Assumption the recipient does not need to exist
         ]).
 
-ns_transfer_tx(S, [Sender, _To, _Name, Tx]) ->
-  aens_transfer_tx:new(update_nonce(S, Sender, Tx)).
+ns_transfer_tx(S, [Account, Recipient, _Name, Tx0]) ->
+  Tx1         = update_nonce(S, Account, Tx0),
+  AccountId   = aeser_id:create(account, get_account_key(S, Account)),
+  RecipientId =
+    case Recipient of
+      {account, RId} -> aeser_id:create(account, get_account_key(S, RId));
+      {oracle,  RId} -> aeser_id:create(oracle, get_account_key(S, RId));
+      {name,    N}   -> aeser_id:create(name, aens_hash:name_hash(N))
+    end,
 
-ns_transfer_next(S, _, [Sender, To, Name, Tx] = Args) ->
+  aens_transfer_tx:new(Tx1#{ account_id => AccountId, recipient_id => RecipientId }).
+
+ns_transfer_next(S, _, [Account, To, Name, Tx] = Args) ->
     case ns_transfer_valid(S, Args) of
         true  ->
             #{ fee := Fee } = Tx,
             ReceiverKey = resolve_account(S, To),
             reserve_fee(Fee,
-            bump_and_charge(Sender, Fee,
+            bump_and_charge(Account, Fee,
                 transfer_name(ReceiverKey, Name,
                               credit(ReceiverKey, 0, S))));   %% to create it if it doesn't exist
       _ -> S
@@ -376,7 +385,7 @@ ns_transfer_post(S, Args, Res) ->
   common_postcond(ns_transfer_valid(S, Args), Res).
 
 
-ns_transfer_features(S, [_Sender, _To, _Name, _Tx] = Args, Res) ->
+ns_transfer_features(S, [_Account, _To, _Name, _Tx] = Args, Res) ->
   Correct = ns_transfer_valid(S, Args),
   [{correct, case Correct of true -> ns_transfer; _ -> false end},
    {ns_transfer, Res}].
@@ -389,20 +398,20 @@ weight(S, ns_preclaim) ->
     [] -> 10;
     _  -> 3 end;
 weight(S, ns_claim)    ->
-  case good_preclaims(S) of
+  case good_preclaims(S) ++ maps:get(auctions, S) of
     [] -> 1;
     _  -> 10 end;
 weight(S, ns_update) ->
-  case maps:get(claims, S, []) of
-    [] -> 1;
+  case good_claims(S) of
+    [] -> 0;
     _  -> 9 end;
 weight(S, ns_revoke) ->
-  case maps:get(claims, S, []) of
-    [] -> 1;
+  case good_claims(S) of
+    [] -> 0;
     _  -> 3 end;
 weight(S, ns_transfer) ->
-  case maps:get(claims, S, []) of
-    [] -> 1;
+  case good_claims(S) of
+    [] -> 0;
     _ -> 5 end;
 
 weight(_S, _) -> 0.
@@ -423,8 +432,19 @@ expired_auctions(S, Height) ->
 expired_protection(S, Height) ->
   [ {N, H} || {N, H} <- maps:get(protected_names, S), H < Height ].
 
-good_preclaims(#{ preclaims := Ps, height := H}) ->
-  [ P || P = #preclaim{ height = H0 } <- Ps, H0 < H ].
+good_preclaims(S = #{ preclaims := Ps, height := H}) ->
+  [ P || P = #preclaim{ expires_by = H0, claimer = C } <- Ps, H0 >= H, is_good(S, C) ].
+
+good_claims(S = #{ claims := Cs, height := H}) ->
+  [ Cl || Cl = #claim{ expires_by = H0, claimer = C } <- Cs, H0 >= H, is_good(S, C) ].
+
+is_good(S, Acc) ->
+  WGA = maps:get(with_ga, S, false),
+  case get_account(S, Acc) of
+    #account{ ga = #ga{} } when WGA     -> true;
+    #account{ ga = false } when not WGA -> true;
+    _                                   -> false
+  end.
 
 add(Tag, X, S) ->
   S#{ Tag => maps:get(Tag, S, []) ++ [X] }.
@@ -438,8 +458,12 @@ remove_named_account(Name, S) ->
 add_named_account(Name, Acc, S) ->
   S#{ named_accounts => maps:merge(maps:get(named_accounts, S, #{}), #{ Name => Acc }) }.
 
-transfer_name(NewOwner, Name, S) ->
-  on_claim(Name, fun(C) -> C#claim{ claimer = NewOwner } end, S).
+transfer_name(?ACCOUNT(NewOwner), Name, S) ->
+  transfer_name(NewOwner, Name, S);
+transfer_name({NewOwner, ?KEY(_)}, Name, S) ->
+  transfer_name(NewOwner, Name, S);
+transfer_name(NewOwner, Name, S) when is_atom(NewOwner) ->
+  on_claim(Name, fun(C) -> C#claim{ claimer = ?ACCOUNT(NewOwner) } end, S).
 
 on_claim(Name, Fun, S = #{ claims := Claims }) ->
   Upd = fun(C = #claim{ name = N }) when Name == N -> Fun(C);
@@ -461,7 +485,7 @@ backward_compatible(Height, Name) ->
   length(Domains) == 2 andalso
   ((aec_hard_forks:protocol_effective_at_height(Height) >= 4
    andalso
-   lists:last(Domains) == <<"aet">>)
+   lists:last(Domains) == <<"chain">>)
     orelse
       (aec_hard_forks:protocol_effective_at_height(Height) < 4  andalso
        length(Domains) == 2)).
@@ -469,14 +493,10 @@ backward_compatible(Height, Name) ->
 
 %% --- local helpers ------
 
+
 name_fee(#{ name_fee := NFee })      -> name_fee(NFee);
 name_fee(prelima)                    -> aec_governance:name_claim_locked_fee();
 name_fee(NFee) when is_integer(NFee) -> NFee.
-
-resolve_account(S, {name, Name}) ->
-  maps:get(Name, maps:get(named_accounts, S, #{}), false);
-resolve_account(_S, {account, Key}) ->
-  Key.
 
 new_name_and_salt(Ps, Name, Salt) ->
   [ P || P = #preclaim{name = Na, salt = Sa} <- Ps,
@@ -565,9 +585,14 @@ find_auction(S, Name) ->
   lists:keyfind(Name, #auction.name, maps:get(auctions, S)).
 
 %% -- Generators -------------------------------------------------------------
-gen_name() ->
-  ?LET({SubName, Suffix}, {gen_subname(), oneof(["test", "aet"])},
+gen_name(P) ->
+  ?LET({SubName, Suffix}, {gen_subname(), gen_registrar(P)},
        return(iolist_to_binary(lists:join(".", [SubName] ++ [Suffix])))).
+
+gen_registrar(P) when P < ?LIMA_PROTOCOL_VSN ->
+  weighted_default({49, "test"}, {1, "aet"});
+gen_registrar(_P) ->
+  weighted_default({49, "aet"}, {1, "test"}).
 
 gen_subname() ->
   ?LET(NFs, frequency([{1, non_empty(list(elements(?NAMEFRAGS)))},
@@ -575,6 +600,9 @@ gen_subname() ->
        return(iolist_to_binary(lists:join(".", NFs)))).
 
 gen_salt() -> choose(270, 280).
+
+gen_salt(X) ->
+  weighted_default({49, X}, {1, oneof([0, gen_salt()])}).
 
 gen_name_claim_fee(#{ protocol := P }, _Name) when P < ?LIMA_PROTOCOL_VSN ->
   frequency([{99, prelima}, {1, choose(1, 1000000000000000)}]);
@@ -585,31 +613,51 @@ gen_name_claim_fee(S = #{ protocol := P }, Name) ->
       end,
   frequency([{49, elements([F, F + 1, F * 2])}, {1, elements([F - 1, F div 2])}]).
 
-gen_claim(#{preclaims := Ps, auctions := As} = S) ->
-  frequency([{20, ?LET(#preclaim{name = N, salt = Salt, claimer = C}, elements(Ps),
-                       begin
-                         frequency([{1, {N, gen_salt(), C}}, {1, {gen_name(), Salt, C}}, {50, {N, Salt, C}}])
-                       end)} || Ps =/= [] ] ++
-              [{30, oneof([ {N, 0, C} || #auction{name = N, claimer = C} <- As])} || As =/= [] ] ++
-              [{10, ?LET({Name, Account}, gen_claimed_name(S),
-                         {Name, oneof([0, gen_salt()]), Account})}]).
+nc_pair(#preclaim{ name = N, claimer = C }) -> {N, C};
+nc_pair(#auction{ name = N, claimer = C })  -> {N, C};
+nc_pair(#claim{ name = N, claimer = C })    -> {N, C}.
 
-gen_claimed_name(#{claims := [], auctions := []} = S) ->
-  {gen_name(), gen_account(1, 1, S)};
-gen_claimed_name(#{claims := Cs, auctions := As} = S) ->
-  weighted_default(
-    {39, ?LET({N, C}, frequency([ {10, {N, C}} || #claim{name = N, claimer = C} <- Cs ] ++
-                                  [ {1, {N, C}} || #auction{name = N, claimer = C} <- As]),
-              begin
-                frequency([{1, {gen_name(), C}}, {1, {N, gen_account(0, 1, S)}}, {38, {N, C}}])
-              end)},
-    {1, {gen_name(), gen_account(1, 1, S)}}).
+gen_claim(#{preclaims := Ps, auctions := As} = S) ->
+  ?LET({N, C}, frequency([{19, gen_nc_pair(S, Ps)} || Ps /= []] ++
+                         [{10, gen_nc_pair(S, As)} || As /= []] ++
+                         [{20, gen_auction(S, As)} || As /= []] ++
+                         [{1,  gen_bad_nc_pair(S, lists:map(fun nc_pair/1, Ps ++ As))}]),
+       begin
+       case {[ Pr || Pr <- Ps, Pr#preclaim.name == N ], [ A || A <- As, A#auction.name == N ]} of
+         {[], []}                        -> {N, oneof([0, gen_salt()]), C};
+         {[#preclaim{ salt = Salt }], _} -> {N, gen_salt(Salt), C};
+         {_, _}                          -> {N, gen_salt(0), C}
+       end end).
+
+gen_auction(S, As) ->
+  ?LET(N, elements([Nx || #auction{ name = Nx } <- As ]), {N, gen_account(1, 49, S)}).
+
+gen_claimed_name(#{claims := Cs} = S) ->
+  gen_nc_pair(S, Cs).
+
+gen_nc_pair(S = #{ protocol := P }, []) -> {gen_name(P), gen_account(1, 1, S)};
+gen_nc_pair(S, Ns) ->
+  NCs = lists:map(fun nc_pair/1, Ns),
+  weighted_default({19, gen_good_nc_pair(S, NCs)}, {1, gen_bad_nc_pair(S, NCs)}).
+
+gen_bad_nc_pair(#{protocol := P} = S, NCs) ->
+  frequency([{1, {gen_name(P), gen_account(1, 1, S)}}] ++
+            [{1, ?LET({N, _}, elements(NCs), {N, gen_account(0, 1, S)})} || NCs /= []] ++
+            [{1, ?LET({_, C}, elements(NCs), {gen_name(P), C})}          || NCs /= []]).
+
+gen_good_nc_pair(S = #{ with_ga := true }, NCs) ->
+  gen_elem(NCs, [ NC || NC = {_, C} <- NCs, is_ga(S, C) ]);
+gen_good_nc_pair(S, NCs) ->
+  gen_elem(NCs, [ NC || NC = {_, C} <- NCs, not is_ga(S, C) ]).
+
+gen_elem(Cs, [])  -> elements(Cs);
+gen_elem(Cs0, Cs) -> weighted_default({29, elements(Cs)}, {1, elements(Cs0)}).
 
 gen_pointers(S) ->
   ?LET(Pointers, [?LET({Kind, AccountKey},
                        oneof([
                               {account, gen_account(1, 5, S)},
-                              {oracle, txs_oracles_eqc:gen_oracle_account(1, 5, S)}
+                              {oracle, gen_oracle(1, 5, S)}
                              ]),
                        {Kind, AccountKey}), {fake, binary(32)}, {fake, binary(32)}],
        sublist(Pointers)).

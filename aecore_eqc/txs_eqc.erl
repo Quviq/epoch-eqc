@@ -10,10 +10,10 @@
 
 tx_models() ->
   [ txs_spend_eqc
-  %% , txs_contracts_eqc
-  %% , txs_names_eqc
-  %% , txs_oracles_eqc
-  %% , txs_ga_eqc
+  , txs_contracts_eqc
+  , txs_names_eqc
+  , txs_oracles_eqc
+  , txs_ga_eqc
   ].
 
 initial_state(HFs) ->
@@ -93,12 +93,14 @@ pre_transformations(Height, Trees) ->
   Trees1 = aeo_state_tree:prune(Height, Trees0),
   aens_state_tree:prune(Height, Trees1).
 
-mine_next(#{height := Height, hard_forks := Forks} = S, Value, [Blocks]) ->
-  %% S1 = txs_names_eqc:mine_next(
-  %%        txs_oracles_eqc:mine_next(S, Value, [Blocks]),
-  %%        Value, [Blocks]),
-  S1 = S,
-  S1#{height   => Height + Blocks,
+mine_next(#{height := Height, hard_forks := Forks} = S0, Value, [Blocks]) ->
+  S1 = case lists:member(txs_names_eqc, tx_models()) of
+         true  -> txs_names_eqc:mine_next(S0, Value, [Blocks]);
+         false -> S0 end,
+  S2 = case lists:member(txs_oracles_eqc, tx_models()) of
+         true  -> txs_oracles_eqc:mine_next(S1, Value, [Blocks]);
+         false -> S1 end,
+  S2#{height   => Height + Blocks,
       protocol => tx_utils:protocol_at_height(Forks, Height + Blocks)}.
 
 mine_features(_S, [_B], _Res) ->
@@ -165,7 +167,8 @@ wrap_call(S, {call, _, Cmd, Args}) ->
 %% --- Generators ---------------------------------
 gen_tx(S) ->
   ?LET({call, M, F, Args},
-       frequency(lists:append([eqc_statem:apply(M, command_list, [S]) || M <- tx_models()])),
+       frequency(lists:append([eqc_statem:apply(M, command_list, [S])
+                               || M <- tx_models() -- [txs_ga_eqc || maps:get(with_ga, S, false)]])),
        [M, F, Args]).
 
 weight(_S, tx)   -> 200;
@@ -191,18 +194,45 @@ prop_txs(Forks) ->
         {H, S, Res} = run_commands(Cmds),
         Height = maps:get(height, S, 0),
         Accounts = maps:get(accounts, S, #{}),
+        Oracles  = maps:get(oracles, S, #{}),
+        Total    = trees_total(),
+        FeeTotal = lists:sum([ Fee || {Fee, _} <- maps:get(fees, S, [])]),
         check_command_names(Cmds,
-            measure(length, commands_length(Cmds),
-            measure(height, Height,
+            measure(length__, commands_length(Cmds),
+            measure(height__, Height,
             measure(accounts, maps:size(Accounts),
+            measure(oracles_, maps:size(Oracles),
+            measure(queries_, maps:size(maps:get(queries, S, #{})),
             features(call_features(H),
             stats(call_features(H),
-                  pretty_commands(?MODULE, Cmds, {H, S, Res}, Res == ok)))))))
+                  pretty_commands(?MODULE, Cmds, {H, S, Res},
+                                  conjunction([{result, Res == ok},
+                                               {total, ?WHENFAIL(eqc:format("Total: ~p Expected: ~p Diff: ~p\n",
+                                                                            [Total, ?PatronAmount - FeeTotal, Total - (?PatronAmount - FeeTotal)]),
+                                                                 Total == 0 orelse (Total == ?PatronAmount - FeeTotal))}])
+                                 )))))))))
     end)))).
 
+trees_total() ->
+    TreesTotal =
+        case get(trees) of
+            undefined -> #{};
+            Trees -> aec_trees:sum_total_coin(Trees)
+        end,
+    %% io:format("TT: ~p\n", [TreesTotal]),
+    lists:sum(maps:values(TreesTotal)).
+
 stats(Features, Prop) ->
-  {Atoms, Rest} = lists:partition(fun is_atom/1, Features),
-  aggregate(with_title(atoms), Atoms, aggregate_feats([tx, correct, spend], Rest, Prop)).
+  {_Atoms, Rest} = lists:partition(fun is_atom/1, Features),
+  Feats = lists:flatten([tx, correct, spend, mine] ++
+                        [ [ga_attach, ga_meta, ga_meta_inner]
+                          || lists:member(txs_ga_eqc, tx_models()) ] ++
+                        [ [register_oracle, extend_oracle, query_oracle, response_oracle]
+                          || lists:member(txs_oracles_eqc, tx_models()) ] ++
+                        [ [ns_preclaim, ns_claim, ns_revoke, ns_transfer, ns_update]
+                          || lists:member(txs_names_eqc, tx_models()) ]),
+  %% aggregate(with_title(atoms), Atoms, aggregate_feats(Feats, Rest, Prop)).
+  aggregate_feats(Feats, Rest, Prop).
 
 aggregate_feats([], _, Prop) -> Prop;
 aggregate_feats([Tag | Kinds], Features, Prop) ->
@@ -224,14 +254,29 @@ is_consistent(S, Tx) ->
   AccIds = [ A || ?ACCOUNT(A) <- Sym ],
   Accs   = maps:get(accounts, S, #{}),
 
+  ConIds = [ C || ?CONTRACT(C) <- Sym ],
+  Cons   = maps:get(contracts, S, #{}),
+
+  OrcIds = [ O || ?ORACLE(O) <- Sym ],
+  Orcs   = maps:get(oracles, S, #{}),
+
+  QryIds = [ Q || ?QUERY(Q) <- Sym ],
+  Qrys   = maps:get(queries, S, #{}),
+
   %% io:format("is_consistent?\n~p ~p\n~p ~p\n~p ~p\n", [KeyIds, Keys, AccIds, Accs, KeyIds3, KeyIds1]),
   lists:all(fun(K) -> maps:is_key(K, Keys) end, KeyIds)
     andalso lists:all(fun(A) -> maps:is_key(A, Accs) end, AccIds)
+    andalso lists:all(fun(C) -> maps:is_key(C, Cons) end, ConIds)
+    andalso lists:all(fun(O) -> maps:is_key(O, Orcs) end, OrcIds)
+    andalso lists:all(fun(Q) -> maps:is_key(Q, Qrys) end, QryIds)
     andalso (KeyIds3 -- KeyIds1) == KeyIds3.
 
 get_symbolic(?KEY(X))      -> [?KEY(X)];
 get_symbolic({A, ?KEY(X)}) -> [{A, ?KEY(X)}];
 get_symbolic(?ACCOUNT(X))  -> [?ACCOUNT(X)];
+get_symbolic(?CONTRACT(X)) -> [?CONTRACT(X)];
+get_symbolic(?ORACLE(X))   -> [?ORACLE(X)];
+get_symbolic(?QUERY(X))    -> [?QUERY(X)];
 get_symbolic(X) when is_map(X) ->
   get_symbolic(maps:to_list(X));
 get_symbolic(Xs) when is_list(Xs) ->
