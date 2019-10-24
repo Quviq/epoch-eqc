@@ -32,23 +32,34 @@ simple_instructions() ->
             #instr{ op   = Op,
                     args = [{out, any, Out} | [{in, any, In} || In <- Ins]] })
         end,
-    [ I(Op, tuple_to_list(ArgTypes), ResType)
-     || #{ arg_types := ArgTypes,
-           res_type  := ResType,
-           format    := Format,
-           end_bb    := false,
-           opname    := Op
-         } <- aeb_fate_generate_ops:get_ops(),
-        [a] == lists:usort(Format),
-        length(Format) == tuple_size(ArgTypes) + 1,
-        not black_listed(Op) ] ++ more_instructions().
+    lists:filter(fun(#instr{ op = Op }) -> not black_listed(Op) end,
+        [ I(Op, tuple_to_list(ArgTypes), ResType)
+         || #{ arg_types := ArgTypes,
+               res_type  := ResType,
+               format    := Format,
+               end_bb    := false,
+               opname    := Op
+             } <- aeb_fate_generate_ops:get_ops(),
+            [a] == lists:usort(Format),
+            length(Format) == tuple_size(ArgTypes) + 1
+        ] ++ more_instructions()).
 
 more_instructions() ->
-    I = fun(Op, Out, Ins) ->
-            #instr{ op = Op,
-                    args = [{out, any, Out} | [{in, Mode, Ty} || {Mode, Ty} <- Ins]] }
-        end,
-    [I('TUPLE', tuple, [{immediate, integer}])].
+    [#instr{ op = 'TUPLE', args = [{out, any, tuple}, {in, immediate, integer}] },
+     #instr{ op = 'PUSH', args = [{in, any, any}] },
+     #instr{ op = 'DUP',  args = [{in, any, any}] },
+     #instr{ op = 'DUPA', args = [] },
+     #instr{ op = 'POP',  args = [{out, any, any}] },
+     #instr{ op = 'INCA', args = [] },
+     #instr{ op = 'DECA', args = [] },
+     #instr{ op = 'INC',  args = [{inout, any, integer}] },
+     #instr{ op = 'DEC',  args = [{inout, any, integer}] },
+     #instr{ op = 'BITS_ALLA',  args = [] },
+     #instr{ op = 'BITS_NONEA', args = [] },
+     #instr{ op = 'SPEND', args = [{in, any, address}, {in, any, integer}] },
+     #instr{ op = 'JUMP', args = [] },
+     #instr{ op = 'JUMPIF', args = [{in, any, boolean}] }
+    ].
 
 spec_overrides() ->
     #{ 'VARIANT' =>
@@ -74,13 +85,15 @@ fix_type(hash)      -> {bytes, 32};
 fix_type(signature) -> {bytes, 64};
 fix_type(T)         -> T.
 
-black_listed(Op) ->
-    lists:member(Op, ['MICROBLOCK']).
+black_listed('MICROBLOCK') -> true;  %% Not implemented
+black_listed('DUP')        -> true;  %% Bugged
+black_listed(_)            -> false.
 
 other_instructions() ->
     Simple = maps:from_list([{Op, true} || #instr{ op = Op } <- simple_instructions() ]),
     [ Op || #{ opname := Op } <- aeb_fate_generate_ops:get_ops(),
-            not maps:is_key(Op, Simple) ].
+            not maps:is_key(Op, Simple),
+            not black_listed(Op) ].
 
 -define(InstrSpecCache, '$ispec_cache').
 -spec instruction_spec() -> #{ mnemonic() => instr_spec() }.
@@ -120,7 +133,7 @@ instruction_spec(Op) ->
 -record(state, { stack      = []    :: [value()],
                  vars       = #{}   :: #{ integer() => value() },
                  args       = #{}   :: #{ integer() => value() },
-                 failed     = false :: boolean(),
+                 failed     = false :: boolean() | skip,
                  chain_env  = #{}   :: chain_env(),
                  call_stack = []    :: [frame()] }).
 
@@ -144,6 +157,17 @@ get_account(S, Pubkey, Field, Default) ->
         not_found -> Default;
         Acc       -> maps:get(Field, Acc)
     end.
+
+new_account() ->
+    #{ balance => 0, creator => none }.
+
+on_account(Pubkey, Field, Fun, S = #state{ chain_env = Env = #{ accounts := Accounts } }) ->
+    Upd = fun(Acc) -> maps:update_with(Field, Fun, Acc) end,
+    S#state{ chain_env = Env#{ accounts := maps:update_with(Pubkey, Upd, Upd(new_account()), Accounts) } }.
+
+spend(From, To, Amount, S) ->
+    on_account(From, balance, fun(V) -> V - Amount end,
+    on_account(To,   balance, fun(V) -> V + Amount end, S)).
 
 -spec get_instr(mnemonic()) -> instr_spec() | undefined.
 get_instr(Op) ->
@@ -249,6 +273,9 @@ check_arguments(S, [{in, Mode, Type} | ArgSpec], [Arg | Args]) ->
     check_mode(in, Mode, Arg) andalso
     match_type(Type, get_type(S, Arg)) andalso
     check_arguments(S1, ArgSpec, Args);
+check_arguments(S, [{inout, Mode, Type} | ArgSpec], [Arg | Args]) ->
+    check_mode(out, Mode, Arg) andalso
+    check_arguments(S, [{in, Mode, Type} | ArgSpec], [Arg | Args]);
 check_arguments(_, _, _) -> false.
 
 -spec check_mode(in | out, arg_mode(), arg()) -> boolean().
@@ -319,7 +346,10 @@ hash(Alg, Val) ->
 -define(When(B, X), case B of true -> X; false -> skip end).
 -define(WhenBetween(A, X, B, Go), ?When(A =< X andalso X =< B, Go)).
 -define(MaxBits, 2048).
+-define(MaxBlockGas, 6000000).
 
+eval_instr('INC', [A])     -> A + 1;
+eval_instr('DEC', [A])     -> A - 1;
 eval_instr('ADD', [A, B])  -> A + B;
 eval_instr('SUB', [A, B])  -> A - B;
 eval_instr('MUL', [A, B])  -> A * B;
@@ -401,39 +431,45 @@ eval_instr('BITS_SUM',   [{bits, A}])            -> ?When(A >= 0, pop_count(A));
 eval_instr('BITS_OR',    [{bits, A}, {bits, B}]) -> {bits, A bor B};
 eval_instr('BITS_AND',   [{bits, A}, {bits, B}]) -> {bits, A band B};
 eval_instr('BITS_DIFF',  [{bits, A}, {bits, B}]) -> {bits, A band bnot B};
-eval_instr('BLOCKHASH', _)            -> todo;
-eval_instr('BENEFICIARY', _)          -> todo;
-eval_instr('GASLIMIT', _)             -> todo;
-eval_instr('GAS', _)                  -> todo;
-eval_instr('GASPRICE', _)             -> todo;
+eval_instr('IS_ORACLE', [_])                       -> false;
+eval_instr('AUTH_TX_HASH', _)                      -> {variant, [0, 1], 0, {}};
+eval_instr('CONTRACT_TO_ADDRESS', [{contract, A}]) -> {address, A};
+eval_instr('ADDRESS_TO_CONTRACT', [{address, A}])  -> {contract, A};
 eval_instr('ORACLE_REGISTER', _)      -> todo;
 eval_instr('ORACLE_QUERY', _)         -> todo;
 eval_instr('ORACLE_GET_ANSWER', _)    -> todo;
 eval_instr('ORACLE_GET_QUESTION', _)  -> todo;
 eval_instr('ORACLE_QUERY_FEE', _)     -> todo;
+eval_instr('ORACLE_CHECK', _)         -> todo;
+eval_instr('ORACLE_CHECK_QUERY', _)   -> todo;
 eval_instr('AENS_RESOLVE', _)         -> todo;
 eval_instr('VERIFY_SIG', _)           -> todo;
 eval_instr('VERIFY_SIG_SECP256K1', _) -> todo;
-eval_instr('CONTRACT_TO_ADDRESS', _)  -> todo;
-eval_instr('AUTH_TX_HASH', _)         -> todo;
-eval_instr('ORACLE_CHECK', _)         -> todo;
-eval_instr('ORACLE_CHECK_QUERY', _)   -> todo;
-eval_instr('IS_ORACLE', _)            -> todo;
-eval_instr('IS_CONTRACT', _)          -> todo;
-eval_instr('IS_PAYABLE', _)           -> todo;
 eval_instr('ECVERIFY_SECP256K1', _)   -> todo;
 eval_instr('ECRECOVER_SECP256K1', _)  -> todo;
-eval_instr('ADDRESS_TO_CONTRACT', [{address, A}])  -> {contract, A}.
+eval_instr('GAS', _)                  -> todo.
 
-eval_instr(S, 'CREATOR', [])    -> {S, [{address, get_account(S, chain_env(S, address), creator, void)}]};
-eval_instr(S, 'GENERATION', []) -> {S, [chain_env(S, height)]};
-eval_instr(S, 'DIFFICULTY', []) -> {S, [chain_env(S, difficulty)]};
-eval_instr(S, 'TIMESTAMP', [])  -> {S, [chain_env(S, timestamp)]};
-eval_instr(S, 'CALL_VALUE', []) -> {S, [chain_env(S, call_value)]};
-eval_instr(S, 'ORIGIN', [])     -> {S, [{address, chain_env(S, origin)}]};
-eval_instr(S, 'CALLER', [])     -> {S, [{address, chain_env(S, caller)}]};
-eval_instr(S, 'ADDRESS', [])    -> {S, [{address, chain_env(S, address)}]};
-eval_instr(S, 'BALANCE', [])    -> {S, [get_account(S, chain_env(S, address), balance, 0)]};
+eval_instr(S, 'BLOCKHASH', [H])  ->
+    Current = chain_env(S, height),
+    Hash = case 0 =< H andalso Current - 256 < H andalso H < Current of
+               false -> {variant, [0, 1], 0, {}};
+               true  -> {variant, [0, 1], 1, {{bytes, <<0:256>>}}}
+           end,
+    {S, [Hash]};
+eval_instr(S, 'IS_PAYABLE',  [{address, _}]) -> {S, [true]};
+eval_instr(S, 'IS_CONTRACT', [{address, A}]) -> {S, [get_account(S, A, creator, none) /= none]};
+eval_instr(S, 'BENEFICIARY', []) -> {S, [{address, chain_env(S, beneficiary)}]};
+eval_instr(S, 'GASLIMIT', [])    -> {S, [?MaxBlockGas]};
+eval_instr(S, 'GASPRICE', [])    -> {S, [chain_env(S, gas_price)]};
+eval_instr(S, 'CREATOR', [])     -> {S, [{address, get_account(S, chain_env(S, address), creator, void)}]};
+eval_instr(S, 'GENERATION', [])  -> {S, [chain_env(S, height)]};
+eval_instr(S, 'DIFFICULTY', [])  -> {S, [chain_env(S, difficulty)]};
+eval_instr(S, 'TIMESTAMP', [])   -> {S, [chain_env(S, timestamp)]};
+eval_instr(S, 'CALL_VALUE', [])  -> {S, [chain_env(S, call_value)]};
+eval_instr(S, 'ORIGIN', [])      -> {S, [{address, chain_env(S, origin)}]};
+eval_instr(S, 'CALLER', [])      -> {S, [{address, chain_env(S, caller)}]};
+eval_instr(S, 'ADDRESS', [])     -> {S, [{address, chain_env(S, address)}]};
+eval_instr(S, 'BALANCE', [])     -> {S, [get_account(S, chain_env(S, address), balance, 0)]};
 eval_instr(S, 'BALANCE_OTHER', [{address, A}]) -> {S, [get_account(S, A, balance, 0)]};
 eval_instr(S = #state{ stack = Stack }, 'TUPLE', [N]) ->
     case N >= 0 andalso N =< length(Stack) of
@@ -452,19 +488,53 @@ eval_instr(S = #state{ stack = Stack }, 'VARIANT', [Ar, Tag, N]) ->
             {Args, Stack1} = lists:split(N, Stack),
             {S#state{ stack = Stack1 }, [{variant, Ar, Tag, list_to_tuple(lists:reverse(Args))}]}
     end;
-eval_instr(S, Op, Vs) -> {S, [eval_instr(Op, Vs)]}.
+eval_instr(S = #state{ stack = Stack }, 'PUSH', [V]) ->
+    {S#state{ stack = [V | Stack] }, []};
+eval_instr(S = #state{ stack = Stack }, 'DUPA', []) ->
+    {S#state{ stack = [hd(Stack ++ [skip]) | Stack] }, []};
+eval_instr(S = #state{ stack = Stack }, 'DUP', [N]) ->
+    case 0 =< N andalso N < length(Stack) of
+        false -> {S#state{ failed = skip }, []};
+        true  -> {S#state{ stack = [lists:nth(N + 1, Stack) | Stack] }, []}
+    end;
+eval_instr(S = #state{ stack = Stack }, 'POP', []) ->
+    {pop(1, S), [?When([] /= Stack, hd(Stack))]};
+eval_instr(S, Op, []) when Op == 'INCA'; Op == 'DECA' ->
+    Bump = if Op == 'INCA' -> fun(V) -> V + 1 end;
+              Op == 'DECA' -> fun(V) -> V - 1 end end,
+    case S#state.stack of
+        [V | Stack1] when is_integer(V) ->
+            {S#state{ stack = [Bump(V) | Stack1] }, []};
+        _ -> {S#state{ failed = skip }, []}
+    end;
+eval_instr(S, 'BITS_ALLA', []) ->
+    {S#state{ stack = [{bits, -1} | S#state.stack] }, []};
+eval_instr(S, 'BITS_NONEA', []) ->
+    {S#state{ stack = [{bits, 0} | S#state.stack] }, []};
+eval_instr(S, 'SPEND', [{address, A}, Amount]) ->
+    Self    = chain_env(S, address),
+    Balance = get_account(S, Self, balance, 0),
+    case 0 =< Amount andalso Amount =< Balance of
+        false -> {S#state{ failed = skip }, []};
+        true  -> {spend(Self, A, Amount, S), []}
+    end;
+eval_instr(S, 'JUMP', [])    -> {S, []};
+eval_instr(S, 'JUMPIF', [_]) -> {S, []};
+eval_instr(S, Op, Vs)        -> {S, [eval_instr(Op, Vs)]}.
 
 -spec step_instr(state(), instr()) -> state().
 step_instr(S, {Op, Args}) ->
     #instr{ args = ArgsSpec } = get_instr(Op),
     Args1 = lists:zip(ArgsSpec, Args),
-    InArgs  = [ Arg || {{in, _, _}, Arg} <- Args1 ],
-    OutArgs = [ Arg || {{out, _, _}, Arg} <- Args1 ],
+    InArgs  = [ Arg || {{Tag, _, _}, Arg} <- Args1, lists:member(Tag, [in, inout]) ],
+    OutArgs = [ Arg || {{Tag, _, _}, Arg} <- Args1, lists:member(Tag, [out, inout]) ],
     {S1, InVals}  = read_arguments(S, InArgs),
-    {S2, OutVals} = try eval_instr(S1, Op, InVals) catch _:Err ->
-                io:format("** Error on ~s ~p -> ~p:\n~p\n", [Op, InArgs, OutArgs, Err]),
-                {S1, [void]}
-              end,
+    {S2, OutVals} =
+        try eval_instr(S1, Op, InVals)
+        catch _:Err ->
+            io:format("** Error on ~s ~p -> ~p:\n~p\n~p\n", [Op, InArgs, OutArgs, Err, erlang:get_stacktrace()]),
+            {S1#state{ failed = true }, lists:duplicate(length(OutArgs), void)}
+        end,
     lists:foldl(fun({Arg, Val}, St) -> write_arg(Arg, Val, St) end,
                 S2, lists:zip(OutArgs, OutVals)).
 
@@ -485,6 +555,10 @@ out_arg_g() ->
 -define(constrained_t(Args, Type),
         ?constrained(Args, __T = Type, value_g(__T), V, has_type(V, __T))).
 
+args_g(S, 'DUP', _) ->
+    H = length(S#state.stack),
+    args_g(S, [?constrained(_, if H == 0 -> void; true -> choose(0, H - 1) end,
+                            V, V >= 0 andalso V < H)]);
 args_g(S, Elem, _) when Elem == 'ELEMENT'; Elem == 'SETELEMENT' ->
     Regs  = matching_regs(S, fun({tuple, T}) -> tuple_size(T) > 0; (_) -> false end),
     Sizes = lists:usort([ tuple_size(T) || R <- Regs, {tuple, T} <- [get_value(S, R)] ] ++ [3]),
@@ -585,7 +659,11 @@ args_g(S, [{in, any, Spec} | ArgsSpec], Vs, Acc) ->
                 _          -> S
              end,
         args_g(S1, ArgsSpec, [get_value(S, Arg) | Vs], [Arg | Acc])
-    end).
+    end);
+args_g(S, [{inout, any, {constrained, _} = Spec} | ArgsSpec], Vs, Acc) ->
+    args_g(S, [{in, any, Spec} | ArgsSpec], Vs, Acc);
+args_g(S, [{inout, any, Type} | ArgsSpec], Vs, Acc) ->
+    args_g(S, [?constrained(_, skip, V, has_type(V, Type)) | ArgsSpec], Vs, Acc).
 
 arg_g(S, Vs, {constrained, Spec}) ->
     {Gen, Pred} = Spec(Vs),
@@ -679,17 +757,23 @@ balance_g() ->
     oneof([0, choose(0, 1000000)]).
 
 chain_env_g() ->
-    ?LET({[Caller, Origin, Address, Creator], Value}, {vector(4, pubkey_g()), balance_g()},
-    #{ timestamp  => timestamp_g(),
-       caller     => Caller,
-       origin     => Origin,
-       address    => Address,
-       height     => choose(1, 10000),
-       difficulty => choose(0, 1000),
-       call_value => Value,
-       accounts   => #{ Caller  => #{ balance => balance_g(), creator => none },
-                        Origin  => #{ balance => balance_g(), creator => none },
-                        Address => #{ balance => balance_g(), creator => Creator } } }).
+    Acct = fun(C) -> #{ balance => balance_g(), creator => C } end,
+    ?LET({[Caller, Origin, Address, Creator, Beneficiary], Value}, {vector(5, pubkey_g()), balance_g()},
+    #{ timestamp   => timestamp_g(),
+       caller      => Caller,
+       origin      => Origin,
+       address     => Address,
+       beneficiary => Beneficiary,
+       gas_limit   => choose(3000000, 6000000),
+       gas_price   => choose(1, 5),
+       height      => choose(1, 10000),
+       difficulty  => choose(0, 1000),
+       call_value  => Value,
+       accounts    => #{ Caller      => Acct(none),
+                         Origin      => Acct(none),
+                         Creator     => Acct(none),
+                         Address     => Acct(Creator),
+                         Beneficiary => Acct(none) } }).
 
 state_g() ->
     ?LET({ChainEnv, Stack, Vars, Args}, {chain_env_g(), list(value_g()), map(int(), value_g()), map(nat(), value_g())},
@@ -697,26 +781,32 @@ state_g() ->
 
 %% -- State machine ----------------------------------------------------------
 
+instr_weight(S, Op) when Op == 'INCA'; Op == 'DECA' ->
+    case S#state.stack of
+        [N | _] when is_integer(N) -> 5;
+        _ -> 0
+    end;
 instr_weight(_, Op) ->
     try eval_instr(Op, undef) of
         todo -> 0;
         _    -> 1
     catch _:_ -> 1 end.
 
-simple_instr_args(S) ->
+instr_args(S) ->
     ?LET(#instr{ op = Op, args = ArgsSpec }, frequency([ {instr_weight(S, I#instr.op), I}
                                                          || I <- maps:values(instruction_spec()) ]),
          [{Op, args_g(S, Op, ArgsSpec)}]).
 
-simple_instr_pre(S, [I]) ->
+instr_pre(S, [I]) ->
     no_todo(I) andalso not contains(void, I) andalso
     check_instr(S, I) andalso
     begin
-        S1 = simple_instr_next(S, {var, -1}, [I]),
-        no_todo(S1) andalso not contains(skip, S1)
+        S1 = instr_next(S, {var, -1}, [I]),
+        no_todo(S1) andalso not contains(skip, S1) andalso
+        valid_state(S1#state{ failed = false })
     end.
 
-simple_instr_next(S, _, [I]) ->
+instr_next(S, _, [I]) ->
     S1 = step_instr(S, I),
     case contains(void, S1) of
         true  -> S1#state{ failed = true };
@@ -738,36 +828,61 @@ return_instr(S) ->
 %% -- Running the code -------------------------------------------------------
 
 -define(TestFun, <<"test">>).
--define(CallGas, 6000000).
 
 build_code([{model, _}, {init, S} | Instrs], Ret) ->
     ArgTypes = [ infer_type(Arg) || Arg <- maps:values(S#state.args) ],
-    BB = build_bb(Instrs, Ret),
+    BBs = build_bbs(S, Instrs, Ret),
     FCode = aeb_fate_code:new(),
-    aeb_fate_code:insert_fun(?TestFun, [payable], {ArgTypes, integer}, #{0 => BB}, FCode).
+    aeb_fate_code:insert_fun(?TestFun, [payable], {ArgTypes, integer}, BBs, FCode).
 
-build_bb(Instr, Ret) ->
+build_bbs(InitS, Instr, Ret) -> build_bbs(InitS, make_ref(), Instr, Ret, [], [], []).
+
+build_bbs(_, Ref, [], Ret, Acc, BBsR, ExtraBBsR) ->
+    BBs      = lists:reverse([{Ref, [Ret | Acc]} | BBsR]),
+    ExtraBBs = lists:reverse(ExtraBBsR),
+    Lbls     = maps:from_list([ {R, Lbl} || {Lbl, {R, _}} <- indexed(0, BBs ++ ExtraBBs) ]),
+    Lbl      = fun(R) -> maps:get(R, Lbls) end,
+    LblIm    = fun(R) -> {immediate, Lbl(R)} end,
+    UpdI     = fun({'JUMP', R})        -> {'JUMP', LblIm(R)};
+                  ({'JUMPIF', Arg, R}) -> {'JUMPIF', Arg, LblIm(R)};
+                  (I)                  -> I end,
+    UpdIs    = fun([I | Is]) -> lists:reverse([UpdI(I) | Is]) end,
+
+    maps:from_list([{Lbl(R), UpdIs(Is)} || {R, Is} <- BBs ++ ExtraBBs]);
+build_bbs(S, Ref, [{set, X, Call = {call, ?MODULE, instr, Args}} | Instrs], Ret, Acc, BBs, ExtraBBs) ->
+    S1      = next_state(S, X, Call),
     Var     = fun({var_, I}) -> {var, I}; (A) -> A end,
-    ToInstr = fun({set, _, {call, ?MODULE, Fun, Args}}) ->
-                    case {Fun, Args} of
-                        {simple_instr, [{Op, As}]} -> [list_to_tuple([Op | lists:map(Var, As)])]
-                    end;
-                 (_) -> []
+    I       = case Args of
+                  [{Op, []}] -> Op;
+                  [{Op, As}] -> list_to_tuple([Op | lists:map(Var, As)])
               end,
-    lists:flatmap(ToInstr, Instr) ++ [Ret].
+    DeadBB  = fun(R) -> {R, [{'ABORT', {immediate, <<"Unreachable">>}}]} end,
+    case I of
+        'JUMP' ->
+            Ref1 = make_ref(),
+            BBs1 = [DeadBB(make_ref()), {Ref, [{'JUMP', Ref1} | Acc]} | BBs],
+            build_bbs(S1, Ref1, Instrs, Ret, [], BBs1, ExtraBBs);
+        {'JUMPIF', Reg} ->
+            Ref1 = make_ref(),
+            This = {Ref, [{'JUMPIF', Reg, Ref1} | Acc]},
+            case get_value(S, Reg) of
+                true  -> build_bbs(S1, Ref1, Instrs, Ret, [], [DeadBB(make_ref()), This | BBs], ExtraBBs);
+                false -> build_bbs(S1, make_ref(), Instrs, Ret, [], [This | BBs], [DeadBB(Ref1) | ExtraBBs])
+            end;
+        _ -> build_bbs(S1, Ref, Instrs, Ret, [I | Acc], BBs, ExtraBBs)
+    end.
 
 make_store(undefined) -> aefa_stores:initial_contract_store();
 make_store(Store)     -> Store.
 
-make_trees(#{ caller := Caller, origin := Origin } = Env, Cache) ->
+make_trees(#{ accounts := Accounts } = Env, Cache) ->
     %% All contracts and the caller must have accounts
     Trees = aec_trees:new_without_backend(),
-    Pubkeys = lists:usort([Caller, Origin | maps:keys(Cache)]),
-    Get     = fun(Key, Pubkey, Default) -> get_account(#state{ chain_env = Env }, Pubkey, Key, Default) end,
-    ATrees = lists:foldl(fun(Pubkey, Acc) ->
-                                 Account = aec_accounts:new(Pubkey, Get(balance, Pubkey, 0)),
+    Get   = fun(Key, Pubkey, Default) -> get_account(#state{ chain_env = Env }, Pubkey, Key, Default) end,
+    ATrees = lists:foldl(fun({Pubkey, #{balance := Balance}}, Acc) ->
+                                 Account = aec_accounts:new(Pubkey, Balance),
                                  aec_accounts_trees:enter(Account, Acc)
-                         end, aec_trees:accounts(Trees), Pubkeys),
+                         end, aec_trees:accounts(Trees), maps:to_list(Accounts)),
     CTrees = lists:foldl(fun(Pubkey, Acc) ->
                                  Creator   = Get(creator, Pubkey, Pubkey),
                                  Contract0 = aect_contracts:new(Creator, 1, #{vm => 5, abi => 3}, <<>>, 0),
@@ -776,41 +891,45 @@ make_trees(#{ caller := Caller, origin := Origin } = Env, Cache) ->
                          end, aec_trees:contracts(Trees), maps:keys(Cache)),
     aec_trees:set_contracts(aec_trees:set_accounts(Trees, ATrees), CTrees).
 
-call_spec(#{ address := Contract, call_value := Value }, Args, Store) ->
+call_spec(#{ address := Contract, call_value := Value, gas_limit := GasLimit }, Args, Store) ->
     Fun = aeb_fate_code:symbol_identifier(?TestFun),
     #{ contract => Contract,
-       gas      => ?CallGas,
+       gas      => GasLimit,
        value    => Value,
        call     => aeb_fate_encoding:serialize({tuple, {Fun, {tuple, list_to_tuple(Args)}}}),
        store    => make_store(Store) }.
 
-call_env(#{ caller     := Caller,
-            origin     := Origin,
-            timestamp  := Time,
-            difficulty := Difficulty,
-            height     := Height } = Env, Cache) ->
+call_env(#{ caller      := Caller,
+            origin      := Origin,
+            beneficiary := Beneficiary,
+            timestamp   := Time,
+            difficulty  := Difficulty,
+            gas_price   := GasPrice,
+            height      := Height } = Env, Cache) ->
     %% tx_env is opaque lacks setters
-    DifficultyIx = 8,
-    TimeFieldIx  = 13,
+    BeneficiaryIx = 3,
+    DifficultyIx  = 8,
+    TimeFieldIx   = 13,
     TxEnv        = lists:foldl(fun({Key, Val}, Acc) -> setelement(Key, Acc, Val) end,
                                aetx_env:tx_env(Height),
                                [{TimeFieldIx,  Time},
-                                {DifficultyIx, Difficulty}]),
+                                {DifficultyIx, Difficulty},
+                                {BeneficiaryIx, Beneficiary}]),
     #{ trees     => make_trees(Env, Cache),
        caller    => Caller,
        origin    => Origin,
-       gas_price => 1,
+       gas_price => GasPrice,
        tx_env    => TxEnv }.
 
-gas_used(ES) ->
-    ?CallGas - aefa_engine_state:gas(ES).
+gas_used(#{ gas_limit := GasLimit }, ES) ->
+    GasLimit - aefa_engine_state:gas(ES).
 
-gas_per_us(Time, ES) ->
-    gas_used(ES) / Time.
+gas_per_us(Env, Time, ES) ->
+    gas_used(Env, ES) / Time.
 
-stats(Time, ES) ->
-    #{ gas_per_us => gas_per_us(Time, ES),
-       gas_used   => gas_used(ES),
+stats(Env, Time, ES) ->
+    #{ gas_per_us => gas_per_us(Env, Time, ES),
+       gas_used   => gas_used(Env, ES),
        time       => Time }.
 
 run(Env0 = #{ address := Contract }, FCode, Args, Store) ->
@@ -818,13 +937,12 @@ run(Env0 = #{ address := Contract }, FCode, Args, Store) ->
     Cache = #{ Contract => FCode },
     Env   = call_env(Env0, Cache),
     erlang:garbage_collect(),
-    timer:sleep(50),
     case timer:tc(fun() -> aefa_fate:run_with_cache(Spec, Env, Cache) end) of
         {Time, {ok, ES}} ->
             Res = aefa_engine_state:accumulator(ES),
-            {Res, stats(Time, ES)};
-        {Time, {error, Err, ES}} ->
-            {{error, binary_to_list(Err)}, stats(Time, ES)}
+            {Res, stats(Env0, Time, ES)};
+        {Time, {ErrTag, Err, ES}} when ErrTag == error; ErrTag == revert ->
+            {{ErrTag, binary_to_list(Err)}, stats(Env0, Time, ES)}
     end.
 
 %% -- Property ---------------------------------------------------------------
@@ -841,13 +959,13 @@ prop_infer() ->
 prop_args_g() ->
     in_parallel(
     ?FORALL(S,   state_g(),
-    ?FORALL([I], simple_instr_args(S),
+    ?FORALL([I], instr_args(S),
     begin
-        S1 = simple_instr_next(S, {var, -1}, [I]),
+        S1 = instr_next(S, {var, -1}, [I]),
         ?IMPLIES(not contains(skip, S1),
             conjunction([{check_instr, check_instr(S, I)},
                          {no_void, not contains(void, I)},
-                         {valid, valid_state(S1)}]))
+                         {valid, check_valid_state(S1)}]))
     end))).
 
 prop_instr() ->
@@ -867,17 +985,20 @@ prop_instr() ->
                 end,
             FCode = build_code(Instrs, RetInstr),
             Store = undefined,
+            BBs   = [ BB || {_, _, BBs} <- maps:values(aeb_fate_code:functions(FCode)),
+                            BB <- maps:values(BBs) ],
             ?WHENFAIL(io:format("~s", [pp_fcode(FCode)]),
             aggregate([ if is_atom(I) -> I; true -> element(1, I) end
-                        || I <- build_bb(Instrs, RetInstr) ],
+                        || BB <- BBs, I <- BB ],
             try
                 {Res, Stats} = run(ChainEnv, FCode, Args, Store),
                 measure(block_time, 6 / maps:get(gas_per_us, Stats),
+                measure(bb_size, lists:map(fun length/1, BBs),
                 collect(with_title(gas_used),   maps:get(gas_used, Stats) div 1000 * 1000,
                 collect(classify(Res),
                 conjunction([ {result,   check_result(Res, RetValue)},
                               {state,    check_state(FinalState)},
-                              {gas_cost, check_gas_cost(Stats)} ]))))
+                              {gas_cost, check_gas_cost(Stats)} ])))))
             catch _:Err ->
                 equals(ok, {'EXIT', Err, erlang:get_stacktrace()})
             end))
@@ -908,20 +1029,23 @@ check_result(Have, Want) -> equals(Have, Want).
 
 check_state(S) ->
     ?WHENFAIL(io:format("Bad state:\n~p\nbecause", [S]),
-              valid_state(S)).
+              check_valid_state(S)).
 
-valid_state(S) ->
+check_valid_state(S) ->
+    equals([], state_badness(S)).
+
+valid_state(S) -> [] == state_badness(S).
+
+state_badness(S) ->
     Check = fun(Tag, IVs) -> [ {{Tag, I}, '=', V, ':', T}
                                || {I, V} <- IVs,
                                   T      <- [infer_type(V)],
                                   contains(void, T) ] end,
-    Badness =
-        [ contains_void || contains(void, S) ] ++
-        [ failed        || S#state.failed ] ++
-        Check(stack, indexed(0, S#state.stack)) ++
-        Check(var, maps:to_list(S#state.vars)) ++
-        Check(arg, maps:to_list(S#state.args)),
-    equals([], Badness).
+    [ contains_void || contains(void, S) ] ++
+    [ failed        || S#state.failed ] ++
+    Check(stack, indexed(0, S#state.stack)) ++
+    Check(var, maps:to_list(S#state.vars)) ++
+    Check(arg, maps:to_list(S#state.args)).
 
 check_gas_cost(#{ gas_used := Gas }) when Gas < 1000 -> true;
 check_gas_cost(#{ gas_used := GasUsed, time := Time, gas_per_us := GasRate }) ->
@@ -939,7 +1063,12 @@ classify(Val) ->
 
 %% -- Utility functions ------------------------------------------------------
 
-drop(N, Xs) -> lists:sublist(Xs, N + 1, 1 bsl 64).
+drop(N, Xs) ->
+    Len = length(Xs),
+    case N >= Len of
+        true  -> [];
+        false -> lists:sublist(Xs, N + 1, Len)
+    end.
 
 indexed(Xs) -> indexed(1, Xs).
 
