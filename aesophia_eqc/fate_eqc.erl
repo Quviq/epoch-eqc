@@ -1140,6 +1140,7 @@ prop_args_g() ->
 
 prop_instr() ->
     in_parallel(
+    ?LET(Verbose, parameter(verbose, false),
     ?FORALL(ChainEnv, chain_env_g(),
     ?FORALL(Args, list(3, value_g()),
     ?FORALL(Instrs, commands(?MODULE, initial_state(ChainEnv, Args)),
@@ -1147,6 +1148,7 @@ prop_instr() ->
         FinalState0 = state_after(Instrs),
         ?FORALL(RetInstrs, return_instrs(FinalState0),
         ?TIMEOUT(1000,
+        ?WHENFAIL([ print_states(Instrs ++ RetInstrs) || Verbose ],
         try
             FinalState = state_after([{model, ?MODULE}, {init, FinalState0} | RetInstrs]),
             RetValue = get_return_value(FinalState),
@@ -1174,8 +1176,8 @@ prop_instr() ->
             end)))
         catch _:Err ->
             equals(ok, {'EXIT', Err, erlang:get_stacktrace()})
-        end))
-    end)))).
+        end)))
+    end))))).
 
 get_return_value(S, {set, _, {call, ?MODULE, instr, [{'RETURN', []}]}}) ->
     get_value(S, {stack, 0});
@@ -1184,6 +1186,21 @@ get_return_value(S, {set, _, {call, ?MODULE, instr, [{'RETURNR', [R]}]}}) ->
 
 get_return_value(S) ->
     get_value(S, {stack, 0}).
+
+print_states([{model, ?MODULE}, {init, S} | Code]) ->
+    print_states(S, Code).
+
+print_states(S, []) ->
+    print_state(S);
+print_states(S, [{set, X, Call = {call, ?MODULE, instr, [{Op, Args}]}} | Cmds]) ->
+    print_state(S),
+    io:format("~s\n", [string:join([atom_to_list(Op) | [format_arg(Arg) || Arg <- Args]], " ")]),
+    print_states(next_state(S, X, Call), Cmds).
+
+print_state(S) ->
+    io:format("  ~p\n", [S]).
+
+format_arg(Arg) -> io_lib:format("~p", [Arg]).
 
 pp_fcode(FCode) ->
     try
