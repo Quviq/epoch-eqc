@@ -63,6 +63,7 @@ more_instructions() ->
      #instr{ op = 'SWITCH_V3', args = [{in, any, variant}] },
      #instr{ op = 'SWITCH_VN', args = [{in, any, variant}] },
      #instr{ op = 'CALL', args = [{in, immediate, integer}] },
+     #instr{ op = 'CALL_T', args = [{in, immediate, integer}] },
      #instr{ op = 'RETURN', args = [] },
      #instr{ op = 'RETURNR', args = [{in, any, any}] }
     ].
@@ -143,8 +144,9 @@ instruction_spec(Op) ->
                         difficulty := non_neg_integer(),
                         height     := pos_integer() }.
 
--record(frame, { vars  :: #{ integer() => value() },
-                 args  :: #{ integer() => value() } }).
+-record(frame, { vars      = #{}   :: #{ integer() => value() },
+                 args      = #{}   :: #{ integer() => value() },
+                 tail_call = false :: boolean() }).
 
 -type frame() :: #frame{}.
 
@@ -165,8 +167,9 @@ instruction_spec(Op) ->
 
 -spec initial_state(chain_env(), [value()]) -> state().
 initial_state(ChainEnv, Args) ->
-    #state{ args      = maps:from_list(indexed(0, Args)),
-            chain_env = ChainEnv }.
+    #state{ call_stack = [#frame{}],
+            args       = maps:from_list(indexed(0, Args)),
+            chain_env  = ChainEnv }.
 
 -spec chain_env(chain_env(), atom()) -> term().
 chain_env(#state{chain_env = Env}, Key) -> maps:get(Key, Env).
@@ -177,19 +180,26 @@ get_account(S, Pubkey, Field, Default) ->
         Acc       -> maps:get(Field, Acc)
     end.
 
-push_call_stack(S, N) ->
+push_call(S, N) -> push_call_stack(S, false, N).
+push_tailcall(S, N) -> push_call_stack(S, true, N).
+
+push_call_stack(S, TailCall, N) ->
     {FunArgs, Stack1} = lists:split(N, S#state.stack),
-    Frame = #frame{ vars = S#state.vars, args = S#state.args },
+    Frame = #frame{ vars = S#state.vars, args = S#state.args, tail_call = TailCall },
     S#state{ stack      = Stack1,
              vars       = #{},
              args       = maps:from_list(indexed(0, FunArgs)),
              call_stack = [Frame | S#state.call_stack] }.
 
 pop_call_stack(S = #state{ call_stack = [Frame | CallStack] }, V) ->
-    S#state{ stack      = [V | S#state.stack],
-             args       = Frame#frame.args,
-             vars       = Frame#frame.vars,
-             call_stack = CallStack }.
+    S1 = S#state{ stack      = [V | S#state.stack],
+                  args       = Frame#frame.args,
+                  vars       = Frame#frame.vars,
+                  call_stack = CallStack },
+    case Frame#frame.tail_call of
+        true  -> pop_call_stack(S1, V);
+        false -> S1
+    end.
 
 new_account() ->
     #{ balance => 0, creator => none }.
@@ -553,13 +563,15 @@ eval_instr(S, 'SWITCH_V2', [V]) -> ?WhenS(is_variant(V, 2), S, []);
 eval_instr(S, 'SWITCH_V3', [V]) -> ?WhenS(is_variant(V, 3), S, []);
 eval_instr(S, 'SWITCH_VN', [V]) -> ?WhenS(is_variant(V), S, []);
 eval_instr(S = #state{ stack = Stack }, 'CALL', [N]) ->
-    ?WhenS(length(Stack) >= N, push_call_stack(S, N), []);
+    ?WhenS(length(Stack) >= N, push_call(S, N), []);
+eval_instr(S = #state{ stack = Stack }, 'CALL_T', [N]) ->
+    ?WhenS(length(Stack) >= N, push_tailcall(S, N), []);
 eval_instr(S = #state{ stack = [V | Stack] }, 'RETURN', []) ->
-    ?WhenS([] /= S#state.call_stack,
+    ?WhenS(S#state.call_stack /= [],
            pop_call_stack(S#state{ stack = Stack }, V), []);
 eval_instr(S, 'RETURN', []) -> ?WhenS(false, S, []);
 eval_instr(S, 'RETURNR', [V]) ->
-    ?WhenS([] /= S#state.call_stack,
+    ?WhenS(S#state.call_stack /= [],
            pop_call_stack(S, V), []);
 eval_instr(S, Op, Vs)           -> {S, [eval_instr(Op, Vs)]}.
 
@@ -677,7 +689,7 @@ args_g(S, 'SWITCH_V2', _) ->
 args_g(S, 'SWITCH_V3', _) ->
     args_g(S, [?constrained([], value_g({variant, [tuple, tuple, tuple]}),
                             V, is_variant(V, 3))]);
-args_g(S, 'CALL', _) ->
+args_g(S, Call, _) when Call == 'CALL'; Call == 'CALL_T' ->
     args_g(S, [?constrained([], choose(0, length(S#state.stack)),
                             _, false)]);
 args_g(S, _Op, Spec) -> args_g(S, Spec).
@@ -852,6 +864,7 @@ instr_args(S) ->
          [{Op, args_g(S, Op, ArgsSpec)}]).
 
 instr_pre(S, [I]) ->
+    S#state.call_stack /= [] andalso    %% if so, we returned from the top call
     no_todo(I) andalso not contains(void, I) andalso
     check_instr(S, I) andalso
     begin
@@ -867,12 +880,10 @@ instr_next(S, _, [I]) ->
         false -> S1
     end.
 
+return_instrs(#state{ call_stack = [] }) -> [];
 return_instrs(S) ->
     ?LET(Cmd, return_instr(S),
-    case S#state.call_stack of
-        []    -> [Cmd];
-        [_|_] -> [Cmd | return_instrs(pop_call_stack(S, get_return_value(S, Cmd)))]
-    end).
+        [Cmd | return_instrs(pop_call_stack(S, get_return_value(S, Cmd)))]).
 
 return_instr(S) ->
     ?LET(Reg, frequency([ {10, {stack, 0}} || S#state.stack /= [] ] ++
@@ -897,7 +908,7 @@ build_code([{model, _}, {init, S} | Instrs]) ->
 
 -type bb() :: list().
 
--record(code_fr, {ref, instrs, bbs, extra_bbs, current_fun, arg_types}).
+-record(code_fr, {ref, instrs, bbs, extra_bbs, current_fun, arg_types, tail_call}).
 
 -record(code_st, { ref   :: reference(),
                    state :: #state{},
@@ -924,7 +935,8 @@ finalize_bbs(#code_st{ ref = Ref,  instrs = Acc,
                        bbs = BBsR, extra_bbs = ExtraBBsR }) ->
     BBs      = lists:reverse([{Ref, Acc} | BBsR]),
     ExtraBBs = lists:reverse(ExtraBBsR),
-    Lbls     = maps:from_list([ {R, Lbl} || {Lbl, {R, _}} <- indexed(0, BBs ++ ExtraBBs) ]),
+    AllBBs   = [ BB || BB = {_, [_ | _]} <- BBs ++ ExtraBBs ],
+    Lbls     = maps:from_list([ {R, Lbl} || {Lbl, {R, _}} <- indexed(0, AllBBs) ]),
     Lbl      = fun(R) -> maps:get(R, Lbls) end,
     LblIm    = fun(R) -> {immediate, Lbl(R)} end,
     UpdI     = fun({'JUMP', R})                    -> {'JUMP', LblIm(R)};
@@ -935,33 +947,16 @@ finalize_bbs(#code_st{ ref = Ref,  instrs = Acc,
                   (I)                              -> I end,
     UpdIs    = fun([I | Is]) -> lists:reverse([UpdI(I) | Is]) end,
 
-    maps:from_list([{Lbl(R), UpdIs(Is)} || {R, Is} <- BBs ++ ExtraBBs]).
+    maps:from_list([{Lbl(R), UpdIs(Is)} || {R, Is} <- AllBBs]).
 
-pop_code(CS) ->
-    case CS#code_st.call_stack of
-        [] -> CS;
-        [#code_fr{ ref         = Ref,
-                   current_fun = Fun,
-                   instrs      = Acc,
-                   bbs         = BBs,
-                   extra_bbs   = ExtraBBs,
-                   arg_types   = ArgTypes } | CallStack] ->
-            CS#code_st{ ref         = Ref,
-                        current_fun = Fun,
-                        instrs      = Acc,
-                        bbs         = BBs,
-                        extra_bbs   = ExtraBBs,
-                        arg_types   = ArgTypes,
-                        call_stack  = CallStack }
-    end.
-
-push_code(CS, Fun, Args) ->
+push_code(CS, TailCall, Fun, Args) ->
     Frame = #code_fr{ ref         = CS#code_st.ref,
                       instrs      = CS#code_st.instrs,
                       bbs         = CS#code_st.bbs,
                       extra_bbs   = CS#code_st.extra_bbs,
                       current_fun = CS#code_st.current_fun,
-                      arg_types   = CS#code_st.arg_types },
+                      arg_types   = CS#code_st.arg_types,
+                      tail_call   = TailCall },
     CS#code_st{ current_fun = Fun,
                 ref         = make_ref(),
                 instrs      = [],
@@ -970,14 +965,31 @@ push_code(CS, Fun, Args) ->
                 arg_types   = lists:map(fun infer_type/1, Args),
                 call_stack  = [Frame | CS#code_st.call_stack] }.
 
-do_return_instr(#code_st{ arg_types   = ArgTypes,
-                          current_fun = Fun,
-                          instrs      = Is,
-                          fcode       = FCode } = CS, I, V) ->
-    RetType  = infer_type(V),
+pop_code(#code_st{ current_fun = Fun,
+                   arg_types   = ArgTypes,
+                   fcode       = FCode } = CS, RetType) ->
     TypeSpec = substitute(not_map, any, {ArgTypes, RetType}),
-    BBs      = finalize_bbs(CS#code_st{ instrs = [I | Is] }),
-    pop_code(CS#code_st{ fcode = aeb_fate_code:insert_fun(Fun, [payable], TypeSpec, BBs, FCode) }).
+    BBs      = finalize_bbs(CS),
+    CS1      = CS#code_st{ fcode = aeb_fate_code:insert_fun(Fun, [payable], TypeSpec, BBs, FCode) },
+    case CS#code_st.call_stack of
+        [] -> CS1;
+        [Frame | CallStack] ->
+            CS2 = CS1#code_st{ ref         = Frame#code_fr.ref,
+                               current_fun = Frame#code_fr.current_fun,
+                               instrs      = Frame#code_fr.instrs,
+                               bbs         = Frame#code_fr.bbs,
+                               extra_bbs   = Frame#code_fr.extra_bbs,
+                               arg_types   = Frame#code_fr.arg_types,
+                               call_stack  = CallStack },
+            case Frame#code_fr.tail_call of
+                false -> CS2;
+                true  -> pop_code(CS2, RetType)
+            end
+    end.
+
+do_return_instr(#code_st{ instrs = Is } = CS, I, V) ->
+    RetType  = infer_type(V),
+    pop_code(CS#code_st{ instrs = [I | Is] }, RetType).
 
 build_fcode(#code_st{ fcode = FCode }, []) -> FCode;
 build_fcode(CS, [{set, X, Call = {call, ?MODULE, instr, Args}} | Instrs]) ->
@@ -994,15 +1006,15 @@ build_fcode(CS, [{set, X, Call = {call, ?MODULE, instr, Args}} | Instrs]) ->
     case I of
         'RETURN'       -> build_fcode(do_return_instr(CS1, I, get_value(S, {stack, 0})), Instrs);
         {'RETURNR', R} -> build_fcode(do_return_instr(CS1, I, get_value(S, R)), Instrs);
-        {'CALL', {immediate, N}} ->
+        {CALL, {immediate, N}} when CALL == 'CALL'; CALL == 'CALL_T' ->
             FunArgs = lists:reverse(take(N, S#state.stack)),
             Ix1     = CS#code_st.fun_ix + 1,
             FunName = fun_name(Ix1),
             FunSym  = aeb_fate_code:symbol_identifier(FunName),
             Ref1    = make_ref(),
-            BBs1    = [{Ref, [{'CALL', {immediate, FunSym}} | Acc]} | BBs],
+            BBs1    = [{Ref, [{CALL, {immediate, FunSym}} | Acc]} | BBs],
             CS2     = CS1#code_st{ ref = Ref1, instrs = [], bbs = BBs1, fun_ix = Ix1 },
-            build_fcode(push_code(CS2, FunName, FunArgs), Instrs);
+            build_fcode(push_code(CS2, CALL == 'CALL_T', FunName, FunArgs), Instrs);
         'JUMP' ->
             Ref1 = make_ref(),
             BBs1 = [DeadBB(make_ref()), {Ref, [{'JUMP', Ref1} | Acc]} | BBs],
@@ -1137,11 +1149,12 @@ prop_instr() ->
     ?FORALL(Args, list(3, value_g()),
     ?FORALL(Instrs, commands(?MODULE, initial_state(ChainEnv, Args)),
     begin
-        FinalState = state_after(Instrs),
-        ?FORALL(RetInstrs, return_instrs(FinalState),
+        FinalState0 = state_after(Instrs),
+        ?FORALL(RetInstrs, return_instrs(FinalState0),
         ?TIMEOUT(1000,
         try
-            RetValue = get_return_value(FinalState, RetInstrs),
+            FinalState = state_after([{model, ?MODULE}, {init, FinalState0} | RetInstrs]),
+            RetValue = get_return_value(FinalState),
             FCode = build_code(Instrs ++ RetInstrs),
             Store = undefined,
             BBs   = [ BB || {_, _, BBs} <- maps:values(aeb_fate_code:functions(FCode)),
@@ -1172,11 +1185,10 @@ prop_instr() ->
 get_return_value(S, {set, _, {call, ?MODULE, instr, [{'RETURN', []}]}}) ->
     get_value(S, {stack, 0});
 get_return_value(S, {set, _, {call, ?MODULE, instr, [{'RETURNR', [R]}]}}) ->
-    get_value(S, R);
-get_return_value(S0, Instrs) ->
-    {Instrs0, [Ret]} = lists:split(length(Instrs) - 1, Instrs),
-    S = state_after([{model, ?MODULE}, {init, S0} | Instrs0]),
-    get_return_value(S, Ret).
+    get_value(S, R).
+
+get_return_value(S) ->
+    get_value(S, {stack, 0}).
 
 pp_fcode(FCode) ->
     try
