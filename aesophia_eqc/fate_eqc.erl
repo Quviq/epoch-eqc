@@ -25,8 +25,8 @@
                  args   :: [arg_spec()]}).
 -type instr_spec() :: #instr{}.
 
--spec simple_instructions() -> [instr_spec()].
-simple_instructions() ->
+-spec instructions() -> [instr_spec()].
+instructions() ->
     I = fun(Op, Ins, Out) ->
             fix_types(
             #instr{ op   = Op,
@@ -85,12 +85,25 @@ fix_type(hash)      -> {bytes, 32};
 fix_type(signature) -> {bytes, 64};
 fix_type(T)         -> T.
 
-black_listed('MICROBLOCK') -> true;  %% Not implemented
-black_listed('DUP')        -> true;  %% Bugged
-black_listed(_)            -> false.
+black_listed('MICROBLOCK')           -> true;   %% Not implemented
+black_listed('DUP')                  -> true;   %% Bugged
+black_listed('GAS')                  -> true;   %% Not modelling gas costs
+black_listed('ORACLE_REGISTER')      -> true;   %% TODO: Oracle/AENS/Crypto
+black_listed('ORACLE_QUERY')         -> true;
+black_listed('ORACLE_GET_ANSWER')    -> true;
+black_listed('ORACLE_GET_QUESTION')  -> true;
+black_listed('ORACLE_QUERY_FEE')     -> true;
+black_listed('ORACLE_CHECK')         -> true;
+black_listed('ORACLE_CHECK_QUERY')   -> true;
+black_listed('AENS_RESOLVE')         -> true;
+black_listed('VERIFY_SIG')           -> true;
+black_listed('VERIFY_SIG_SECP256K1') -> true;
+black_listed('ECVERIFY_SECP256K1')   -> true;
+black_listed('ECRECOVER_SECP256K1')  -> true;
+black_listed(_)                      -> false.
 
 other_instructions() ->
-    Simple = maps:from_list([{Op, true} || #instr{ op = Op } <- simple_instructions() ]),
+    Simple = maps:from_list([{Op, true} || #instr{ op = Op } <- instructions() ]),
     [ Op || #{ opname := Op } <- aeb_fate_generate_ops:get_ops(),
             not maps:is_key(Op, Simple),
             not black_listed(Op) ].
@@ -100,7 +113,7 @@ other_instructions() ->
 instruction_spec() ->
     case get(?InstrSpecCache) of
         undefined ->
-            Spec = maps:from_list([ {I#instr.op, I} || I <- simple_instructions() ]),
+            Spec = maps:from_list([ {I#instr.op, I} || I <- instructions() ]),
             put(?InstrSpecCache, Spec),
             Spec;
         Spec -> Spec
@@ -434,20 +447,7 @@ eval_instr('BITS_DIFF',  [{bits, A}, {bits, B}]) -> {bits, A band bnot B};
 eval_instr('IS_ORACLE', [_])                       -> false;
 eval_instr('AUTH_TX_HASH', _)                      -> {variant, [0, 1], 0, {}};
 eval_instr('CONTRACT_TO_ADDRESS', [{contract, A}]) -> {address, A};
-eval_instr('ADDRESS_TO_CONTRACT', [{address, A}])  -> {contract, A};
-eval_instr('ORACLE_REGISTER', _)      -> todo;
-eval_instr('ORACLE_QUERY', _)         -> todo;
-eval_instr('ORACLE_GET_ANSWER', _)    -> todo;
-eval_instr('ORACLE_GET_QUESTION', _)  -> todo;
-eval_instr('ORACLE_QUERY_FEE', _)     -> todo;
-eval_instr('ORACLE_CHECK', _)         -> todo;
-eval_instr('ORACLE_CHECK_QUERY', _)   -> todo;
-eval_instr('AENS_RESOLVE', _)         -> todo;
-eval_instr('VERIFY_SIG', _)           -> todo;
-eval_instr('VERIFY_SIG_SECP256K1', _) -> todo;
-eval_instr('ECVERIFY_SECP256K1', _)   -> todo;
-eval_instr('ECRECOVER_SECP256K1', _)  -> todo;
-eval_instr('GAS', _)                  -> todo.
+eval_instr('ADDRESS_TO_CONTRACT', [{address, A}])  -> {contract, A}.
 
 eval_instr(S, 'BLOCKHASH', [H])  ->
     Current = chain_env(S, height),
@@ -987,9 +987,10 @@ prop_instr() ->
             Store = undefined,
             BBs   = [ BB || {_, _, BBs} <- maps:values(aeb_fate_code:functions(FCode)),
                             BB <- maps:values(BBs) ],
+            UsedInstrs = [ if is_atom(I) -> I; true -> element(1, I) end || BB <- BBs, I <- BB ],
             ?WHENFAIL(io:format("~s", [pp_fcode(FCode)]),
-            aggregate([ if is_atom(I) -> I; true -> element(1, I) end
-                        || BB <- BBs, I <- BB ],
+            aggregate(UsedInstrs,
+            aggregate(fun check_instrs/1, UsedInstrs,
             try
                 {Res, Stats} = run(ChainEnv, FCode, Args, Store),
                 measure(block_time, 6 / maps:get(gas_per_us, Stats),
@@ -1001,7 +1002,7 @@ prop_instr() ->
                               {gas_cost, check_gas_cost(Stats)} ])))))
             catch _:Err ->
                 equals(ok, {'EXIT', Err, erlang:get_stacktrace()})
-            end))
+            end)))
         catch _:Err ->
             equals(ok, {'EXIT', Err, erlang:get_stacktrace()})
         end))
@@ -1012,6 +1013,16 @@ pp_fcode(FCode) ->
         aeb_fate_asm:pp(FCode)
     catch _:_ ->
         "Bad fcode\n"
+    end.
+
+check_instrs(Data) ->
+    Used = [ I || {I, _} <- Data ],
+    All  = [ I || #instr{op = I} <- instructions() ],
+    case All -- Used of
+        []      -> true;
+        Missing ->
+            io:format("Unused instructions:\n  ~p\n", [Missing]),
+            false
     end.
 
 check_result(Res, void) -> equals({have, Res}, {want, void});
