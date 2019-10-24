@@ -61,7 +61,10 @@ more_instructions() ->
      #instr{ op = 'JUMPIF', args = [{in, any, boolean}] },
      #instr{ op = 'SWITCH_V2', args = [{in, any, variant}] },
      #instr{ op = 'SWITCH_V3', args = [{in, any, variant}] },
-     #instr{ op = 'SWITCH_VN', args = [{in, any, variant}] }
+     #instr{ op = 'SWITCH_VN', args = [{in, any, variant}] },
+     #instr{ op = 'CALL', args = [{in, immediate, integer}] },
+     #instr{ op = 'RETURN', args = [] },
+     #instr{ op = 'RETURNR', args = [{in, any, any}] }
     ].
 
 spec_overrides() ->
@@ -140,14 +143,14 @@ instruction_spec(Op) ->
                         difficulty := non_neg_integer(),
                         height     := pos_integer() }.
 
--record(frame, { stack :: [value()],
-                 vars  :: #{ integer() => value() },
+-record(frame, { vars  :: #{ integer() => value() },
                  args  :: #{ integer() => value() } }).
 
 -type frame() :: #frame{}.
 
 -record(state, { stack      = []    :: [value()],
                  vars       = #{}   :: #{ integer() => value() },
+                 store      = #{}   :: #{ integer() => value() },
                  args       = #{}   :: #{ integer() => value() },
                  failed     = false :: boolean() | skip,
                  chain_env  = #{}   :: chain_env(),
@@ -174,6 +177,20 @@ get_account(S, Pubkey, Field, Default) ->
         Acc       -> maps:get(Field, Acc)
     end.
 
+push_call_stack(S, N) ->
+    {FunArgs, Stack1} = lists:split(N, S#state.stack),
+    Frame = #frame{ vars = S#state.vars, args = S#state.args },
+    S#state{ stack      = Stack1,
+             vars       = #{},
+             args       = maps:from_list(indexed(0, FunArgs)),
+             call_stack = [Frame | S#state.call_stack] }.
+
+pop_call_stack(S = #state{ call_stack = [Frame | CallStack] }, V) ->
+    S#state{ stack      = [V | S#state.stack],
+             args       = Frame#frame.args,
+             vars       = Frame#frame.vars,
+             call_stack = CallStack }.
+
 new_account() ->
     #{ balance => 0, creator => none }.
 
@@ -190,11 +207,13 @@ get_instr(Op) ->
     maps:get(Op, instruction_spec(), undefined).
 
 -spec get_value(state(), arg()) -> value().
-get_value(_, {immediate, V}) -> V;
-get_value(S, {arg, N})       -> maps:get(N, S#state.args, void);
-get_value(S, {var,  N})      -> maps:get(N, S#state.vars, void);
-get_value(S, {var_, N})      -> maps:get(N, S#state.vars, void);
-get_value(S, {stack, 0})     -> hd(S#state.stack ++ [void]).
+get_value(_, {immediate, V})      -> V;
+get_value(S, {arg, N})            -> maps:get(N, S#state.args, void);
+get_value(S, {var, N}) when N < 0 -> maps:get(-N - 1, S#state.store, void);
+get_value(S, {var,  N})           -> maps:get(N, S#state.vars, void);
+get_value(S, {var_, N})           -> maps:get(N, S#state.vars, void);
+get_value(S, {store, N})          -> maps:get(N, S#state.store, void);
+get_value(S, {stack, 0})          -> hd(S#state.stack ++ [void]).
 
 -spec get_type(state(), arg()) -> type() | void.
 get_type(S, Arg) -> infer_type(get_value(S, Arg)).
@@ -203,16 +222,18 @@ get_type(S, Arg) -> infer_type(get_value(S, Arg)).
 pop(N, S) ->
     S#state{ stack = drop(N, S#state.stack) }.
 
--spec write_arg(arg(), type(), state()) -> state().
-write_arg({stack, 0}, Type, S) -> S#state{ stack = [Type | S#state.stack] };
-write_arg({var_, N},  Type, S) -> S#state{ vars  = (S#state.vars)#{ N => Type } };
-write_arg({arg, N},   Type, S) -> S#state{ args  = (S#state.args)#{ N => Type } }.
+-spec write_arg(arg(), value(), state()) -> state().
+write_arg({stack, 0}, Val, S) -> S#state{ stack = [Val | S#state.stack] };
+write_arg({var_, N},  Val, S) -> S#state{ vars  = (S#state.vars)#{ N => Val } };
+write_arg({store, N}, Val, S) -> S#state{ store = (S#state.store)#{ N => Val } };
+write_arg({arg, N},   Val, S) -> S#state{ args  = (S#state.args)#{ N => Val } }.
 
 -spec matching_regs(state(), fun((value()) -> boolean())) -> [arg()].
-matching_regs(#state{ vars = VarMap, args = ArgMap }, Valid) ->
-    Vars = [ {{var_, I}, V} || {I, V} <- maps:to_list(VarMap) ],
-    Args = [ {{arg,  I}, V} || {I, V} <- maps:to_list(ArgMap) ],
-    [ A || {A, V} <- Vars ++ Args, Valid(V) ].
+matching_regs(#state{ vars = VarMap, store = StoreMap, args = ArgMap }, Valid) ->
+    Vars  = [ {{var_, I}, V} || {I, V}  <- maps:to_list(VarMap) ],
+    Store = [ {{store, I}, V} || {I, V} <- maps:to_list(StoreMap) ],
+    Args  = [ {{arg,  I}, V} || {I, V}  <- maps:to_list(ArgMap) ],
+    [ A || {A, V} <- Vars ++ Store ++ Args, Valid(V) ].
 
 -spec infer_type(value()) -> type().
 infer_type(N) when is_integer(N) -> integer;
@@ -370,7 +391,7 @@ hash(Alg, Val) ->
 -define(MaxBits, 2048).
 -define(MaxBlockGas, 6000000).
 
--define(WhenS(B, S, Out), case B of true -> {S, Out}; false -> {(S)#state{ failed = skip }, Out} end).
+-define(WhenS(B, S, Out), case B of true -> {S, Out}; false -> {#state{ failed = skip }, Out} end).
 
 eval_instr('INC', [A])     -> A + 1;
 eval_instr('DEC', [A])     -> A - 1;
@@ -531,6 +552,15 @@ eval_instr(S, 'JUMPIF', [V]) ->
 eval_instr(S, 'SWITCH_V2', [V]) -> ?WhenS(is_variant(V, 2), S, []);
 eval_instr(S, 'SWITCH_V3', [V]) -> ?WhenS(is_variant(V, 3), S, []);
 eval_instr(S, 'SWITCH_VN', [V]) -> ?WhenS(is_variant(V), S, []);
+eval_instr(S = #state{ stack = Stack }, 'CALL', [N]) ->
+    ?WhenS(length(Stack) >= N, push_call_stack(S, N), []);
+eval_instr(S = #state{ stack = [V | Stack] }, 'RETURN', []) ->
+    ?WhenS([] /= S#state.call_stack,
+           pop_call_stack(S#state{ stack = Stack }, V), []);
+eval_instr(S, 'RETURN', []) -> ?WhenS(false, S, []);
+eval_instr(S, 'RETURNR', [V]) ->
+    ?WhenS([] /= S#state.call_stack,
+           pop_call_stack(S, V), []);
 eval_instr(S, Op, Vs)           -> {S, [eval_instr(Op, Vs)]}.
 
 -spec step_instr(state(), instr()) -> state().
@@ -556,7 +586,7 @@ small_nat() -> ?SIZED(N, resize(N div 3, nat())).
 out_arg_g() ->
     oneof([{stack, 0},
            {var_, small_nat()},
-           {var_, ?LET(N, small_nat(), -N - 1)},
+           {store, small_nat()},
            {arg, small_nat()}]).
 
 -define(constrained(Args, Local, Gen, V, Pred),
@@ -647,6 +677,9 @@ args_g(S, 'SWITCH_V2', _) ->
 args_g(S, 'SWITCH_V3', _) ->
     args_g(S, [?constrained([], value_g({variant, [tuple, tuple, tuple]}),
                             V, is_variant(V, 3))]);
+args_g(S, 'CALL', _) ->
+    args_g(S, [?constrained([], choose(0, length(S#state.stack)),
+                            _, false)]);
 args_g(S, _Op, Spec) -> args_g(S, Spec).
 
 map_args_g(S, Rest) ->
@@ -834,32 +867,62 @@ instr_next(S, _, [I]) ->
         false -> S1
     end.
 
+return_instrs(S) ->
+    ?LET(Cmd, return_instr(S),
+    case S#state.call_stack of
+        []    -> [Cmd];
+        [_|_] -> [Cmd | return_instrs(pop_call_stack(S, get_return_value(S, Cmd)))]
+    end).
+
 return_instr(S) ->
     ?LET(Reg, frequency([ {10, {stack, 0}} || S#state.stack /= [] ] ++
                         [ {10, elements([{var, I} || I <- maps:keys(S#state.vars)])}
                            || #{} /= S#state.vars ]++
+                        [ {10, elements([{store, I} || I <- maps:keys(S#state.store)])}
+                           || #{} /= S#state.store ]++
                         [ {10, elements([{arg, I} || I <- maps:keys(S#state.args)])}
                            || #{} /= S#state.args ] ++
                         [ {1, {immediate, value_g()}} ]),
-    case Reg of
-      {stack, 0} -> elements(['RETURN', {'RETURNR', Reg}]);
-      _          -> {'RETURNR', Reg}
-    end).
+    ?LET(Arg, case Reg of
+                  {stack, 0} -> elements([{'RETURN', []}, {'RETURNR', [Reg]}]);
+                  _          -> {'RETURNR', [Reg]}
+              end,
+        {set, {var, 0}, {call, ?MODULE, instr, [Arg]}})).
 
 %% -- Running the code -------------------------------------------------------
 
--define(TestFun, <<"test">>).
-
-build_code([{model, _}, {init, S} | Instrs], Ret, RetType) ->
+build_code([{model, _}, {init, S} | Instrs]) ->
     ArgTypes = [ infer_type(Arg) || Arg <- maps:values(S#state.args) ],
-    BBs = build_bbs(S, Instrs, Ret),
-    TypeSpec = substitute(not_map, any, {ArgTypes, RetType}),
-    aeb_fate_code:insert_fun(?TestFun, [payable], TypeSpec, BBs, aeb_fate_code:new()).
+    build_fcode(init_code_st(S, ArgTypes), Instrs).
 
-build_bbs(InitS, Instr, Ret) -> build_bbs(InitS, make_ref(), Instr, Ret, [], [], []).
+-type bb() :: list().
 
-build_bbs(_, Ref, [], Ret, Acc, BBsR, ExtraBBsR) ->
-    BBs      = lists:reverse([{Ref, [Ret | Acc]} | BBsR]),
+-record(code_fr, {ref, instrs, bbs, extra_bbs, current_fun, arg_types}).
+
+-record(code_st, { ref   :: reference(),
+                   state :: #state{},
+                   instrs     = [],
+                   bbs        = [],
+                   extra_bbs  = [],
+                   current_fun,
+                   fun_ix     = 1,
+                   arg_types  = [],
+                   fcode      = aeb_fate_code:new(),
+                   call_stack = [] :: [#code_fr{}] }).
+
+init_code_st(InitS, ArgTypes) ->
+    #code_st{ state       = InitS,
+              ref         = make_ref(),
+              arg_types   = ArgTypes,
+              current_fun = fun_name(1) }.
+
+fun_name(Fn) -> list_to_binary(lists:concat(["fun_", Fn])).
+fun_sym(Fn)  -> aeb_fate_code:symbol_identifier(fun_name(Fn)).
+
+-spec finalize_bbs(#code_st{}) -> #{non_neg_integer() => bb()}.
+finalize_bbs(#code_st{ ref = Ref,  instrs = Acc,
+                       bbs = BBsR, extra_bbs = ExtraBBsR }) ->
+    BBs      = lists:reverse([{Ref, Acc} | BBsR]),
     ExtraBBs = lists:reverse(ExtraBBsR),
     Lbls     = maps:from_list([ {R, Lbl} || {Lbl, {R, _}} <- indexed(0, BBs ++ ExtraBBs) ]),
     Lbl      = fun(R) -> maps:get(R, Lbls) end,
@@ -872,26 +935,89 @@ build_bbs(_, Ref, [], Ret, Acc, BBsR, ExtraBBsR) ->
                   (I)                              -> I end,
     UpdIs    = fun([I | Is]) -> lists:reverse([UpdI(I) | Is]) end,
 
-    maps:from_list([{Lbl(R), UpdIs(Is)} || {R, Is} <- BBs ++ ExtraBBs]);
-build_bbs(S, Ref, [{set, X, Call = {call, ?MODULE, instr, Args}} | Instrs], Ret, Acc, BBs, ExtraBBs) ->
-    S1      = next_state(S, X, Call),
-    Var     = fun({var_, I}) -> {var, I}; (A) -> A end,
-    I       = case Args of
-                  [{Op, []}] -> Op;
-                  [{Op, As}] -> list_to_tuple([Op | lists:map(Var, As)])
-              end,
-    DeadBB  = fun(R) -> {R, [{'ABORT', {immediate, <<"Unreachable">>}}]} end,
+    maps:from_list([{Lbl(R), UpdIs(Is)} || {R, Is} <- BBs ++ ExtraBBs]).
+
+pop_code(CS) ->
+    case CS#code_st.call_stack of
+        [] -> CS;
+        [#code_fr{ ref         = Ref,
+                   current_fun = Fun,
+                   instrs      = Acc,
+                   bbs         = BBs,
+                   extra_bbs   = ExtraBBs,
+                   arg_types   = ArgTypes } | CallStack] ->
+            CS#code_st{ ref         = Ref,
+                        current_fun = Fun,
+                        instrs      = Acc,
+                        bbs         = BBs,
+                        extra_bbs   = ExtraBBs,
+                        arg_types   = ArgTypes,
+                        call_stack  = CallStack }
+    end.
+
+push_code(CS, Fun, Args) ->
+    Frame = #code_fr{ ref         = CS#code_st.ref,
+                      instrs      = CS#code_st.instrs,
+                      bbs         = CS#code_st.bbs,
+                      extra_bbs   = CS#code_st.extra_bbs,
+                      current_fun = CS#code_st.current_fun,
+                      arg_types   = CS#code_st.arg_types },
+    CS#code_st{ current_fun = Fun,
+                ref         = make_ref(),
+                instrs      = [],
+                bbs         = [],
+                extra_bbs   = [],
+                arg_types   = lists:map(fun infer_type/1, Args),
+                call_stack  = [Frame | CS#code_st.call_stack] }.
+
+do_return_instr(#code_st{ arg_types   = ArgTypes,
+                          current_fun = Fun,
+                          instrs      = Is,
+                          fcode       = FCode } = CS, I, V) ->
+    RetType  = infer_type(V),
+    TypeSpec = substitute(not_map, any, {ArgTypes, RetType}),
+    BBs      = finalize_bbs(CS#code_st{ instrs = [I | Is] }),
+    pop_code(CS#code_st{ fcode = aeb_fate_code:insert_fun(Fun, [payable], TypeSpec, BBs, FCode) }).
+
+build_fcode(#code_st{ fcode = FCode }, []) -> FCode;
+build_fcode(CS, [{set, X, Call = {call, ?MODULE, instr, Args}} | Instrs]) ->
+    #code_st{ state = S, ref = Ref, instrs = Acc, bbs = BBs, extra_bbs = ExtraBBs } = CS,
+    CS1    = CS#code_st{ state = next_state(S, X, Call) },
+    Var    = fun({var_, I})  -> {var, I};
+                ({store, I}) -> {var, -I - 1};
+                (A)          -> A end,
+    I      = case Args of
+                 [{Op, []}] -> Op;
+                 [{Op, As}] -> list_to_tuple([Op | lists:map(Var, As)])
+             end,
+    DeadBB = fun(R) -> {R, [{'ABORT', {immediate, <<"Unreachable">>}}]} end,
     case I of
+        'RETURN'       -> build_fcode(do_return_instr(CS1, I, get_value(S, {stack, 0})), Instrs);
+        {'RETURNR', R} -> build_fcode(do_return_instr(CS1, I, get_value(S, R)), Instrs);
+        {'CALL', {immediate, N}} ->
+            FunArgs = lists:reverse(take(N, S#state.stack)),
+            Ix1     = CS#code_st.fun_ix + 1,
+            FunName = fun_name(Ix1),
+            FunSym  = aeb_fate_code:symbol_identifier(FunName),
+            Ref1    = make_ref(),
+            BBs1    = [{Ref, [{'CALL', {immediate, FunSym}} | Acc]} | BBs],
+            CS2     = CS1#code_st{ ref = Ref1, instrs = [], bbs = BBs1, fun_ix = Ix1 },
+            build_fcode(push_code(CS2, FunName, FunArgs), Instrs);
         'JUMP' ->
             Ref1 = make_ref(),
             BBs1 = [DeadBB(make_ref()), {Ref, [{'JUMP', Ref1} | Acc]} | BBs],
-            build_bbs(S1, Ref1, Instrs, Ret, [], BBs1, ExtraBBs);
+            build_fcode(CS1#code_st{ref = Ref1, instrs = [], bbs = BBs1}, Instrs);
         {'JUMPIF', Arg} ->
             Ref1 = make_ref(),
             This = {Ref, [{'JUMPIF', Arg, Ref1} | Acc]},
             case get_value(S, Arg) of
-                true  -> build_bbs(S1, Ref1, Instrs, Ret, [], [DeadBB(make_ref()), This | BBs], ExtraBBs);
-                false -> build_bbs(S1, make_ref(), Instrs, Ret, [], [This | BBs], [DeadBB(Ref1) | ExtraBBs])
+                true  -> build_fcode(CS1#code_st{ref = Ref1, instrs = [],
+                                                 bbs = [DeadBB(make_ref()), This | BBs]},
+                                   Instrs);
+                false -> build_fcode(CS1#code_st{ref = make_ref(), instrs = [],
+                                                 bbs = [This | BBs],
+                                                 extra_bbs = [DeadBB(Ref1) | ExtraBBs]},
+                                   Instrs)
             end;
         {Switch, Arg} when Switch == 'SWITCH_V2'; Switch == 'SWITCH_V3'; Switch == 'SWITCH_VN' ->
             {variant, Ar, Tag, _} = get_value(S, Arg),
@@ -902,8 +1028,11 @@ build_bbs(S, Ref, [{set, X, Call = {call, ?MODULE, instr, Args}} | Instrs], Ret,
                     end,
             This = {Ref, [Instr | Acc]},
             {Take, Skip} = extract_nth(Tag + 1, Refs),
-            build_bbs(S1, Take, Instrs, Ret, [], [DeadBB(make_ref()), This | BBs], lists:map(DeadBB, Skip) ++ ExtraBBs);
-        _ -> build_bbs(S1, Ref, Instrs, Ret, [I | Acc], BBs, ExtraBBs)
+            build_fcode(CS1#code_st{ ref = Take, instrs = [],
+                                   bbs = [DeadBB(make_ref()), This | BBs],
+                                   extra_bbs = lists:map(DeadBB, Skip) ++ ExtraBBs },
+                      Instrs);
+        _ -> build_fcode(CS1#code_st{ instrs = [I | Acc] }, Instrs)
     end.
 
 make_store(undefined) -> aefa_stores:initial_contract_store();
@@ -926,7 +1055,7 @@ make_trees(#{ accounts := Accounts } = Env, Cache) ->
     aec_trees:set_contracts(aec_trees:set_accounts(Trees, ATrees), CTrees).
 
 call_spec(#{ address := Contract, call_value := Value, gas_limit := GasLimit }, Args, Store) ->
-    Fun = aeb_fate_code:symbol_identifier(?TestFun),
+    Fun = fun_sym(1),
     #{ contract => Contract,
        gas      => GasLimit,
        value    => Value,
@@ -1008,16 +1137,12 @@ prop_instr() ->
     ?FORALL(Args, list(3, value_g()),
     ?FORALL(Instrs, commands(?MODULE, initial_state(ChainEnv, Args)),
     begin
-        FinalState = state_after(initial_state(ChainEnv, Args), Instrs),
-        ?FORALL(RetInstr, return_instr(FinalState),
+        FinalState = state_after(Instrs),
+        ?FORALL(RetInstrs, return_instrs(FinalState),
         ?TIMEOUT(1000,
         try
-            RetValue =
-                case RetInstr of
-                    'RETURN'       -> get_value(FinalState, {stack, 0});
-                    {'RETURNR', R} -> get_value(FinalState, R)
-                end,
-            FCode = build_code(Instrs, RetInstr, infer_type(RetValue)),
+            RetValue = get_return_value(FinalState, RetInstrs),
+            FCode = build_code(Instrs ++ RetInstrs),
             Store = undefined,
             BBs   = [ BB || {_, _, BBs} <- maps:values(aeb_fate_code:functions(FCode)),
                             BB <- maps:values(BBs) ],
@@ -1043,6 +1168,15 @@ prop_instr() ->
             equals(ok, {'EXIT', Err, erlang:get_stacktrace()})
         end))
     end)))).
+
+get_return_value(S, {set, _, {call, ?MODULE, instr, [{'RETURN', []}]}}) ->
+    get_value(S, {stack, 0});
+get_return_value(S, {set, _, {call, ?MODULE, instr, [{'RETURNR', [R]}]}}) ->
+    get_value(S, R);
+get_return_value(S0, Instrs) ->
+    {Instrs0, [Ret]} = lists:split(length(Instrs) - 1, Instrs),
+    S = state_after([{model, ?MODULE}, {init, S0} | Instrs0]),
+    get_return_value(S, Ret).
 
 pp_fcode(FCode) ->
     try
@@ -1092,6 +1226,7 @@ state_badness(S) ->
     [ failed        || S#state.failed ] ++
     Check(stack, indexed(0, S#state.stack)) ++
     Check(var, maps:to_list(S#state.vars)) ++
+    Check(store, maps:to_list(S#state.store)) ++
     Check(arg, maps:to_list(S#state.args)).
 
 check_gas_cost(#{ gas_used := Gas }) when Gas < 1000 -> true;
@@ -1116,6 +1251,9 @@ drop(N, Xs) ->
         true  -> [];
         false -> lists:sublist(Xs, N + 1, Len)
     end.
+
+take(N, Xs) ->
+    lists:sublist(Xs, 1, N).
 
 indexed(Xs) -> indexed(1, Xs).
 
