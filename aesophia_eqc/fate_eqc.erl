@@ -145,8 +145,7 @@ instruction_spec(Op) ->
                         height     := pos_integer() }.
 
 -record(frame, { vars      = #{}   :: #{ integer() => value() },
-                 args      = #{}   :: #{ integer() => value() },
-                 tail_call = false :: boolean() }).
+                 args      = #{}   :: #{ integer() => value() } }).
 
 -type frame() :: #frame{}.
 
@@ -185,21 +184,17 @@ push_tailcall(S, N) -> push_call_stack(S, true, N).
 
 push_call_stack(S, TailCall, N) ->
     {FunArgs, Stack1} = lists:split(N, S#state.stack),
-    Frame = #frame{ vars = S#state.vars, args = S#state.args, tail_call = TailCall },
+    Frame = #frame{ vars = S#state.vars, args = S#state.args },
     S#state{ stack      = Stack1,
              vars       = #{},
              args       = maps:from_list(indexed(0, FunArgs)),
-             call_stack = [Frame | S#state.call_stack] }.
+             call_stack = [Frame || not TailCall] ++ S#state.call_stack }.
 
 pop_call_stack(S = #state{ call_stack = [Frame | CallStack] }, V) ->
-    S1 = S#state{ stack      = [V | S#state.stack],
-                  args       = Frame#frame.args,
-                  vars       = Frame#frame.vars,
-                  call_stack = CallStack },
-    case Frame#frame.tail_call of
-        true  -> pop_call_stack(S1, V);
-        false -> S1
-    end.
+    S#state{ stack      = [V | S#state.stack],
+             args       = Frame#frame.args,
+             vars       = Frame#frame.vars,
+             call_stack = CallStack }.
 
 new_account() ->
     #{ balance => 0, creator => none }.
