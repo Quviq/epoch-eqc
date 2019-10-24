@@ -58,7 +58,10 @@ more_instructions() ->
      #instr{ op = 'BITS_NONEA', args = [] },
      #instr{ op = 'SPEND', args = [{in, any, address}, {in, any, integer}] },
      #instr{ op = 'JUMP', args = [] },
-     #instr{ op = 'JUMPIF', args = [{in, any, boolean}] }
+     #instr{ op = 'JUMPIF', args = [{in, any, boolean}] },
+     #instr{ op = 'SWITCH_V2', args = [{in, any, variant}] },
+     #instr{ op = 'SWITCH_V3', args = [{in, any, variant}] },
+     #instr{ op = 'SWITCH_VN', args = [{in, any, variant}] }
     ].
 
 spec_overrides() ->
@@ -239,8 +242,8 @@ infer_type(M) when is_map(M) ->
                 true  -> void;
                 false -> {map, K, V}
             end;
-        {list, any}             -> {map, not_map, any};
-        _                       -> void
+        {list, any} -> {map, not_map, any};
+        _           -> void
     end;
 infer_type(void) -> void;
 infer_type(V) ->
@@ -260,6 +263,12 @@ isect_type({variant, Sss}, {variant, Tss}) when length(Sss) == length(Tss) ->
     {variant, lists:zipwith(fun isect_type/2, Sss, Tss)};
 isect_type(T, T) -> T;
 isect_type(_, _) -> void.
+
+is_variant({variant, _, _, _}) -> true;
+is_variant(_) -> false.
+
+is_variant({variant, Ar, _, _}, N) -> length(Ar) == N;
+is_variant(_, _) -> false.
 
 %% Check that an instruction can be executed in the given state.
 -spec check_instr(state(), instr()) -> boolean().
@@ -360,6 +369,8 @@ hash(Alg, Val) ->
 -define(WhenBetween(A, X, B, Go), ?When(A =< X andalso X =< B, Go)).
 -define(MaxBits, 2048).
 -define(MaxBlockGas, 6000000).
+
+-define(WhenS(B, S, Out), case B of true -> {S, Out}; false -> {(S)#state{ failed = skip }, Out} end).
 
 eval_instr('INC', [A])     -> A + 1;
 eval_instr('DEC', [A])     -> A - 1;
@@ -493,10 +504,8 @@ eval_instr(S = #state{ stack = Stack }, 'PUSH', [V]) ->
 eval_instr(S = #state{ stack = Stack }, 'DUPA', []) ->
     {S#state{ stack = [hd(Stack ++ [skip]) | Stack] }, []};
 eval_instr(S = #state{ stack = Stack }, 'DUP', [N]) ->
-    case 0 =< N andalso N < length(Stack) of
-        false -> {S#state{ failed = skip }, []};
-        true  -> {S#state{ stack = [lists:nth(N + 1, Stack) | Stack] }, []}
-    end;
+    ?WhenS(0 =< N andalso N < length(Stack),
+           S#state{ stack = [lists:nth(N + 1, Stack) | Stack] }, []);
 eval_instr(S = #state{ stack = Stack }, 'POP', []) ->
     {pop(1, S), [?When([] /= Stack, hd(Stack))]};
 eval_instr(S, Op, []) when Op == 'INCA'; Op == 'DECA' ->
@@ -514,13 +523,15 @@ eval_instr(S, 'BITS_NONEA', []) ->
 eval_instr(S, 'SPEND', [{address, A}, Amount]) ->
     Self    = chain_env(S, address),
     Balance = get_account(S, Self, balance, 0),
-    case 0 =< Amount andalso Amount =< Balance of
-        false -> {S#state{ failed = skip }, []};
-        true  -> {spend(Self, A, Amount, S), []}
-    end;
-eval_instr(S, 'JUMP', [])    -> {S, []};
-eval_instr(S, 'JUMPIF', [_]) -> {S, []};
-eval_instr(S, Op, Vs)        -> {S, [eval_instr(Op, Vs)]}.
+    ?WhenS(0 =< Amount andalso Amount =< Balance,
+           spend(Self, A, Amount, S), []);
+eval_instr(S, 'JUMP', []) -> {S, []};
+eval_instr(S, 'JUMPIF', [V]) ->
+    ?WhenS(lists:member(V, [true, false]), S, []);
+eval_instr(S, 'SWITCH_V2', [V]) -> ?WhenS(is_variant(V, 2), S, []);
+eval_instr(S, 'SWITCH_V3', [V]) -> ?WhenS(is_variant(V, 3), S, []);
+eval_instr(S, 'SWITCH_VN', [V]) -> ?WhenS(is_variant(V), S, []);
+eval_instr(S, Op, Vs)           -> {S, [eval_instr(Op, Vs)]}.
 
 -spec step_instr(state(), instr()) -> state().
 step_instr(S, {Op, Args}) ->
@@ -630,6 +641,12 @@ args_g(S, 'BYTES_SPLIT', _) ->
     args_g(S, [{out, any, any}, {in, any, bytes},
                ?constrained([{bytes, B}], N = byte_size(B),
                             choose(0, N), I, 0 =< I andalso I =< N)]);
+args_g(S, 'SWITCH_V2', _) ->
+    args_g(S, [?constrained([], value_g({variant, [tuple, tuple]}),
+                            V, is_variant(V, 2))]);
+args_g(S, 'SWITCH_V3', _) ->
+    args_g(S, [?constrained([], value_g({variant, [tuple, tuple, tuple]}),
+                            V, is_variant(V, 3))]);
 args_g(S, _Op, Spec) -> args_g(S, Spec).
 
 map_args_g(S, Rest) ->
@@ -639,7 +656,8 @@ map_args_g(S, Rest) ->
          args_g(S, [{out, any, any}, {in, any, MapT}] ++ Rest)).
 
 map_and_key_args_g(S, Rest) ->
-    map_args_g(S, [?constrained_t([M], begin {map, KeyT, _} = infer_type(M), any_to_not_map(KeyT) end)
+    map_args_g(S, [?constrained_t([M], begin {map, KeyT, _} = infer_type(M),
+                                             substitute(any, not_map, KeyT) end)
                   | Rest]).
 
 args_g(S, Spec) ->
@@ -702,8 +720,6 @@ valid_type(_) -> true.
 
 nomap(G) -> ?SUCHTHAT(T, G, not contains(map, T)).
 
-any_to_not_map(X) -> substitute(any, not_map, X).
-
 instantiate_any(any) -> type_g();
 instantiate_any(not_map) -> nomap(type_g());
 instantiate_any({map, K, V}) ->
@@ -734,9 +750,14 @@ value1_g(string)       -> eqc_gen:fmap(fun list_to_binary/1, list(choose($!, $~)
 value1_g({list, T})    -> list(3, value1_g(T));
 value1_g({tuple, Ts})  -> {tuple, eqc_gen:fmap(fun list_to_tuple/1, [value1_g(T) || T <- Ts])};
 value1_g({variant, Tss}) ->
-    ?LET({I, {tuple, Ts}}, elements(indexed(0, Tss)),
-    {variant, [length(Ts1) || {tuple, Ts1} <- Tss], I,
-     eqc_gen:fmap(fun erlang:list_to_tuple/1, [value1_g(T) || T <- Ts])});
+    ?LET({I, ArgTy}, elements(indexed(0, Tss)),
+    ?LET({tuple, V}, value1_g(ArgTy),
+    ?LET(Ar, [ case Ty of
+                   _ when I == J -> tuple_size(V);
+                   {tuple, Ts}   -> length(Ts);
+                   tuple         -> choose(0, 3)
+               end || {J, Ty} <- indexed(0, Tss) ],
+    {variant, Ar, I, V})));
 value1_g({map, K, V})  ->
     MkMap = fun(L) -> maps:from_list([T || {tuple, T} <- L]) end,
     eqc_gen:fmap(MkMap, value1_g({list, {tuple, [K, V]}}));
@@ -829,11 +850,11 @@ return_instr(S) ->
 
 -define(TestFun, <<"test">>).
 
-build_code([{model, _}, {init, S} | Instrs], Ret) ->
+build_code([{model, _}, {init, S} | Instrs], Ret, RetType) ->
     ArgTypes = [ infer_type(Arg) || Arg <- maps:values(S#state.args) ],
     BBs = build_bbs(S, Instrs, Ret),
-    FCode = aeb_fate_code:new(),
-    aeb_fate_code:insert_fun(?TestFun, [payable], {ArgTypes, integer}, BBs, FCode).
+    TypeSpec = substitute(not_map, any, {ArgTypes, RetType}),
+    aeb_fate_code:insert_fun(?TestFun, [payable], TypeSpec, BBs, aeb_fate_code:new()).
 
 build_bbs(InitS, Instr, Ret) -> build_bbs(InitS, make_ref(), Instr, Ret, [], [], []).
 
@@ -843,9 +864,12 @@ build_bbs(_, Ref, [], Ret, Acc, BBsR, ExtraBBsR) ->
     Lbls     = maps:from_list([ {R, Lbl} || {Lbl, {R, _}} <- indexed(0, BBs ++ ExtraBBs) ]),
     Lbl      = fun(R) -> maps:get(R, Lbls) end,
     LblIm    = fun(R) -> {immediate, Lbl(R)} end,
-    UpdI     = fun({'JUMP', R})        -> {'JUMP', LblIm(R)};
-                  ({'JUMPIF', Arg, R}) -> {'JUMPIF', Arg, LblIm(R)};
-                  (I)                  -> I end,
+    UpdI     = fun({'JUMP', R})                    -> {'JUMP', LblIm(R)};
+                  ({'JUMPIF', Arg, R})             -> {'JUMPIF', Arg, LblIm(R)};
+                  ({'SWITCH_V2', Arg, R1, R2})     -> {'SWITCH_V2', Arg, LblIm(R1), LblIm(R2)};
+                  ({'SWITCH_V3', Arg, R1, R2, R3}) -> {'SWITCH_V3', Arg, LblIm(R1), LblIm(R2), LblIm(R3)};
+                  ({'SWITCH_VN', Arg, Rs})         -> {'SWITCH_VN', Arg, {immediate, lists:map(Lbl, Rs)}};
+                  (I)                              -> I end,
     UpdIs    = fun([I | Is]) -> lists:reverse([UpdI(I) | Is]) end,
 
     maps:from_list([{Lbl(R), UpdIs(Is)} || {R, Is} <- BBs ++ ExtraBBs]);
@@ -862,13 +886,23 @@ build_bbs(S, Ref, [{set, X, Call = {call, ?MODULE, instr, Args}} | Instrs], Ret,
             Ref1 = make_ref(),
             BBs1 = [DeadBB(make_ref()), {Ref, [{'JUMP', Ref1} | Acc]} | BBs],
             build_bbs(S1, Ref1, Instrs, Ret, [], BBs1, ExtraBBs);
-        {'JUMPIF', Reg} ->
+        {'JUMPIF', Arg} ->
             Ref1 = make_ref(),
-            This = {Ref, [{'JUMPIF', Reg, Ref1} | Acc]},
-            case get_value(S, Reg) of
+            This = {Ref, [{'JUMPIF', Arg, Ref1} | Acc]},
+            case get_value(S, Arg) of
                 true  -> build_bbs(S1, Ref1, Instrs, Ret, [], [DeadBB(make_ref()), This | BBs], ExtraBBs);
                 false -> build_bbs(S1, make_ref(), Instrs, Ret, [], [This | BBs], [DeadBB(Ref1) | ExtraBBs])
             end;
+        {Switch, Arg} when Switch == 'SWITCH_V2'; Switch == 'SWITCH_V3'; Switch == 'SWITCH_VN' ->
+            {variant, Ar, Tag, _} = get_value(S, Arg),
+            Refs = [ make_ref() || _ <- Ar ],
+            Instr = case Switch of
+                        'SWITCH_VN' -> {'SWITCH_VN', Arg, Refs};
+                        _           -> list_to_tuple([Switch, Arg | Refs])
+                    end,
+            This = {Ref, [Instr | Acc]},
+            {Take, Skip} = extract_nth(Tag + 1, Refs),
+            build_bbs(S1, Take, Instrs, Ret, [], [DeadBB(make_ref()), This | BBs], lists:map(DeadBB, Skip) ++ ExtraBBs);
         _ -> build_bbs(S1, Ref, Instrs, Ret, [I | Acc], BBs, ExtraBBs)
     end.
 
@@ -983,7 +1017,7 @@ prop_instr() ->
                     'RETURN'       -> get_value(FinalState, {stack, 0});
                     {'RETURNR', R} -> get_value(FinalState, R)
                 end,
-            FCode = build_code(Instrs, RetInstr),
+            FCode = build_code(Instrs, RetInstr, infer_type(RetValue)),
             Store = undefined,
             BBs   = [ BB || {_, _, BBs} <- maps:values(aeb_fate_code:functions(FCode)),
                             BB <- maps:values(BBs) ],
@@ -992,14 +1026,16 @@ prop_instr() ->
             aggregate(UsedInstrs,
             aggregate(fun check_instrs/1, UsedInstrs,
             try
-                {Res, Stats} = run(ChainEnv, FCode, Args, Store),
+                FCode1 = aeb_fate_code:deserialize(aeb_fate_code:serialize(FCode)),
+                {Res, Stats} = run(ChainEnv, FCode1, Args, Store),
+                ?WHENFAIL([ io:format("Deserialized fcode\n~s", [pp_fcode(FCode1)]) || FCode1 /= FCode ],
                 measure(block_time, 6 / maps:get(gas_per_us, Stats),
                 measure(bb_size, lists:map(fun length/1, BBs),
                 collect(with_title(gas_used),   maps:get(gas_used, Stats) div 1000 * 1000,
                 collect(classify(Res),
                 conjunction([ {result,   check_result(Res, RetValue)},
                               {state,    check_state(FinalState)},
-                              {gas_cost, check_gas_cost(Stats)} ])))))
+                              {gas_cost, check_gas_cost(Stats)} ]))))))
             catch _:Err ->
                 equals(ok, {'EXIT', Err, erlang:get_stacktrace()})
             end)))
@@ -1085,6 +1121,10 @@ indexed(Xs) -> indexed(1, Xs).
 
 indexed(I, Xs) ->
     lists:zip(lists:seq(I, length(Xs) - 1 + I), Xs).
+
+extract_nth(N, Xs) ->
+    {Ys, [X | Zs]} = lists:split(N - 1, Xs),
+    {X, Ys ++ Zs}.
 
 all(Bs) ->
     lists:all(fun(B) -> B end, Bs).
