@@ -66,7 +66,8 @@ more_instructions() ->
      #instr{ op = 'CALL_T', args = [{in, immediate, integer}] },
      #instr{ op = 'RETURN', args = [] },
      #instr{ op = 'RETURNR', args = [{in, any, any}] },
-     #instr{ op = 'CALL_R', args = [{in, immediate, integer}, {in, any, contract}, {in, any, integer}] }
+     #instr{ op = 'CALL_R', args = [{in, immediate, integer}, {in, any, contract}, {in, any, integer}] },
+     #instr{ op = 'CALL_GR', args = [{in, immediate, integer}, {in, any, contract}, {in, any, integer}, {in, any, integer}] }
     ].
 
 spec_overrides() ->
@@ -222,7 +223,7 @@ all_contracts(S) ->
 
 on_account(Pubkey, Field, Fun, S = #state{ chain_env = Env = #{ accounts := Accounts } }) ->
     Upd = fun(Acc) -> maps:update_with(Field, Fun, Acc) end,
-    S#state{ chain_env = Env#{ accounts := maps:update_with(Pubkey, Upd, Upd(new_account(Pubkey)), Accounts) } }.
+    S#state{ chain_env = Env#{ accounts := maps:update_with(Pubkey, Upd, Upd(new_account(none)), Accounts) } }.
 
 -spec set_store(pubkey(), store(), state()) -> state().
 set_store(Pubkey, Store, S) ->
@@ -481,6 +482,7 @@ hash(Alg, Val) ->
 -define(WhenBetween(A, X, B, Go), ?When(A =< X andalso X =< B, Go)).
 -define(MaxBits, 2048).
 -define(MaxBlockGas, 6000000).
+-define(MinGasCap, 3000000).    %% Don't want to run out of gas
 
 -define(WhenS(B, S, Out), case B of true -> {S, Out}; false -> {#state{ failed = skip }, Out} end).
 
@@ -647,10 +649,12 @@ eval_instr(S = #state{ stack = Stack }, 'CALL', [N]) ->
     ?WhenS(length(Stack) >= N, push_call(S, N), []);
 eval_instr(S = #state{ stack = Stack }, 'CALL_T', [N]) ->
     ?WhenS(length(Stack) >= N, push_tailcall(S, N), []);
-eval_instr(S = #state{ stack = Stack }, 'CALL_R', [N, {contract , Remote}, Value]) ->
+eval_instr(S = #state{ stack = Stack }, CALL_R, [N, {contract , Remote}, Value | Rest]) when CALL_R == 'CALL_R'; CALL_R == 'CALL_GR' ->
+    CapOk = case Rest of [] -> true; [Cap] -> Cap > ?MinGasCap end,
     ?WhenS(length(Stack) >= N andalso
            get_balance(S) >= Value andalso
            is_contract(S, Remote) andalso
+           CapOk andalso
            not lists:member(Remote, remote_call_stack(S)),
         push_remote_call(S, Remote, Value, N), []);
 eval_instr(S = #state{ stack = [V | Stack] }, 'RETURN', []) ->
@@ -779,7 +783,7 @@ args_g(S, 'SWITCH_V3', _) ->
 args_g(S, Call, _) when Call == 'CALL'; Call == 'CALL_T' ->
     args_g(S, [?constrained([], choose(0, length(S#state.stack)),
                             _, false)]);
-args_g(S, 'CALL_R', _) ->
+args_g(S, CALL_R, _) when CALL_R == 'CALL_R'; CALL_R == 'CALL_GR' ->
     Balance = get_balance(S),
     StackH  = length(S#state.stack),
     args_g(S, [?constrained(_, choose(0, StackH), _, false),
@@ -787,7 +791,10 @@ args_g(S, 'CALL_R', _) ->
                             V, case V of {contract, R} -> is_contract(S, R) andalso not lists:member(R, remote_call_stack(S));
                                          _ -> false end),
                ?constrained(_, weighted_default({3, 0}, {1, choose(0, StackH)}),
-                            Value, 0 =< Value andalso Value =< Balance)]);
+                            Value, 0 =< Value andalso Value =< Balance)] ++
+              [?constrained(_, choose(?MinGasCap, ?MaxBlockGas),
+                            V, ?MinGasCap =< V andalso V =< ?MaxBlockGas)
+               || CALL_R == 'CALL_GR' ]);
 args_g(S, _Op, Spec) -> args_g(S, Spec).
 
 map_args_g(S, Rest) ->
@@ -1107,6 +1114,26 @@ do_return_instr(#code_st{ instrs = Is } = CS, I, V) ->
     RetType  = infer_type(V),
     pop_code(CS#code_st{ instrs = [I | Is] }, RetType).
 
+do_call_instr(CS = #code_st{ ref = Ref, prev_state = S, instrs = Acc, bbs = BBs }, CALL, N, Args) ->
+    FunArgs = take(N, S#state.stack),
+    Ix1     = CS#code_st.fun_ix + 1,
+    FunName = fun_name(Ix1),
+    FunSym  = {immediate, aeb_fate_code:symbol_identifier(FunName)},
+    Ref1    = make_ref(),
+    Instr   =
+        case CALL of
+            'CALL' -> {CALL, FunSym};
+            'CALL_T' -> {CALL, FunSym};
+            _ ->
+                ArgTypes  = typerep(infer_type({tuple, list_to_tuple(FunArgs)})),
+                RetType   = typerep(any), %% Filled in on return
+                [Remote | Rest] = Args,
+                list_to_tuple([CALL, Remote, FunSym, {immediate, ArgTypes}, {immediate, RetType} | Rest])
+        end,
+    BBs1    = [{Ref, [Instr | Acc]} | BBs],
+    CS1     = CS#code_st{ ref = Ref1, instrs = [], bbs = BBs1, fun_ix = Ix1 },
+    push_code(CS1, CALL == 'CALL_T', FunName, FunArgs).
+
 build_fcode(#code_st{ code = Code }, []) -> Code;
 build_fcode(CS, [{set, X, Call = {call, ?MODULE, instr, Args}} | Instrs]) ->
     #code_st{ state = S, ref = Ref, instrs = Acc, bbs = BBs, extra_bbs = ExtraBBs } = CS,
@@ -1124,26 +1151,11 @@ build_fcode(CS, [{set, X, Call = {call, ?MODULE, instr, Args}} | Instrs]) ->
         'RETURN'       -> build_fcode(do_return_instr(CS1, I, get_value(S, {stack, 0})), Instrs);
         {'RETURNR', R} -> build_fcode(do_return_instr(CS1, I, get_value(S, R)), Instrs);
         {CALL, {immediate, N}} when CALL == 'CALL'; CALL == 'CALL_T' ->
-            FunArgs = take(N, S#state.stack),
-            Ix1     = CS#code_st.fun_ix + 1,
-            FunName = fun_name(Ix1),
-            FunSym  = aeb_fate_code:symbol_identifier(FunName),
-            Ref1    = make_ref(),
-            BBs1    = [{Ref, [{CALL, {immediate, FunSym}} | Acc]} | BBs],
-            CS2     = CS1#code_st{ ref = Ref1, instrs = [], bbs = BBs1, fun_ix = Ix1 },
-            build_fcode(push_code(CS2, CALL == 'CALL_T', FunName, FunArgs), Instrs);
+            build_fcode(do_call_instr(CS1, CALL, N, []), Instrs);
         {'CALL_R', {immediate, N}, Remote, Value} ->
-            FunArgs   = take(N, S#state.stack),
-            Ix1       = CS#code_st.fun_ix + 1,
-            FunName   = fun_name(Ix1),
-            FunSym    = aeb_fate_code:symbol_identifier(FunName),
-            Ref1      = make_ref(),
-            ArgTypes  = typerep(infer_type({tuple, list_to_tuple(FunArgs)})),
-            RetType   = typerep(any), %% Filled in on return
-            CallInstr = {'CALL_R', Remote, {immediate, FunSym}, {immediate, ArgTypes}, {immediate, RetType}, Value},
-            BBs1      = [{Ref, [CallInstr | Acc]} | BBs],
-            CS2       = CS1#code_st{ ref = Ref1, instrs = [], bbs = BBs1, fun_ix = Ix1 },
-            build_fcode(push_code(CS2, false, FunName, FunArgs), Instrs);
+            build_fcode(do_call_instr(CS1, 'CALL_R', N, [Remote, Value]), Instrs);
+        {'CALL_GR', {immediate, N}, Remote, Value, GasCap} ->
+            build_fcode(do_call_instr(CS1, 'CALL_GR', N, [Remote, Value, GasCap]), Instrs);
         'JUMP' ->
             Ref1 = make_ref(),
             BBs1 = [DeadBB(make_ref()), {Ref, [{'JUMP', Ref1} | Acc]} | BBs],
