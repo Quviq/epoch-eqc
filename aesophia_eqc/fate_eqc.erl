@@ -182,11 +182,9 @@ instruction_spec(Op) ->
 arg_store(Args) ->
     maps:from_list(indexed(0, Args)).
 
--spec initial_state(chain_env(), [value()]) -> state().
-initial_state(ChainEnv, Args) ->
-    #state{ call_stack = [#frame{}],
-            args       = arg_store(Args),
-            chain_env  = ChainEnv }.
+-spec initial_state(chain_env()) -> state().
+initial_state(ChainEnv) ->
+    #state{ chain_env  = ChainEnv }.
 
 -spec chain_env(chain_env(), atom()) -> term().
 chain_env(#state{chain_env = Env}, Key) -> maps:get(Key, Env).
@@ -218,6 +216,7 @@ get_creator(S, A) -> get_account(S, A, creator, void).
 is_contract(S, A) ->
     get_account(S, A, creator, none) /= none.
 
+all_accounts(S) -> maps:keys(chain_env(S, accounts)).
 all_contracts(S) ->
     [ Ct || {Ct, #{creator := Cr}} <- maps:to_list(chain_env(S, accounts)), Cr /= none ].
 
@@ -278,7 +277,8 @@ pop_call_stack(S = #state{ call_stack = [Frame | CallStack] }, V) ->
             S#state{ stack      = [V | Stack],
                      vars       = Vars,
                      args       = Args,
-                     store      = get_account(S, Contract, store),
+                     store      = if Contract == undefined -> #{};
+                                     true                  -> get_account(S, Contract, store) end,
                      call_stack = CallStack,
                      chain_env  = (S#state.chain_env)#{ caller     => Caller,
                                                         address    => Contract,
@@ -790,7 +790,7 @@ args_g(S, CALL_R, _) when CALL_R == 'CALL_R'; CALL_R == 'CALL_GR' ->
                ?constrained(_, {contract, elements(all_contracts(S))},
                             V, case V of {contract, R} -> is_contract(S, R) andalso not lists:member(R, remote_call_stack(S));
                                          _ -> false end),
-               ?constrained(_, weighted_default({3, 0}, {1, choose(0, StackH)}),
+               ?constrained(_, weighted_default({3, 0}, {1, choose(0, Balance)}),
                             Value, 0 =< Value andalso Value =< Balance)] ++
               [?constrained(_, choose(?MinGasCap, ?MaxBlockGas),
                             V, ?MinGasCap =< V andalso V =< ?MaxBlockGas)
@@ -932,22 +932,17 @@ chain_env_g() ->
     ?LET({Accounts, Contracts}, {vector(?NumAccounts, pubkey_g()), vector(?NumContracts, pubkey_g())},
     begin
         GenAccount = noshrink(elements(Accounts ++ Contracts)),
-        GenContract = noshrink(elements(Contracts)),
         ?LET(Creators, maps:from_list([ {C, GenAccount} || C <- Contracts ]),
-        ?LET({Address, [Caller, Origin, Creator, Beneficiary], Value}, {GenContract, vector(4, GenAccount), balance_g()},
+        ?LET(Beneficiary, GenAccount,
         begin
             Acct = fun(C) -> {C, #{ balance => balance_g(), creator => maps:get(C, Creators, none), store => #{} }} end,
             #{ timestamp   => timestamp_g(),
-               caller      => Caller,
-               origin      => Origin,
-               address     => Address,
                beneficiary => Beneficiary,
                gas_limit   => choose(3000000, 6000000),
                gas_price   => choose(1, 5),
                height      => choose(1, 10000),
                difficulty  => choose(0, 1000),
-               call_value  => Value,
-               accounts    => maps:from_list(lists:map(Acct, [Caller, Origin, Creator, Address, Beneficiary] ++ Contracts)) }
+               accounts    => maps:from_list(lists:map(Acct, Accounts ++ Contracts)) }
         end))
     end).
 
@@ -973,8 +968,10 @@ instr_args(S) ->
                                                          || I <- maps:values(instruction_spec()) ]),
          [{Op, args_g(S, Op, ArgsSpec)}]).
 
+instr_pre(S) -> S#state.call_stack /= [].
+
 instr_pre(S, [I]) ->
-    S#state.call_stack /= [] andalso    %% if so, we returned from the top call
+    S#state.call_stack /= [] andalso
     not contains(void, I) andalso
     check_instr(S, I) andalso
     begin
@@ -989,6 +986,26 @@ instr_next(S, _, [I]) ->
         true  -> S1#state{ failed = true };
         false -> S1
     end.
+
+new_call_pre(S) -> S#state.call_stack == [].
+
+new_call_args(S) ->
+    [elements(all_accounts(S)),
+     elements(all_contracts(S)),
+     balance_g(),
+     list(5, value_g())].
+
+new_call_next(S, _, [Caller, Contract, Value, Args]) ->
+    S#state{ stack      = [],
+             vars       = #{},
+             store      = get_account(S, Contract, store, #{}),
+             args       = arg_store(Args),
+             call_stack = [#r_frame{}],
+             chain_env  = (S#state.chain_env)
+                          #{ caller     => Caller,
+                             origin     => Caller,
+                             address    => Contract,
+                             call_value => Value } }.
 
 return_instrs(#state{ call_stack = [] }) -> [];
 return_instrs(S) ->
@@ -1027,6 +1044,13 @@ build_code([{model, _}, {init, S} | Instrs]) ->
                    arg_types    :: [type()],
                    tail_call    :: boolean() }).
 
+-record(call, { caller   :: pubkey(),
+                contract :: pubkey(),
+                function :: string(),
+                value    :: amount(),
+                args     :: [value()],
+                result = void :: value() }).
+
 -record(code_st, { ref   :: reference(),
                    prev_state :: #state{},
                    state :: #state{},
@@ -1037,6 +1061,7 @@ build_code([{model, _}, {init, S} | Instrs]) ->
                    fun_ix     = 1,
                    arg_types  = [],
                    code       = #{} :: #{ pubkey() => aeb_fate_code:fcode() },
+                   calls      = [] :: [#call{}],
                    call_stack = [] :: [#code_fr{}] }).
 
 init_code_st(InitS, ArgTypes) ->
@@ -1044,7 +1069,7 @@ init_code_st(InitS, ArgTypes) ->
               ref         = make_ref(),
               arg_types   = ArgTypes,
               current_fun = fun_name(1),
-              code        = #{ chain_env(InitS, address) => aeb_fate_code:new() } }.
+              code        = #{} }.
 
 on_fcode(Pubkey, Fun, CS) ->
     CS#code_st{ code = maps:update_with(Pubkey, Fun, Fun(aeb_fate_code:new()), CS#code_st.code) }.
@@ -1087,37 +1112,41 @@ push_code(CS, TailCall, Fun, Args) ->
                 arg_types   = lists:map(fun infer_type/1, Args),
                 call_stack  = [Frame | CS#code_st.call_stack] }.
 
+set_call_result(#code_st{ calls = [Call | Calls] } = S, V) ->
+    S#code_st{ calls = [Call#call{ result = V } | Calls] }.
+
 pop_code(#code_st{ prev_state  = S,
                    current_fun = Fun,
-                   arg_types   = ArgTypes } = CS, RetType) ->
+                   arg_types   = ArgTypes } = CS, V, RetType) ->
     TypeSpec = substitute(not_map, any, {ArgTypes, RetType}),
     BBs      = finalize_bbs(CS),
     CS1      = on_fcode(chain_env(S, address),
                         fun(FCode) -> aeb_fate_code:insert_fun(Fun, [payable], TypeSpec, BBs, FCode) end, CS),
-    case CS#code_st.call_stack of
-        [] -> CS1;
-        [Frame = #code_fr{} | CallStack] ->
-            CS2 = CS1#code_st{ ref         = Frame#code_fr.ref,
-                               current_fun = Frame#code_fr.current_fun,
-                               instrs      = Frame#code_fr.instrs,
-                               bbs         = Frame#code_fr.bbs,
-                               extra_bbs   = Frame#code_fr.extra_bbs,
-                               arg_types   = Frame#code_fr.arg_types,
-                               call_stack  = CallStack },
-            case Frame#code_fr.tail_call of
-                false -> CS2;
-                true  -> pop_code(CS2, RetType)
-            end
+    [Frame = #code_fr{} | CallStack] = CS#code_st.call_stack,
+    CS2 = CS1#code_st{ ref         = Frame#code_fr.ref,
+                       current_fun = Frame#code_fr.current_fun,
+                       instrs      = Frame#code_fr.instrs,
+                       bbs         = Frame#code_fr.bbs,
+                       extra_bbs   = Frame#code_fr.extra_bbs,
+                       arg_types   = Frame#code_fr.arg_types,
+                       call_stack  = CallStack },
+    case Frame#code_fr.tail_call of
+        false ->
+            case CallStack == [] of %% top-call?
+                true  -> set_call_result(CS2, V);
+                false -> CS2
+            end;
+        true  -> pop_code(CS2, V, RetType)
     end.
 
 do_return_instr(#code_st{ instrs = Is } = CS, I, V) ->
-    RetType  = infer_type(V),
-    pop_code(CS#code_st{ instrs = [I | Is] }, RetType).
+    RetType = infer_type(V),
+    pop_code(CS#code_st{ instrs = [I | Is] }, V, RetType).
 
 do_call_instr(CS = #code_st{ ref = Ref, prev_state = S, instrs = Acc, bbs = BBs }, CALL, N, Args) ->
     FunArgs = take(N, S#state.stack),
-    Ix1     = CS#code_st.fun_ix + 1,
-    FunName = fun_name(Ix1),
+    Ix      = CS#code_st.fun_ix,
+    FunName = fun_name(Ix),
     FunSym  = {immediate, aeb_fate_code:symbol_identifier(FunName)},
     Ref1    = make_ref(),
     Instr   =
@@ -1131,10 +1160,23 @@ do_call_instr(CS = #code_st{ ref = Ref, prev_state = S, instrs = Acc, bbs = BBs 
                 list_to_tuple([CALL, Remote, FunSym, {immediate, ArgTypes}, {immediate, RetType} | Rest])
         end,
     BBs1    = [{Ref, [Instr | Acc]} | BBs],
-    CS1     = CS#code_st{ ref = Ref1, instrs = [], bbs = BBs1, fun_ix = Ix1 },
+    CS1     = CS#code_st{ ref = Ref1, instrs = [], bbs = BBs1, fun_ix = Ix + 1 },
     push_code(CS1, CALL == 'CALL_T', FunName, FunArgs).
 
-build_fcode(#code_st{ code = Code }, []) -> Code;
+build_fcode(#code_st{ calls = Calls, code = Code }, []) -> {lists:reverse(Calls), Code};
+build_fcode(CS, [{set, X, Call = {call, ?MODULE, new_call, [Caller, Contract, Value, Args]}} | Instrs]) ->
+    #code_st{ state = S, calls = Calls, fun_ix = FunIx } = CS,
+    Fun = fun_name(FunIx),
+    CS1 = CS#code_st{ prev_state = S,
+                      state      = next_state(S, X, Call),
+                      fun_ix     = FunIx + 1,
+                      calls =
+                        [#call{ caller   = Caller,
+                                contract = Contract,
+                                function = fun_name(FunIx),
+                                value    = Value,
+                                args     = Args } | Calls] },
+    build_fcode(push_code(CS1, false, Fun, Args), Instrs);
 build_fcode(CS, [{set, X, Call = {call, ?MODULE, instr, Args}} | Instrs]) ->
     #code_st{ state = S, ref = Ref, instrs = Acc, bbs = BBs, extra_bbs = ExtraBBs } = CS,
     CS1    = CS#code_st{ prev_state = S,
@@ -1208,8 +1250,8 @@ make_trees(#{ accounts := Accounts }) ->
     aec_trees:set_contracts(aec_trees:set_accounts(Trees, ATrees),
                             aect_state_tree:commit_to_db(CTrees)).
 
-call_spec(#{ address := Contract, call_value := Value, gas_limit := GasLimit }, Args, Store) ->
-    Fun = fun_sym(1),
+call_spec(#{ address := Contract, call_value := Value, gas_limit := GasLimit }, Function, Args, Store) ->
+    Fun = aeb_fate_code:symbol_identifier(Function),
     #{ contract => Contract,
        gas      => GasLimit,
        value    => Value,
@@ -1222,7 +1264,7 @@ call_env(#{ caller      := Caller,
             timestamp   := Time,
             difficulty  := Difficulty,
             gas_price   := GasPrice,
-            height      := Height } = Env) ->
+            height      := Height }, Trees) ->
     %% tx_env is opaque lacks setters
     BeneficiaryIx = 3,
     DifficultyIx  = 8,
@@ -1232,7 +1274,7 @@ call_env(#{ caller      := Caller,
                                [{TimeFieldIx,  Time},
                                 {DifficultyIx, Difficulty},
                                 {BeneficiaryIx, Beneficiary}]),
-    #{ trees     => make_trees(Env),
+    #{ trees     => Trees,
        caller    => Caller,
        origin    => Origin,
        gas_price => GasPrice,
@@ -1249,17 +1291,41 @@ stats(Env, Time, ES) ->
        gas_used   => gas_used(Env, ES),
        time       => Time }.
 
-run(Env0, Cache, Args, Store) ->
-    Spec  = call_spec(Env0, Args, Store),
-    Env   = call_env(Env0),
-    erlang:garbage_collect(),
+add_stats(#{ gas_used   := GasUsed1,
+             time       := Time1 },
+          #{ gas_used   := GasUsed2,
+             time       := Time2 }) ->
+    GasUsed = GasUsed1 + GasUsed2,
+    Time    = Time1 + Time2,
+    #{ gas_per_us => GasUsed / Time,
+       gas_used   => GasUsed,
+       time       => Time }.
+
+run1(Env0 = #{ address := Pubkey }, Cache, Function, Args, Trees) ->
+    {value, Contract} = aect_state_tree:lookup_contract(Pubkey, aec_trees:contracts(Trees)),
+    Store = aect_contracts:state(Contract),
+    Spec  = call_spec(Env0, Function, Args, Store),
+    Env   = call_env(Env0, Trees),
     case timer:tc(fun() -> aefa_fate:run_with_cache(Spec, Env, Cache) end) of
         {Time, {ok, ES}} ->
-            Res = aefa_engine_state:accumulator(ES),
-            {Res, stats(Env0, Time, ES)};
+            Res    = aefa_engine_state:accumulator(ES),
+            Trees1 = aefa_fate:final_trees(ES),
+            {Res, Trees1, stats(Env0, Time, ES)};
         {Time, {ErrTag, Err, ES}} when ErrTag == error; ErrTag == revert ->
             {{ErrTag, binary_to_list(Err)}, stats(Env0, Time, ES)}
     end.
+
+run(Env, Cache, Calls) ->
+    run(Env, Cache, Calls, make_trees(Env), #{ gas_per_us => 0.001, gas_used => 0, time => 0 }, []).
+
+run(_, _, [], _, Stats, Acc) -> {lists:reverse(Acc), Stats};
+run(Env0, Cache, [Call | Calls], Trees, Stats, Acc) ->
+    Env = Env0#{ caller     => Call#call.caller,
+                 origin     => Call#call.caller,
+                 address    => Call#call.contract,
+                 call_value => Call#call.value },
+    {Res, Trees1, Stats1} = run1(Env, Cache, Call#call.function, Call#call.args, Trees),
+    run(Env0, Cache, Calls, Trees1, add_stats(Stats, Stats1), [Res | Acc]).
 
 %% -- Property ---------------------------------------------------------------
 
@@ -1288,36 +1354,36 @@ prop_instr() ->
     in_parallel(
     ?LET(Verbose, parameter(verbose, false),
     ?FORALL(ChainEnv, chain_env_g(),
-    ?FORALL(Args, list(3, value_g()),
-    ?FORALL(Instrs, commands(?MODULE, initial_state(ChainEnv, Args)),
+    ?FORALL(Instrs, commands(?MODULE, initial_state(ChainEnv)),
     begin
         FinalState0 = state_after(Instrs),
         ?FORALL(RetInstrs, return_instrs(FinalState0),
         ?TIMEOUT(5000,
         ?WHENFAIL([ print_states(Instrs ++ RetInstrs) || Verbose ],
         try
-            FinalState = state_after([{model, ?MODULE}, {init, FinalState0} | RetInstrs]),
-            RetValue = get_return_value(FinalState),
-            Code = build_code(Instrs ++ RetInstrs),
-            Store = undefined,
+            FinalState    = state_after([{model, ?MODULE}, {init, FinalState0} | RetInstrs]),
+            {Calls, Code} = build_code(Instrs ++ RetInstrs),
+            RetValues     = [Call#call.result || Call <- Calls],
             BBs   = [ BB || FCode <- maps:values(Code),
                             {_, _, BBs} <- maps:values(aeb_fate_code:functions(FCode)),
                             BB <- maps:values(BBs) ],
             UsedInstrs = [ if is_atom(I) -> I; true -> element(1, I) end || BB <- BBs, I <- BB ],
-            ?WHENFAIL([ io:format("Code for ~p:\n~s", [Pubkey, pp_fcode(FCode)]) || {Pubkey, FCode} <- maps:to_list(Code) ],
+            ?WHENFAIL(begin
+               io:format("Calls: ~p\n", [Calls]),
+               [ io:format("Code for ~p:\n~s", [Pubkey, pp_fcode(FCode)]) || {Pubkey, FCode} <- maps:to_list(Code) ] end,
             aggregate(UsedInstrs,
             aggregate(fun check_instrs/1, UsedInstrs,
             try
                 Code1 = maps:map(fun(_, FCode) -> aeb_fate_code:deserialize(aeb_fate_code:serialize(FCode)) end, Code),
-                {Res, Stats} = run(ChainEnv, Code1, Args, Store),
+                {Res, Stats} = run(ChainEnv, Code1, Calls),
                 ?WHENFAIL([ io:format("Deserialized fcode for ~p\n~s", [Pubkey, pp_fcode(FCode1)])
                             || {Pubkey, FCode1} <- maps:to_list(Code1),
                                FCode1 /= maps:get(Pubkey, Code) ],
                 measure(block_time, 6 / maps:get(gas_per_us, Stats),
                 measure(bb_size, lists:map(fun length/1, BBs),
                 collect(with_title(gas_used),   maps:get(gas_used, Stats) div 1000 * 1000,
-                collect(classify(Res),
-                conjunction([ {result,   check_result(Res, RetValue)},
+                aggregate(lists:map(fun classify/1, Res),
+                conjunction([ {result,   check_result(Res, RetValues)},
                               {state,    check_state(FinalState)},
                               {gas_cost, check_gas_cost(Stats)} ]))))))
             catch _:Err ->
@@ -1326,7 +1392,7 @@ prop_instr() ->
         catch _:Err ->
             equals(ok, {'EXIT', Err, erlang:get_stacktrace()})
         end)))
-    end))))).
+    end)))).
 
 get_return_value(S, {set, _, {call, ?MODULE, instr, [{'RETURN', []}]}}) ->
     get_value(S, {stack, 0});
@@ -1341,13 +1407,19 @@ print_states([{model, ?MODULE}, {init, S} | Code]) ->
 
 print_states(S, []) ->
     print_state(S);
-print_states(S, [{set, X, Call = {call, ?MODULE, instr, [{Op, Args}]}} | Cmds]) ->
+print_states(S, [{set, X, Call = {call, ?MODULE, Fun, Args}} | Cmds]) ->
     print_state(S),
-    io:format("~s\n", [string:join([atom_to_list(Op) | [format_arg(Arg) || Arg <- Args]], " ")]),
+    case {Fun, Args} of
+        {instr, [{Op, OpArgs}]} ->
+            io:format("~s\n", [string:join([atom_to_list(Op) | [format_arg(Arg) || Arg <- OpArgs]], " ")]);
+        {new_call, _} ->
+            io:format("new_call ~p\n", [Args])
+    end,
     print_states(next_state(S, X, Call), Cmds).
 
 print_state(S) ->
     io:format("  ~p\n", [S]).
+    %% io:format("  ~p\n", [S#state{ chain_env = maps:remove(accounts, S#state.chain_env) }]).
 
 format_arg(Arg) -> io_lib:format("~p", [Arg]).
 
