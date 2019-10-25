@@ -96,7 +96,6 @@ fix_type(T)         -> T.
 black_listed('MICROBLOCK')           -> true;   %% Not implemented
 black_listed('DUP')                  -> true;   %% Bugged
 black_listed('GAS')                  -> true;   %% Not modelling gas costs
-black_listed('IS_CONTRACT')          -> true;   %% We don't know generation time which accounts will be contracts
 black_listed('ORACLE_REGISTER')      -> true;   %% TODO: Oracle/AENS/Crypto
 black_listed('ORACLE_QUERY')         -> true;
 black_listed('ORACLE_GET_ANSWER')    -> true;
@@ -214,6 +213,12 @@ get_balance(S, Pubkey) ->
 
 get_creator(S)    -> get_creator(S, chain_env(S, address)).
 get_creator(S, A) -> get_account(S, A, creator, void).
+
+is_contract(S, A) ->
+    get_account(S, A, creator, none) /= none.
+
+all_contracts(S) ->
+    [ Ct || {Ct, #{creator := Cr}} <- maps:to_list(chain_env(S, accounts)), Cr /= none ].
 
 on_account(Pubkey, Field, Fun, S = #state{ chain_env = Env = #{ accounts := Accounts } }) ->
     Upd = fun(Acc) -> maps:update_with(Field, Fun, Acc) end,
@@ -575,7 +580,7 @@ eval_instr(S, 'BLOCKHASH', [H])  ->
            end,
     {S, [Hash]};
 eval_instr(S, 'IS_PAYABLE',  [{address, _}]) -> {S, [true]};
-eval_instr(S, 'IS_CONTRACT', [{address, A}]) -> {S, [get_account(S, A, creator, none) /= none]};
+eval_instr(S, 'IS_CONTRACT', [{address, A}]) -> {S, [is_contract(S, A)]};
 eval_instr(S, 'BENEFICIARY', []) -> {S, [{address, chain_env(S, beneficiary)}]};
 eval_instr(S, 'GASLIMIT', [])    -> {S, [?MaxBlockGas]};
 eval_instr(S, 'GASPRICE', [])    -> {S, [chain_env(S, gas_price)]};
@@ -645,6 +650,7 @@ eval_instr(S = #state{ stack = Stack }, 'CALL_T', [N]) ->
 eval_instr(S = #state{ stack = Stack }, 'CALL_R', [N, {contract , Remote}, Value]) ->
     ?WhenS(length(Stack) >= N andalso
            get_balance(S) >= Value andalso
+           is_contract(S, Remote) andalso
            not lists:member(Remote, remote_call_stack(S)),
         push_remote_call(S, Remote, Value, N), []);
 eval_instr(S = #state{ stack = [V | Stack] }, 'RETURN', []) ->
@@ -777,7 +783,9 @@ args_g(S, 'CALL_R', _) ->
     Balance = get_balance(S),
     StackH  = length(S#state.stack),
     args_g(S, [?constrained(_, choose(0, StackH), _, false),
-               {in, any, contract},
+               ?constrained(_, {contract, elements(all_contracts(S))},
+                            V, case V of {contract, R} -> is_contract(S, R) andalso not lists:member(R, remote_call_stack(S));
+                                         _ -> false end),
                ?constrained(_, weighted_default({3, 0}, {1, choose(0, StackH)}),
                             Value, 0 =< Value andalso Value =< Balance)]);
 args_g(S, _Op, Spec) -> args_g(S, Spec).
@@ -910,24 +918,31 @@ timestamp_g() -> choose(1550000000000, 1900000000000).
 balance_g() ->
     oneof([0, choose(0, 1000000)]).
 
+-define(NumAccounts,  10).
+-define(NumContracts, 10).
+
 chain_env_g() ->
-    Acct = fun(C) -> #{ balance => balance_g(), creator => C, store => #{} } end,
-    ?LET({[Caller, Origin, Address, Creator, Beneficiary], Value}, {vector(5, pubkey_g()), balance_g()},
-    #{ timestamp   => timestamp_g(),
-       caller      => Caller,
-       origin      => Origin,
-       address     => Address,
-       beneficiary => Beneficiary,
-       gas_limit   => choose(3000000, 6000000),
-       gas_price   => choose(1, 5),
-       height      => choose(1, 10000),
-       difficulty  => choose(0, 1000),
-       call_value  => Value,
-       accounts    => #{ Caller      => Acct(Caller),
-                         Origin      => Acct(Origin),
-                         Creator     => Acct(Creator),
-                         Address     => Acct(Creator),
-                         Beneficiary => Acct(Beneficiary) } }).
+    ?LET({Accounts, Contracts}, {vector(?NumAccounts, pubkey_g()), vector(?NumContracts, pubkey_g())},
+    begin
+        GenAccount = noshrink(elements(Accounts ++ Contracts)),
+        GenContract = noshrink(elements(Contracts)),
+        ?LET(Creators, maps:from_list([ {C, GenAccount} || C <- Contracts ]),
+        ?LET({Address, [Caller, Origin, Creator, Beneficiary], Value}, {GenContract, vector(4, GenAccount), balance_g()},
+        begin
+            Acct = fun(C) -> {C, #{ balance => balance_g(), creator => maps:get(C, Creators, none), store => #{} }} end,
+            #{ timestamp   => timestamp_g(),
+               caller      => Caller,
+               origin      => Origin,
+               address     => Address,
+               beneficiary => Beneficiary,
+               gas_limit   => choose(3000000, 6000000),
+               gas_price   => choose(1, 5),
+               height      => choose(1, 10000),
+               difficulty  => choose(0, 1000),
+               call_value  => Value,
+               accounts    => maps:from_list(lists:map(Acct, [Caller, Origin, Creator, Address, Beneficiary] ++ Contracts)) }
+        end))
+    end).
 
 state_g() ->
     ?LET({ChainEnv, Stack, Vars, Args}, {chain_env_g(), list(value_g()), map(int(), value_g()), map(nat(), value_g())},
@@ -953,11 +968,11 @@ instr_args(S) ->
 
 instr_pre(S, [I]) ->
     S#state.call_stack /= [] andalso    %% if so, we returned from the top call
-    no_todo(I) andalso not contains(void, I) andalso
+    not contains(void, I) andalso
     check_instr(S, I) andalso
     begin
         S1 = instr_next(S, {var, -1}, [I]),
-        no_todo(S1) andalso not contains(skip, S1) andalso
+        not contains(skip, S1) andalso
         valid_state(S1#state{ failed = false })
     end.
 
@@ -1164,22 +1179,20 @@ build_fcode(CS, [{set, X, Call = {call, ?MODULE, instr, Args}} | Instrs]) ->
 make_store(undefined) -> aefa_stores:initial_contract_store();
 make_store(Store)     -> Store.
 
-make_trees(#{ accounts := Accounts } = Env, Cache) ->
+make_trees(#{ accounts := Accounts }) ->
     %% All contracts and the caller must have accounts
     Trees = aec_trees:new_without_backend(),
-    Get   = fun(Key, Pubkey, Default) -> get_account(#state{ chain_env = Env }, Pubkey, Key, Default) end,
     ATrees = lists:foldl(fun({Pubkey, #{balance := Balance}}, Acc) ->
                                  Account = aec_accounts:new(Pubkey, Balance),
                                  aec_accounts_trees:enter(Account, Acc)
-                         end, aec_trees:accounts(Trees), maps:to_list(maps:merge(maps:map(fun(_, _) -> #{balance => 0} end, Cache),
-                                                                                 Accounts))),
-    CTrees = lists:foldl(fun(Pubkey, Acc) ->
-                                 Creator   = Get(creator, Pubkey, Pubkey),
+                         end, aec_trees:accounts(Trees), maps:to_list(Accounts)),
+    CTrees = maps:fold(fun(_,      #{ creator := none    }, Acc) -> Acc;
+                          (Pubkey, #{ creator := Creator }, Acc) ->
                                  Contract0 = aect_contracts:new(Creator, 1, #{vm => 5, abi => 3}, <<>>, 0),
                                  Contract  = aect_contracts:set_state(aefa_stores:initial_contract_store(),
                                              aect_contracts:set_pubkey(Pubkey, Contract0)),
                                  aect_state_tree:insert_contract(Contract, Acc)
-                         end, aec_trees:contracts(Trees), maps:keys(Cache)),
+                         end, aec_trees:contracts(Trees), Accounts),
     aec_trees:set_contracts(aec_trees:set_accounts(Trees, ATrees),
                             aect_state_tree:commit_to_db(CTrees)).
 
@@ -1197,7 +1210,7 @@ call_env(#{ caller      := Caller,
             timestamp   := Time,
             difficulty  := Difficulty,
             gas_price   := GasPrice,
-            height      := Height } = Env, Cache) ->
+            height      := Height } = Env) ->
     %% tx_env is opaque lacks setters
     BeneficiaryIx = 3,
     DifficultyIx  = 8,
@@ -1207,7 +1220,7 @@ call_env(#{ caller      := Caller,
                                [{TimeFieldIx,  Time},
                                 {DifficultyIx, Difficulty},
                                 {BeneficiaryIx, Beneficiary}]),
-    #{ trees     => make_trees(Env, Cache),
+    #{ trees     => make_trees(Env),
        caller    => Caller,
        origin    => Origin,
        gas_price => GasPrice,
@@ -1226,7 +1239,7 @@ stats(Env, Time, ES) ->
 
 run(Env0, Cache, Args, Store) ->
     Spec  = call_spec(Env0, Args, Store),
-    Env   = call_env(Env0, Cache),
+    Env   = call_env(Env0),
     erlang:garbage_collect(),
     case timer:tc(fun() -> aefa_fate:run_with_cache(Spec, Env, Cache) end) of
         {Time, {ok, ES}} ->
