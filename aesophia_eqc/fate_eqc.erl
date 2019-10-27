@@ -1358,7 +1358,6 @@ prop_instr() ->
     begin
         FinalState0 = state_after(Instrs),
         ?FORALL(RetInstrs, return_instrs(FinalState0),
-        ?TIMEOUT(5000,
         ?WHENFAIL([ print_states(Instrs ++ RetInstrs) || Verbose ],
         try
             FinalState    = state_after([{model, ?MODULE}, {init, FinalState0} | RetInstrs]),
@@ -1391,7 +1390,7 @@ prop_instr() ->
             end)))
         catch _:Err ->
             equals(ok, {'EXIT', Err, erlang:get_stacktrace()})
-        end)))
+        end))
     end)))).
 
 get_return_value(S, {set, _, {call, ?MODULE, instr, [{'RETURN', []}]}}) ->
