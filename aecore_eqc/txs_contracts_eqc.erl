@@ -234,14 +234,21 @@ contract_call_features(S, [_Caller, _, _Tx] = Args, Res) ->
 %% -- Property ---------------------------------------------------------------
 
 weight(S, contract_create) ->
-    case maps:get(contracts, S, []) of
-      [] -> 10;
-      _  -> 2 end;
+    case maps:size(maps:get(contracts, S, #{})) of
+        0 -> good_weight(S, 10);
+        _ -> good_weight(S, 2) end;
 weight(S, contract_call) ->
-    case maps:get(contracts, S, []) of
-        [] -> 0;
-        _  -> 7 end;
+    case maps:size(maps:get(contracts, S, [])) of
+        0 -> 0;
+        _ -> good_weight(S, 7)
+    end;
 weight(_S, _) -> 0.
+
+good_weight(S, Base) ->
+  case good_accounts(S) of
+    [] -> 1;
+    _  -> Base
+  end.
 
 compile_contracts() ->
     %% read and compile contracts once (and use them in parallel

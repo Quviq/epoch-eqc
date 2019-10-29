@@ -336,14 +336,16 @@ ns_transfer_pre(S) ->
   maps:is_key(accounts, S).
 
 ns_transfer_args(#{protocol := Protocol} = S) ->
+  ExistingNames = maps:keys(maps:get(named_accounts, S, #{})),
   ?LET({{Name, Account}, To},
        {gen_claimed_name(S),
-        oneof([{account, gen_account(1, 49, S)}, %% TODO better generator
-               {name, elements(maps:keys(maps:get(named_accounts, S, #{})) ++ [<<"ta.test">>, <<"ta.chain">>])}])},
+        frequency([{29, {account, gen_account(1, 49, S)}},
+                   {1,  ?LET(R, gen_registrar(Protocol), {name, list_to_binary("not_a_name." ++ R)})}] ++
+                  [{10, {name, elements(ExistingNames)}} || ExistingNames /= []])},
        [Account, To, Name,
         #{name_id => aeser_id:create(name, aens_hash:name_hash(Name)),
-          fee => gen_fee(Protocol),
-          nonce => gen_nonce()
+          fee     => gen_fee(Protocol),
+          nonce   => gen_nonce()
          }]).
 
 ns_transfer_valid(S, [Account, To, Name, Tx]) ->
@@ -384,7 +386,6 @@ ns_transfer_next(S, _, [Account, To, Name, Tx] = Args) ->
 ns_transfer_post(S, Args, Res) ->
   common_postcond(ns_transfer_valid(S, Args), Res).
 
-
 ns_transfer_features(S, [_Account, _To, _Name, _Tx] = Args, Res) ->
   Correct = ns_transfer_valid(S, Args),
   [{correct, case Correct of true -> ns_transfer; _ -> false end},
@@ -395,11 +396,13 @@ ns_transfer_features(S, [_Account, _To, _Name, _Tx] = Args, Res) ->
 
 weight(S, ns_preclaim) ->
   case maps:get(preclaims, S, []) of
-    [] -> 10;
-    _  -> 3 end;
+    [] -> good_weight(S, 10);
+    _  -> good_weight(S, 3) end;
 weight(S, ns_claim)    ->
-  case good_preclaims(S) ++ maps:get(auctions, S) of
-    [] -> 1;
+  case good_preclaims(S) of
+    [] -> case maps:get(auctions, S) of
+            [] -> 0;
+            _  -> good_weight(S, 7) end;
     _  -> 10 end;
 weight(S, ns_update) ->
   case good_claims(S) of
@@ -412,10 +415,14 @@ weight(S, ns_revoke) ->
 weight(S, ns_transfer) ->
   case good_claims(S) of
     [] -> 0;
-    _ -> 5 end;
-
+    _  -> 5 end;
 weight(_S, _) -> 0.
 
+good_weight(S, Base) ->
+  case good_accounts(S) of
+    [] -> 0;
+    _  -> Base
+  end.
 
 %% -- State update and query functions ---------------------------------------
 expired_preclaims(S, Height) ->
@@ -433,7 +440,8 @@ expired_protection(S, Height) ->
   [ {N, H} || {N, H} <- maps:get(protected_names, S), H < Height ].
 
 good_preclaims(S = #{ preclaims := Ps, height := H}) ->
-  [ P || P = #preclaim{ expires_by = H0, claimer = C } <- Ps, H0 >= H, is_good(S, C) ].
+  [ P || P = #preclaim{ expires_by = H0, claimer = C } <- Ps, H0 >= H,
+         is_good(S, C), H0 < H + aec_governance:name_preclaim_expiration() ].
 
 good_claims(S = #{ claims := Cs, height := H}) ->
   [ Cl || Cl = #claim{ expires_by = H0, claimer = C } <- Cs, H0 >= H, is_good(S, C) ].
@@ -543,7 +551,7 @@ name_claim_fee(Name, P) ->
   try aec_governance:name_claim_fee(Name, P)
   catch _:_ -> 1000000000000 end.
 
-is_valid_bid(Protocol, _S, _Name, _NameFee) when Protocol < 4 ->
+is_valid_bid(Protocol, _S, _Name, _NameFee) when Protocol < ?LIMA_PROTOCOL_VSN ->
   true;
 is_valid_bid(_, S, Name, NameFee) ->
   NameFee =/= prelima andalso
@@ -553,7 +561,7 @@ is_valid_bid(_, S, Name, NameFee) ->
         (NameFee - PrevBid) * 100 >= PrevBid * aec_governance:name_claim_bid_increment()
     end.
 
-is_valid_preclaim(Protocol, S, Tx, Claimer) when Protocol < 4 ->
+is_valid_preclaim(Protocol, S, Tx, Claimer) when Protocol < ?LIMA_PROTOCOL_VSN ->
   is_valid_preclaim_no_auction(S, Tx, Claimer);
 is_valid_preclaim(_Protocol, #{auctions := Auctions} = S, #{name := Name, name_salt := Salt} = Tx, Claimer) ->
   %% Name should be in auction

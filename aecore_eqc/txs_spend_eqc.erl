@@ -95,13 +95,12 @@ spend_features(S, [Sender, {Tag, Receiver}, _Tx] = Args, Res) ->
 
 %% -- weight ---------------------------------------------------------------
 weight(S, spend) ->
-  case maps:size(maps:get(accounts, S, #{})) of
-    0 -> 20;
-    N -> max(3, 10 - N) end;
+  case good_accounts(S) of
+    [] -> 0;
+    As -> max(3, 10 - length(As)) end;
 weight(_S, _) -> 0.
 
 %% -- State update and query functions ---------------------------------------
-
 
 %% --- local helpers ------
 credit_contract(_Key, _Amount, S = #{ contracts := _Contracts}) ->
@@ -109,10 +108,14 @@ credit_contract(_Key, _Amount, S = #{ contracts := _Contracts}) ->
 
 %% -- Generators -------------------------------------------------------------
 
-gen_account_id(New, Exist, S = #{ with_ga := true }) ->
-  gen_account_id(New, Exist, S, fun(A) -> is_ga_account(S, ?ACCOUNT(A)) end);
+gen_account_id(New, Exist, S = #{ ga := _ }) ->
+  P = maps:get(paying_for, S, false),
+  gen_account_id(New, Exist, S, fun(A) -> ?ACCOUNT(A) /= P andalso is_ga_account(S, ?ACCOUNT(A)) end);
+  %% gen_account_id(New, Exist, S, fun(A) -> is_ga_account(S, ?ACCOUNT(A)) end);
 gen_account_id(New, Exist, S) ->
-  gen_account_id(New, Exist, S, fun(A) -> not is_ga_account(S, ?ACCOUNT(A)) end).
+  P = maps:get(paying_for, S, false),
+  gen_account_id(New, Exist, S, fun(A) -> ?ACCOUNT(A) /= P andalso not is_ga_account(S, ?ACCOUNT(A)) end).
+  %% gen_account_id(New, Exist, S, fun(A) -> not is_ga_account(S, ?ACCOUNT(A)) end).
 
 gen_account_id(New, Exist, #{accounts := Accounts, keys := Keys}, Filter) ->
   case [ Key || Key <- maps:keys(Keys), not lists:keymember(Key, #account.key, maps:values(Accounts)) ] of
@@ -140,8 +143,12 @@ gen_name(S) ->
 
 gen_spend_amount(S, Key) ->
   case get_account(S, Key) of
-    false ->
-      choose(0, 10000000);
-    #account{ amount = Amount } ->
-      weighted_default({49, Amount div 5}, {1, choose(0, 10000000)})
+    #account{ amount = Amount } when Amount >= 0 ->
+      weighted_default({49, rnd(Amount div 5)}, {1, gen_amount()});
+    _ ->
+      gen_amount()
   end.
+
+gen_amount() -> ?LET(X, choose(1, 9), X * 10000000).
+rnd(X) when X < 1000000000000 -> X;
+rnd(X) -> (X div 1000000000000) * 1000000000000.

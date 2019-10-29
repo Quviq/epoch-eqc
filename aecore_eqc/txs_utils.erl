@@ -64,27 +64,26 @@ gen_fee(Protocol) ->
                {1,  ?LET(F, choose(0, 15000), F * minimum_gas_price(Protocol))}]).    %% too low
 
 gen_fee_above(Protocol, Amount) ->
-    frequency([{98, ?LET(F, choose(Amount, Amount + 10000), F * minimum_gas_price(Protocol))},
+    frequency([{198, ?LET(F, choose(Amount, Amount + 10000), F * minimum_gas_price(Protocol))},
                {1,  ?LET(F, choose(0, Amount - 5000), F)},   %%  too low (and very low for hard fork)
                {1,  ?LET(F, choose(0, Amount - 5000), F * minimum_gas_price(Protocol))}]).    %% too low
 
 gen_nonce() ->
-    weighted_default({49, good}, {1, {bad, elements([-1, 1, -5, 5, 10000])}}).
+    weighted_default({99, good}, {1, {bad, elements([-1, 1, -5, 5, 10000])}}).
 
 gen_gas_price(Protocol) ->
-    frequency([{48, minimum_gas_price(Protocol)},
+    frequency([{198, minimum_gas_price(Protocol)},
                {1,  minimum_gas_price(Protocol) - 1},
                {1,  1}]).
 
 gen_gas(GasUsed) ->
-    %% frequency([{40, GasUsed}, {8, GasUsed + 3000000}, {1, max(50, GasUsed - 200)}, {1, 10}]).
-    frequency([{18, ?LET(Delta, choose(0, 10), GasUsed + Delta)},
+    frequency([{96, ?LET(Delta, choose(0, 10), GasUsed + Delta)},
                {2, ?LET(Delta, choose(0, 10), GasUsed + 3000000 + Delta)},
                {1, 10},
                {1, ?LET(Delta, choose(1, 250), max(1, GasUsed - Delta))}]).
 
 gen_deposit() ->
-    frequency([{8, 0}, {2, choose(1, 100000000000000)}]).
+    frequency([{8, 0}, {2, ?LET(X, choose(1, 9), X * 10000000000000)}]).
 
 gen_account(New, Exist, S) ->
   txs_spend_eqc:gen_account_id(New, Exist, S).
@@ -154,6 +153,11 @@ is_account(S, A) ->
     _                      -> true
   end.
 
+good_accounts(S) ->
+  WGA = maps:is_key(ga, S),
+  Pay = maps:get(paying_for, S, false),
+  [ A || {A, #account{ ga = GA }} <- maps:to_list(maps:get(accounts, S, #{})),
+         Pay /= ?ACCOUNT(A) andalso ((WGA andalso GA /= false) orelse (not WGA andalso GA == false)) ].
 
 get_account(S, ?ACCOUNT(A)) ->
   maps:get(A, maps:get(accounts, S), false);

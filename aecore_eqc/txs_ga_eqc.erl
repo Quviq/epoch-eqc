@@ -155,20 +155,23 @@ weight(S, ga_attach)  ->
     N when N < 2 -> 1;
     N            -> 4 * N
   end;
-weight(S, ga_meta)    -> 5 * length(ga_accounts(S));
+weight(S, ga_meta) ->
+  case ga_accounts(S) of
+    [] -> 0;
+    _  -> 15 end;
 weight(_S, _)         -> 0.
 
 %% -- Generators -------------------------------------------------------------
 gen_auth_contract() ->
-  weighted_default({49, authorize_nonce}, {1, identity}).
+  weighted_default({99, authorize_nonce}, {1, identity}).
 
 gen_auth_fun(identity, _) ->
   noshrink(binary(32));
 gen_auth_fun(authorize_nonce, abi_aevm_1) ->
-  weighted_default({49, <<175,167,108,196,77,122,134,90,197,152,206,179,38,153,232,187,88,41,45,167,79,246,181,13,185,101,189,45,109,228,184,223>>},
+  weighted_default({99, <<175,167,108,196,77,122,134,90,197,152,206,179,38,153,232,187,88,41,45,167,79,246,181,13,185,101,189,45,109,228,184,223>>},
                    {1,  binary(32)});
 gen_auth_fun(authorize_nonce, abi_fate_1) ->
-  weighted_default({49, <<(aeb_fate_code:symbol_identifier(<<"nonce_correct">>))/binary, 0:28/unit:8>>},
+  weighted_default({99, <<(aeb_fate_code:symbol_identifier(<<"nonce_correct">>))/binary, 0:28/unit:8>>},
                    {1,  binary(32)});
 gen_auth_fun(authorize_nonce, _) ->
   noshrink(binary(32)).

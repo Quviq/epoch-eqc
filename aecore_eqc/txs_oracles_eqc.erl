@@ -236,12 +236,11 @@ response_oracle_pre(S) ->
 
 response_oracle_args(#{protocol := Protocol} = S) ->
      ?LET(QueryId, gen_query_id(1, 49, S),
-          [QueryId, % resolve_query_id(S, QueryId, {elements(maps:keys(maps:get(keys, S))), nat(), elements(maps:keys(maps:get(keys, S)))}),
-           #{
-             response => weighted_default({9, <<"yes, you can">>}, {1, utf8()}),
+          [QueryId,
+           #{response     => weighted_default({9, <<"yes, you can">>}, {1, utf8()}),
              response_ttl => gen_query_response_ttl(S, QueryId),
-             fee => gen_fee(Protocol),
-             nonce => gen_nonce()
+             fee          => gen_fee(Protocol),
+             nonce        => gen_nonce()
             }]).
 
 response_oracle_valid(S = #{height := Height}, [QueryId, Tx]) ->
@@ -295,28 +294,48 @@ response_oracle_features(S, [_QueryId, _Tx] = Args, Res) ->
 %% -- weight ---------------------------------------------------------------
 weight(S, register_oracle) ->
     case active_oracles(S) of
-      [] -> 30;
-      _  -> min(1, 10 * free_accounts(S)) end;
+      [] -> good_weight(S, 20);
+      _  -> max(0, 3 * length(free_accounts(S))) end;
 weight(S, extend_oracle) ->
-    case maps:size(maps:get(oracles, S, #{})) of
-        0  -> 1;
+    case good_oracles(S) of
+        [] -> 0;
         _N -> 3 end;
 weight(S, query_oracle)  ->
-    case active_oracles(S) of
-        [] -> 1;
-        _  -> min(3, (5 - length(open_queries(S))) * 5) end;
+    case {good_accounts(S), active_oracles(S)} of
+      {[], _} -> 0;
+      {_, []} -> 0;
+      _       -> max(3, 10 - length(open_queries(S))) end;
 weight(S, response_oracle)  ->
-    max(1, 20 * length(open_queries(S)));
+    case good_queries(S) of
+      [] -> 0;
+      Qs -> 5 * length(Qs) end;
 weight(_S, _) -> 0.
 
-free_accounts(S) ->
-  maps:size(maps:get(accounts, S)) - maps:size(maps:get(oracles, S)).
+good_weight(S, Base) ->
+  case good_accounts(S) of
+    [] -> 1;
+    _  -> Base
+  end.
 
 open_queries(S) ->
   [ Q || Q <- maps:values(maps:get(queries, S)), not Q#query.expired ].
 
+good_queries(S) ->
+  Os = good_oracles(S),
+  [ Q || Q <- open_queries(S), lists:member(Q#query.oracle, Os) ].
+
 active_oracles(S = #{ height := H }) ->
   [ O || O <- maps:values(maps:get(oracles, S)), O#oracle.oracle_ttl >= H ].
+
+good_oracles(S = #{ height := H }) ->
+  Gs = good_accounts(S),
+  [ OId || {OId, O} <- maps:to_list(maps:get(oracles, S)), O#oracle.oracle_ttl >= H,
+         lists:member(O#oracle.account, Gs) ].
+
+free_accounts(S) ->
+  Gs = good_accounts(S),
+  Os = maps:values(maps:get(oracles, S)),
+  [ A || A <- Gs, not lists:keymember(A, #oracle.account, Os) ].
 
 %% -- State update and query functions ---------------------------------------
 
