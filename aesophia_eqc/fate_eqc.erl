@@ -497,6 +497,48 @@ match_type(S, T)                             ->
 
 has_type(V, T) -> match_type(T, infer_type(V)).
 
+%% Would really want this to be a generator, but we compute the type at code
+%% generation time, where it's too late to do random generation.
+-spec make_polymorphic({[type()], type()}) -> {[type()], type()}.
+make_polymorphic({ArgTypes, RetType}) ->
+    Candidates = [ T || {T, N} <- maps:to_list(subtypes1([RetType | ArgTypes], #{})),
+                        T /= any, N >= 2 ],
+    %% Arbitrary: generalize over all but the first repeated type
+    Sub = case Candidates of
+            [_ | ToGen] -> maps:from_list([{T, {tvar, I}} || {I, T} <- indexed(0, ToGen)]);
+            [] -> #{}
+          end,
+    {[substitute_type(Sub, Arg) || Arg <- ArgTypes],
+     substitute_type(Sub, RetType)}.
+
+add_subtype(T, Types) ->
+    maps:update_with(T, fun(N) -> N + 1 end, 1, Types).
+
+subtypes(T, Acc) ->
+    subtypes1(T, add_subtype(T, Acc)).
+
+subtypes1([], Acc)                -> Acc;
+subtypes1([H | T], Acc)           -> subtypes(H, subtypes1(T, Acc));
+subtypes1(T, Acc) when is_atom(T) -> Acc;
+subtypes1({bytes, _}, Acc)        -> Acc;
+subtypes1({list, T}, Acc)         -> subtypes(T, Acc);
+subtypes1({tuple, Ts}, Acc)       -> subtypes1(Ts, Acc);
+subtypes1({variant, Cs}, Acc)     -> lists:foldl(fun subtypes1/2, Acc, Cs);  %% not subtypes/2
+subtypes1({map, K, V}, Acc)       -> subtypes(K, subtypes(V, Acc)).
+
+substitute_type(Sub, T) when Sub == #{} -> T;
+substitute_type(Sub, T) ->
+    case maps:get(T, Sub, not_found) of
+        not_found -> substitute_type1(Sub, T);
+        NewT      -> NewT
+    end.
+substitute_type1(_, T) when is_atom(T) -> T;
+substitute_type1(_, T = {bytes, _})    -> T;
+substitute_type1(Sub, {list, T})       -> {list, substitute_type1(Sub, T)};
+substitute_type1(Sub, {tuple, Ts})     -> {tuple, [substitute_type(Sub, T) || T <- Ts]};
+substitute_type1(Sub, {map, K, V})     -> {map, substitute_type(Sub, K), substitute_type(Sub, V)};
+substitute_type1(Sub, {variant, Cs})   -> {variant, [substitute_type1(Sub, C) || C <- Cs]}.
+
 read_arguments(S, Args) ->
     {S1, Vals} = lists:foldl(fun read_arg/2, {S, []}, Args),
     {S1, lists:reverse(Vals)}.
@@ -935,7 +977,6 @@ instantiate_any(T) -> return(T).
 
 value_g() -> value_g(any).
 
-
 value_g(Types) when is_list(Types) ->
     ?LET(Type, elements(Types), value_g(Type));
 value_g(Type) ->
@@ -976,8 +1017,6 @@ value1_g(variant)      ->
          {variant, Ar, Tag, list_to_tuple(Args)})));
 %% value1_g(typerep)      -> {todo, typerep};
 value1_g(void)         -> void.
-
-event_payload_g() -> value_g([string, bytes]).
 
 event_index_g()   ->
     ?SUCHTHAT(V, value_g([nat, boolean, address, bits, bytes, contract, oracle, oracle_query]),
@@ -1193,7 +1232,7 @@ update_result_type(#code_st{ bbs = [{Ref, [Call | Rest]} | BBs] } = S, Type) ->
 pop_code(#code_st{ prev_state  = S,
                    current_fun = Fun,
                    arg_types   = ArgTypes } = CS, V, RetType) ->
-    TypeSpec = substitute(not_map, any, {ArgTypes, RetType}),
+    TypeSpec = make_polymorphic(substitute(not_map, any, {ArgTypes, RetType})),
     BBs      = finalize_bbs(CS),
     CS1      = on_fcode(chain_env(S, address),
                         fun(FCode) -> aeb_fate_code:insert_fun(Fun, [payable], TypeSpec, BBs, FCode) end, CS),
