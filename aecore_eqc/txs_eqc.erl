@@ -210,11 +210,41 @@ prop_txs(Forks) ->
             stats(call_features(H),
                   pretty_commands(?MODULE, Cmds, {H, S, Res},
                                   conjunction([{result, Res == ok},
-                                               {total, ?WHENFAIL(eqc:format("Total: ~p Expected: ~p Diff: ~p\n",
-                                                                            [Total, ?PatronAmount - FeeTotal, Total - (?PatronAmount - FeeTotal)]),
-                                                                 Total == 0 orelse (Total == ?PatronAmount - FeeTotal))}])
+                                               {accounts, check_accounts(S)},
+                                               {total, check_total(Total, FeeTotal)}])
                                  )))))))))
     end)))).
+
+check_accounts(S) ->
+  case {get(trees), maps:to_list(maps:get(accounts, S, #{}))} of
+    {undefined, []} -> true;
+    {Trees0, As} ->
+      Trees = aec_trees:accounts(Trees0),
+      case lists:usort([check_account(S, Id, A, Trees) || {Id, A} <- As ]) -- [ok] of
+        []   -> true;
+        Errs -> ?WHENFAIL(eqc:format("~p\n", [Errs]), false)
+      end
+  end.
+
+check_account(S, Id, #account{ amount = Amount, nonce = Nonce, key = Key }, Trees) ->
+  #key{public = Pubkey} = maps:get(Key, maps:get(keys, S)),
+  case aec_accounts_trees:lookup(Pubkey, Trees) of
+    none when Amount == 0, Nonce == 1 ->
+      ok;
+    none ->
+      {no_account_in_tree, Id, expected, Amount, nonce, Nonce};
+    {value, Account} ->
+      case aec_accounts:balance(Account) of
+        Amount    -> ok;
+        NotAmount ->
+          {wrong_balance, Id, {diff, NotAmount - Amount}, got, NotAmount, expected, Amount}
+      end
+  end.
+
+check_total(Total, FeeTotal) ->
+  ?WHENFAIL(eqc:format("Total: ~p Expected: ~p Diff: ~p\n",
+                       [Total, ?PatronAmount - FeeTotal, Total - (?PatronAmount - FeeTotal)]),
+            Total == 0 orelse (Total == ?PatronAmount - FeeTotal)).
 
 trees_total() ->
     TreesTotal =
