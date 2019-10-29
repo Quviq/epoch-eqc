@@ -16,7 +16,7 @@
 
 %% -- State and state functions ----------------------------------------------
 initial_state(S) ->
-    S#{oracles => #{}, queries => #{}, n_queries => 0}.
+    S#{oracles => #{}, queries => #{}}.
 
 %% -- Operations -------------------------------------------------------------
 
@@ -139,7 +139,7 @@ extend_oracle_features(S, Args, Res) ->
 query_oracle_pre(S) ->
      maps:is_key(accounts, S).
 
-query_oracle_args(#{protocol := Protocol, n_queries := NQs} = S) ->
+query_oracle_args(#{protocol := Protocol} = S) ->
      ?LET({Sender, Oracle0},
           {gen_account(1, 49, S), gen_oracle_id(1, 49, S)},
           begin
@@ -148,8 +148,7 @@ query_oracle_args(#{protocol := Protocol, n_queries := NQs} = S) ->
                              false -> 100;
                              #oracle{qfee = QFee} -> QFee
                          end,
-              QueryId = list_to_atom(lists:concat(["q_", NQs])),
-              [Sender, Oracle, QueryId,
+              [Sender, Oracle, next_id(query),
                #{query        => oneof([<<"{foo: bar}"/utf8>>, <<"any string"/utf8>>, <<>>]),
                  query_fee    => gen_query_fee(QueryFee),
                  query_ttl    => weighted_default({10, {delta, choose(1, 5)}}, {1, {block, choose(0, 1000)}}),
@@ -204,7 +203,6 @@ query_oracle_next(S = #{height := Height}, _Value, [Sender, Oracle, QId, Tx] = A
                            response_ttl = ResponseTTL,
                            response_due = delta(Height, QueryTTL),
                            fee          = maps:get(query_fee, Tx)},
-            S1 = S#{n_queries := maps:get(n_queries, S, 0) + 1},
             reserve_fee(Fee,
               bump_and_charge(Sender, Fee + QFee, update_query(QId, Query, S1)))
     end.

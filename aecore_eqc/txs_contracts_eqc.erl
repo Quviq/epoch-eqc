@@ -30,7 +30,7 @@ contract_create_args(#{protocol := Protocol} = S) ->
         begin
             Fixed   = contract_tx_fee(S, create, Name, ABI),
             GasUsed = contract_gas(Name, init, ABI, Protocol),
-            SymName = list_to_atom(lists:concat(["contract_", maps:size(maps:get(contracts, S, #{}))])),
+            SymName = next_id(contract),
             [Creator, Name, SymName, Compiler,
              #{vm_version  => VM,
                abi_version => ABI,

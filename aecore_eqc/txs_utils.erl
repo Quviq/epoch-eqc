@@ -214,3 +214,12 @@ common_postcond(Correct, Res) ->
         ok                      -> eq(ok, {error, '_'})
     end.
 
+%% --- Symbolic ids
+
+init_ids() -> #{ channel => 0, query => 0, contract => 0, key => 0 }.
+
+next_id(Type) ->
+  Ids = #{ Type := X } = case get(ids) of undefined -> init_ids(); Ids0 -> Ids0 end,
+  put(ids, Ids#{ Type := X + 1 }),
+  list_to_atom(lists:concat([Type, "_", X])).
+

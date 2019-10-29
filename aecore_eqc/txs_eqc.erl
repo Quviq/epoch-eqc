@@ -17,7 +17,8 @@ tx_models() ->
   ].
 
 initial_state(HFs) ->
-  IS = #{fees => [], hard_forks => HFs},
+  IS = #{fees => [], hard_forks => HFs,
+         height => 1, protocol => txs_utils:protocol_at_height(HFs, 1)},
   lists:foldl(fun(M, S) -> eqc_statem:apply(M, initial_state, [S]) end,
               IS, tx_models()).
 
@@ -52,26 +53,26 @@ initial_trees() ->
 
 init_next(S, _Value, []) ->
   {PA, Secret, PAmount} = patron(),
-  Keys     = #{ key_0     => #key{ private = Secret, public = PA } },
-  Accounts = #{ account_0 => #account{ key = key_0, amount = PAmount } },
-  S#{height => 1, protocol => 1, accounts => Accounts, keys => Keys}.
+  KeyId    = next_id(key),
+  Keys     = #{ KeyId     => #key{ private = Secret, public = PA } },
+  Accounts = #{ account_0 => #account{ key = KeyId, amount = PAmount } },
+  S#{accounts => Accounts, keys => Keys}.
 
 %% --- Operation: newkey ---
 newkey_pre(S) ->
   maps:is_key(keys, S).
 
-newkey_args(#{ keys := Keys }) ->
+newkey_args(_S) ->
   #{ public := Pubkey, secret := Privkey } = enacl:sign_keypair(),
-  [maps:size(Keys), {Pubkey, Privkey}].
+  [next_id(key), {Pubkey, Privkey}].
 
 newkey(_, _) ->
   ok.
 
-newkey_next(S, _Value, [Id, {Pubkey, Privkey}]) ->
-  add_key(S, Id, Pubkey, Privkey).
+newkey_next(S, _Value, [KeyId, {Pubkey, Privkey}]) ->
+  add_key(S, KeyId, Pubkey, Privkey).
 
-add_key(S = #{keys := Keys}, Id, Pub, Priv) ->
-  KeyId = list_to_atom(lists:concat(["key_", Id])),
+add_key(S = #{keys := Keys}, KeyId, Pub, Priv) ->
   S#{ keys := Keys#{ KeyId => #key{public = Pub, private = Priv} } }.
 
 %% --- Operation: mine ---
@@ -79,7 +80,7 @@ mine_pre(S) ->
   maps:is_key(accounts, S).
 
 mine_args(_) ->
-  [?LET(Blocks, frequency([{20, 1}, {1, 10}, {1, 100}, {2, 480}, {1, 1000}, {1, 10000}, {1, 25000}]),
+  [?LET(Blocks, frequency([{10, 1}, {1, 10}, {1, 100}, {2, 480}, {1, 1000}, {1, 10000}, {1, 25000}]),
         ?SHRINK(Blocks, [choose(1, Blocks) || Blocks =/= 1]))].
 
 mine_call(#{height := Height}, [Blocks]) ->
@@ -181,7 +182,9 @@ weight(_S, _)    -> 1.
 
 %% --- Property -----------------------------------
 prop_txs() ->
-  Forks = #{1=> 0, 2 => 3, 3 => 6, 4 => 9},
+  %% Forks = #{1=> 0, 2 => 3, 3 => 6, 4 => 9},
+  %% Forks = #{1=> 0, 2 => 10, 3 => 20, 4 => 100, 5 => 1000},
+  Forks = #{1 => 0, 4 => 1},
   prop_txs(Forks).
 
 prop_txs(Forks) ->
