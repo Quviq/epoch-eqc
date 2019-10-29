@@ -1491,7 +1491,7 @@ check_gas_cost(#{ gas_used := Gas }) when Gas < 1000 -> true;
 check_gas_cost(#{ gas_used := GasUsed, time := Time, gas_per_us := GasRate }) ->
     BlockTime = 6 / GasRate,
     ?WHENFAIL(io:format("Gas used: ~p\nTime: ~.2fms\nBlockTime: ~.3fs\n", [GasUsed, Time / 1000, BlockTime]),
-              BlockTime < 300.0).
+              BlockTime < infinity).
 
 classify({error, Str}) ->
     {error, hd(string:split(Str, ":"))};
