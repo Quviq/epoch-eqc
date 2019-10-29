@@ -76,7 +76,7 @@ contract_create_tx(S, Args) ->
 contract_create_tx_(S, [Creator, Name, _SymName, CompilerVersion, Tx]) ->
     NTx = update_nonce(S, Creator, Tx),
     CreatorId = aeser_id:create(account, get_account_key(S, Creator)),
-    #{src := Contract, args := Args} = CompiledContract = contract(Name),
+    #{src := Contract, init_args := Args} = CompiledContract = contract(Name),
     {ok, CallData} = encode_calldata(maps:get(abi_version, NTx), Contract, "init", Args),
     Code = maps:get({code, CompilerVersion}, CompiledContract),
     NTx1 = maps:update_with(vm_version, fun vm_to_int/1, NTx),
@@ -89,7 +89,7 @@ contract_create_next(S, _Value, [Creator, Name, ContractId, CompilerVsn, Tx] = A
     case contract_create_valid(S, Args) of
         false -> S;
         true  ->
-            #{src := Source, functions := Funs} = contract(Name),
+            #{functions := Funs} = contract(Name),
             #{fee := Fee, gas_price := GasPrice, amount := Amount,
               deposit := Deposit, gas := Gas, vm_version := Vm, abi_version := Abi} = Tx,
             GasUsed = contract_gas(Name, init, Abi, maps:get(protocol, S)),
@@ -106,7 +106,6 @@ contract_create_next(S, _Value, [Creator, Name, ContractId, CompilerVsn, Tx] = A
                                                               vm = Vm,
                                                               abi = Abi,
                                                               compiler_version = CompilerVsn,
-                                                              src = Source,
                                                               functions = Funs,
                                                               protocol = maps:get(protocol, S)}, S)));
                 false ->
@@ -143,10 +142,6 @@ contract_create_features(S, [_Creator, Name, _SymName, CompilerVersion, Tx] = Ar
 contract_call_pre(S) ->
     maps:is_key(accounts, S) andalso maps:get(contracts, S) /= [].
 
-%% Given https://github.com/aeternity/protocol/blame/44b459970144fb030df55e32b166a9d62a79b523/contracts/contract_vms.md#L23
-%% I would expect vm_version to be present either in ct_version form or as separate key
-%% But not so in aect_call_tx
-%% Most likely determined by the contract's VM version!
 contract_call_args(#{protocol := Protocol} = S) ->
     ?LET([Caller, ContractId], [gen_account(1, 100, S), gen_contract_id(1, 100, S)],
     begin
@@ -191,7 +186,8 @@ contract_call_valid(_, _) ->
 contract_call_tx(S, [Caller, CId = ?CONTRACT(_), #{call_data := {Func, As}} = Tx]) ->
     C              = get_contract(S, CId),
     ContractId     = aeser_id:create(contract, C#contract.pubkey),
-    {ok, CallData} = encode_calldata(maps:get(abi_version, Tx), C#contract.src, Func, As),
+    #{src := Src}  = contract(C#contract.name),
+    {ok, CallData} = encode_calldata(maps:get(abi_version, Tx), Src, Func, As),
     contract_call_with_data(S, Caller, Tx#{call_data => CallData, contract_id => ContractId});
 contract_call_tx(S, [Caller, fake_contract_id, Tx]) ->
     ContractId = aeser_id:create(contract, (fake_contract_id())#contract.pubkey),
@@ -380,11 +376,11 @@ fake_contract_id() ->
 contracts() ->
     Static =
         [#{name => identity,
-           args => [],
+           init_args => [],
            functions => [{"main", [choose(-100, 1000)]}]
           },
          #{name => authorize_nonce,
-           args => [],
+           init_args => [],
            functions => [{"check_nonce", [nat()]}, {"n_checks", []}]
           }
         ],
@@ -407,8 +403,8 @@ contract_gas(identity, "main", ?ABI_FATE_1, _) -> 11;
 
 contract_gas(authorize_nonce, init, ?ABI_AEVM_1, _) -> 417;
 contract_gas(authorize_nonce, init, ?ABI_FATE_1, _) -> 103;
-contract_gas(authorize_nonce, "check_nonce", ?ABI_AEVM_1, P) when P < ?LIMA_PROTOCOL_VSN -> 414;
-contract_gas(authorize_nonce, "check_nonce", ?ABI_AEVM_1, _) -> 734;
+contract_gas(authorize_nonce, "check_nonce", ?ABI_AEVM_1, P) when P < ?LIMA_PROTOCOL_VSN -> 422;
+contract_gas(authorize_nonce, "check_nonce", ?ABI_AEVM_1, _) -> 742;
 contract_gas(authorize_nonce, "check_nonce", ?ABI_FATE_1, _) -> 135;
 contract_gas(authorize_nonce, "n_checks", ?ABI_AEVM_1, P) when P < ?LIMA_PROTOCOL_VSN -> 357;
 contract_gas(authorize_nonce, "n_checks", ?ABI_AEVM_1, _) -> 677;

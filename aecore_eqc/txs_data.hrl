@@ -17,7 +17,7 @@
 -record(ga, {contract, auth_fun}).
 -record(key,     {public, private}).
 -record(contract, {name, pubkey, amount, deposit, vm, abi,
-                   compiler_version, protocol, src, functions = []}).
+                   compiler_version, protocol, functions = []}).
 -record(oracle, {account, qfee, oracle_ttl}).
 -record(query,  {sender, oracle, id, fee, response_ttl, query_ttl, response_due, expired = false}).
 
