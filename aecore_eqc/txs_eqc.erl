@@ -10,10 +10,12 @@
 
 tx_models() ->
   [ txs_spend_eqc
+  %% , txs_channels_eqc
   , txs_contracts_eqc
   , txs_names_eqc
   , txs_oracles_eqc
   , txs_ga_eqc
+  %% , txs_paying_for_eqc
   ].
 
 initial_state(HFs) ->
@@ -162,9 +164,11 @@ wrap_call(S, {call, _, Cmd, Args}) ->
 
 %% --- Generators ---------------------------------
 gen_tx(S) ->
+  Active = tx_models() -- ( [txs_ga_eqc || maps:is_key(ga, S)] ++
+                            [txs_paying_for_eqc || maps:is_key(paying_for, S) ] ),
   ?LET({call, M, F, Args},
-       frequency(lists:append([eqc_statem:apply(M, command_list, [S])
-                               || M <- tx_models() -- [txs_ga_eqc || maps:get(with_ga, S, false)]])),
+       frequency(
+         lists:append([eqc_statem:apply(M, command_list, [S]) || M <- Active])),
        [M, F, Args]).
 
 weight(_S, tx)   -> 200;
@@ -253,8 +257,14 @@ trees_total() ->
 stats(Features, Prop) ->
   {_Atoms, Rest} = lists:partition(fun is_atom/1, Features),
   Feats = lists:flatten([tx, correct, spend, mine] ++
+                        [ [contract_create, contract_call]
+                          || lists:member(txs_contracts_eqc, tx_models()) ] ++
+                        [ [sc_create, sc_deposit, sc_withdraw]
+                          || lists:member(txs_channels_eqc, tx_models()) ] ++
                         [ [ga_attach, ga_meta, ga_meta_inner]
                           || lists:member(txs_ga_eqc, tx_models()) ] ++
+                        [ [paying_for, paying_for_inner]
+                          || lists:member(txs_paying_for_eqc, tx_models()) ] ++
                         [ [register_oracle, extend_oracle, query_oracle, response_oracle]
                           || lists:member(txs_oracles_eqc, tx_models()) ] ++
                         [ [ns_preclaim, ns_claim, ns_revoke, ns_transfer, ns_update]
@@ -291,12 +301,16 @@ is_consistent(S, Tx) ->
   QryIds = [ Q || ?QUERY(Q) <- Sym ],
   Qrys   = maps:get(queries, S, #{}),
 
+  ChnIds = [ C || ?CHANNEL(C) <- Sym ],
+  Chns   = maps:get(channels, S, #{}),
+
   %% io:format("is_consistent?\n~p ~p\n~p ~p\n~p ~p\n", [KeyIds, Keys, AccIds, Accs, KeyIds3, KeyIds1]),
   lists:all(fun(K) -> maps:is_key(K, Keys) end, KeyIds)
     andalso lists:all(fun(A) -> maps:is_key(A, Accs) end, AccIds)
     andalso lists:all(fun(C) -> maps:is_key(C, Cons) end, ConIds)
     andalso lists:all(fun(O) -> maps:is_key(O, Orcs) end, OrcIds)
     andalso lists:all(fun(Q) -> maps:is_key(Q, Qrys) end, QryIds)
+    andalso lists:all(fun(C) -> maps:is_key(C, Chns) end, ChnIds)
     andalso (KeyIds3 -- KeyIds1) == KeyIds3.
 
 get_symbolic(?KEY(X))      -> [?KEY(X)];
@@ -305,6 +319,7 @@ get_symbolic(?ACCOUNT(X))  -> [?ACCOUNT(X)];
 get_symbolic(?CONTRACT(X)) -> [?CONTRACT(X)];
 get_symbolic(?ORACLE(X))   -> [?ORACLE(X)];
 get_symbolic(?QUERY(X))    -> [?QUERY(X)];
+get_symbolic(?CHANNEL(X))  -> [?CHANNEL(X)];
 get_symbolic(X) when is_map(X) ->
   get_symbolic(maps:to_list(X));
 get_symbolic(Xs) when is_list(Xs) ->

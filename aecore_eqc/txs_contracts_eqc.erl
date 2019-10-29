@@ -50,8 +50,8 @@ contract_create_valid(S, [Creator, Name, _SymName, CompilerVersion, Tx]) ->
     Gas      = maps:get(gas, Tx),
     is_account(S, Creator)
     andalso maps:get(nonce, Tx) == good
-    andalso check_balance(S, Creator, maps:get(fee, Tx) + Gas * maps:get(gas_price, Tx) +
-                                      maps:get(amount, Tx) + maps:get(deposit, Tx))
+    andalso check_balance(S, Creator, maps:get(amount, Tx) + maps:get(deposit, Tx),
+                                      maps:get(fee, Tx) + Gas * maps:get(gas_price, Tx))
     andalso valid_contract_fee(S, Fixed, Tx)
     andalso check_contract_opts(Protocol, CompilerVersion, maps:get(vm_version, Tx), ABI).
 
@@ -100,7 +100,7 @@ contract_create_next(S, _Value, [Creator, Name, ContractId, CompilerVsn, Tx] = A
                     %% Account must exist
                     ContractPK = calc_contract_pubkey(S, Creator),
                     reserve_fee(Fee + GasUsed * GasPrice,
-                      bump_and_charge(Creator, Fee + GasUsed * GasPrice + Amount + Deposit,
+                      bump_and_charge(Creator, Amount + Deposit, Fee + GasUsed * GasPrice,
                         update_contract(ContractId, #contract{name = Name,
                                                               pubkey = ContractPK,
                                                               amount = Amount,
@@ -121,7 +121,8 @@ calc_contract_pubkey(S, Creator) ->
         #account{ ga = #ga{ contract = CId }, key = Key } ->
             #contract{ abi = ABI } = txs_contracts_eqc:get_contract(S, CId),
             GAPK                   = get_pubkey(S, Key),
-            {ok, AuthData}         = txs_ga_eqc:make_auth_data(S, Creator, ABI, good),
+            %% We have already bumped the nonce when we get here :-) So, {bad, -1} is good!
+            {ok, AuthData}         = txs_ga_eqc:make_auth_data(S, Creator, ABI, {bad, -1}),
             GANonce                = aega_meta_tx:auth_id(GAPK, AuthData),
             aect_contracts:compute_contract_pubkey(GAPK, GANonce);
         #account{ nonce = Nonce, key = Key } ->
@@ -174,13 +175,14 @@ contract_call_pre(_, _) ->
 
 contract_call_valid(S, [Caller, CId = ?CONTRACT(_), Tx]) ->
     #contract{ name = Name, vm = VM, abi = CABI } = get_contract(S, CId),
-    #{abi_version := ABI, call_data := {F, _}} = Tx,
+    #{abi_version := ABI, call_data := {F, _}, gas := Gas, amount := Amount,
+      gas_price := GasPrice, fee := Fee, nonce := Nonce} = Tx,
 
     is_account(S, Caller)
-    andalso maps:get(nonce, Tx) == good
-    andalso check_balance(S, Caller, maps:get(fee, Tx) + maps:get(gas, Tx) * maps:get(gas_price, Tx))
+    andalso Nonce == good
+    andalso check_balance(S, Caller, Amount, Fee + Gas * GasPrice)
     andalso valid_contract_fee(S, contract_tx_fee(S, call, Name, ABI), Tx)
-    andalso is_valid_gas(Name, F, ABI, VM, maps:get(protocol, S), maps:get(gas, Tx))
+    andalso is_valid_gas(Name, F, ABI, VM, maps:get(protocol, S), Gas)
     andalso ABI == abi_to_int(CABI);
 contract_call_valid(_, _) ->
     false.
@@ -212,7 +214,7 @@ contract_call_next(S, _Value, [Caller, CId, Tx] = Args) ->
             case Gas >= UseGas andalso (Payable orelse Amount == 0) of
                 true ->
                     reserve_fee(Fee + UseGas * GasPrice,
-                      bump_and_charge(Caller, Fee + UseGas * GasPrice + Amount, S));
+                      bump_and_charge(Caller, Amount, Fee + UseGas * GasPrice, S));
                 false -> %% out of gas
                     reserve_fee(Fee + Gas * GasPrice,
                       bump_and_charge(Caller, Fee + Gas * GasPrice, S))

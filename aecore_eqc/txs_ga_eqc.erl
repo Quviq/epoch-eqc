@@ -13,6 +13,8 @@
 
 -import(txs_contracts_eqc, [gen_contract_opts/1, contract_tx_fee/4, contract_gas/4]).
 
+-import(txs_channels_eqc, [is_channel_party/3]).
+
 -include("txs_eqc.hrl").
 
 %% -- State and state functions ----------------------------------------------
@@ -92,29 +94,45 @@ ga_meta_pre(S) ->
   length(ga_accounts(S)) > 0.
 
 ga_meta_args(S) ->
-  ?LET(TxArgs = [_M, Tx, _TxData], gen_tx(?WGA(S)),
-  begin
-    GAAccount = ga_signer(S, TxArgs),
-    ?LET({ABI, Fee, Gas, GasPrice}, gen_meta_params(S, GAAccount, Tx),
-         [GAAccount, #{ abi_version => txs_contracts_eqc:abi_to_int(ABI), gas => Gas, fee => Fee,
-                        gas_price => GasPrice, auth_data => gen_nonce() }, TxArgs])
+  ?LET(TxArgs = [_M, _Tx, _TxData], gen_tx(?WGA(S)),
+  case ga_signer(S, TxArgs) of
+    [GAAccount] ->
+      ga_meta_args_(S, GAAccount, TxArgs);
+    [GAAccount1, GAAccount2] ->
+      ?LET(GAArgs1, ga_meta_args_(S, GAAccount1, TxArgs),
+            ga_meta_args_(S, GAAccount2, [?MODULE, ga_meta, GAArgs1]))
   end).
 
-ga_meta_pre(S, [_, _, TxArgs]) ->
-  maps:get(protocol, S) >= ?LIMA_PROTOCOL_VSN andalso
+ga_meta_args_(S, GAAccount, TxArgs = [_M, Tx, _TxData]) ->
+  ?LET({ABI, Fee, Gas, GasPrice}, gen_meta_params(S, GAAccount, Tx),
+       [GAAccount, #{ abi_version => txs_contracts_eqc:abi_to_int(ABI), gas => Gas, fee => Fee,
+                      gas_price => GasPrice, auth_data => gen_nonce() }, TxArgs]).
+
+ga_meta_pre(S, [GA, _, TxArgs = [_, Tx, [X | _]]]) ->
+  %% maps:get(protocol, S) >= ?LIMA_PROTOCOL_VSN andalso %% Skip fortuna - it doesn't catch crashes
+  %% (Tx /= ga_meta orelse GA /= X) andalso
   txs_eqc:tx_pre(S, TxArgs).
 
-ga_meta_valid(S = #{protocol := P}, [GAAccount, MTx, _TxArgs = [_, Tx, _]]) ->
+ga_meta_valid(S = #{protocol := P}, [GAAccount, MTx, TxArgs = [_, Tx, _]]) ->
   P >= ?FORTUNA_PROTOCOL_VSN
   andalso is_ga_account(S, GAAccount)
   andalso maps:get(auth_data, MTx) == good
+  andalso check_balance(S, GAAccount, maps:get(fee, MTx) + maps:get(gas, MTx) * maps:get(gas_price, MTx))
+  andalso is_valid_auth_gas(S, GAAccount, maps:get(abi_version, MTx), P, maps:get(gas, MTx))
   andalso check_abi(S, GAAccount, maps:get(abi_version, MTx))
-  andalso is_valid_auth_gas(maps:get(abi_version, MTx), P, maps:get(gas, MTx))
+  andalso check_relevant_signer(S, GAAccount, TxArgs)
   andalso txs_contracts_eqc:valid_contract_fee(S, ga_meta_tx_fee(Tx), MTx).
 
 ga_meta_tx(S, [GAAccount, MTx, [M, Tx, TxData]]) ->
-  {ok, InnerTx} = apply(M, ?tx(Tx), [?WGA(S), TxData]),
-  STx = aetx_sign:new(InnerTx, []),
+  {ok, InnerTx} = apply(M, ?tx(Tx), [?WGA(GAAccount, ga_bump_nonce(GAAccount, S)), TxData]),
+  WGA = maps:is_key(ga, S),
+  STx =
+    case aetx:signers(InnerTx, get(trees)) of
+      {ok, [X, Y]} when not WGA -> %% Two signers, and only one GA "signature"
+        sign(S, X, Y, GAAccount, InnerTx);
+      _ ->
+        aetx_sign:new(InnerTx, [])
+    end,
 
   {ok, AuthData} = make_auth_data(S, GAAccount, maps:get(abi_version, MTx), maps:get(auth_data, MTx)),
   GAId = aeser_id:create(account, get_account_key(S, GAAccount)),
@@ -125,15 +143,17 @@ ga_meta_next(S, Value, Args = [GA, MTx, [M, Tx, TxData]]) ->
   case ga_meta_valid(S, Args) of
     false -> S;
     true  ->
-      #account{ nonce = N, ga = #ga{ contract = CId } } = get_account(S, GA),
+      A = #account{ nonce = N, ga = #ga{ contract = CId } } = get_account(S, GA),
       #contract{ abi = ABI } = txs_contracts_eqc:get_contract(S, CId),
       UseGas = auth_gas(txs_contracts_eqc:abi_to_int(ABI), N + 1, maps:get(protocol, S)),
       #{ fee := Fee, gas_price := GasPrice } = MTx,
-      S1 = apply(M, ?next(Tx), [?WGA(S), Value, TxData]),
-      A  = get_account(S1, GA),
-      A1 = A#account{ nonce = N + 1 },
+      S1 = update_account(S, GA, A#account{ nonce = N + 1 }),
+      S2 = apply(M, ?next(Tx), [?WGA(GA, S1), Value, TxData]),
+      %% A  = get_account(S1, GA),
+      %% Re-set the nonce and remove the GA tag from state.
+      %% S2 = update_account(?NO_WGA(S1), GA, A#account{ nonce = N }),
       reserve_fee(Fee + UseGas * GasPrice,
-        charge(GA, Fee + UseGas * GasPrice, update_account(?NO_WGA(S1), GA, A1)))
+        charge(GA, Fee + UseGas * GasPrice, ?NO_WGA(S2)))
   end.
 
 ga_meta_post(S, Args, Res) ->
@@ -192,12 +212,14 @@ ga_meta_tx_fee(_) ->
   99999.
 
 %% -- Local helpers ---------------------------------------------------------
-is_valid_auth_gas(ABI, P, Gas) -> Gas >= auth_gas(ABI, 1, P).
+is_valid_auth_gas(S, GA, ABI, P, Gas) ->
+  #account{ nonce = N } = get_account(S, GA),
+  Gas >= auth_gas(ABI, N + 1, P).
 
 auth_gas(?ABI_AEVM_1, _, P) when P < ?LIMA_PROTOCOL_VSN -> 402;
 auth_gas(?ABI_AEVM_1, _, _)                             -> 722;
 auth_gas(?ABI_FATE_1, N, _) when N < 64                 -> 167;
-auth_gas(?ABI_FATE_1, _, _)                             -> 177;
+auth_gas(?ABI_FATE_1, _, _)                             -> 172;
 auth_gas(_, _, _)                                       -> 1.
 
 check_abi(S, GA, ABI) ->
@@ -205,6 +227,9 @@ check_abi(S, GA, ABI) ->
     #contract{ abi = SymABI } -> txs_contracts_eqc:abi_to_int(SymABI) == ABI;
     _ -> false
   end.
+
+check_relevant_signer(S, GA, TxArgs) ->
+  lists:member(GA, signers(S, TxArgs)).
 
 get_account_contract(S, GA) ->
   case get_account(S, GA) of
@@ -219,21 +244,42 @@ non_ga_accounts(#{ accounts := As }) ->
 ga_accounts(#{ accounts := As }) ->
   [A || {A, #account{ ga = GA }} <- maps:to_list(As), GA /= false ].
 
-ga_signer(S, [_, response_oracle, [QId, _]])  -> ga_signer_(S, QId);
-ga_signer(S, [_, _, [Signer | _]])            -> ga_signer_(S, Signer).
+-define(IS_SC_DOUBLE_SIGNED(Tx), (Tx == sc_create orelse Tx == sc_deposit
+                                  orelse Tx == sc_withdraw)).
 
-ga_signer_(S, ?QUERY(_) = QId) ->
+signers(S, [_, ga_meta, [_, _, TxArgs]]) -> signers(S, TxArgs);
+signers(S, [_, sc_create, [I, R, _, _]]) ->
+  [signer(S, I), signer(S, R)];
+signers(S, [_, Tx, [S1, S2, ChId, _]]) when ?IS_SC_DOUBLE_SIGNED(Tx) ->
+  [S1 || is_channel_party(S, S1, ChId)] ++ [S2 || is_channel_party(S, S2, ChId)];
+signers(S, [_, response_oracle, [QId, _]]) ->
+  [signer(S, QId)];
+signers(S, A = [_, _, [Signer | _]]) ->
+  [signer(S, Signer)].
+
+ga_signer(S, [_, response_oracle, [QId, _]])     -> [signer(S, QId)];
+ga_signer(S, [_, Tx, [Actor, NotActor, _, _]]) when ?IS_SC_DOUBLE_SIGNED(Tx) ->
+  case [signer(S, X) || X <- [Actor, NotActor], is_ga_account(S, X)] of
+    [] -> [signer(S, Actor)];
+    Xs -> Xs end;
+ga_signer(S, [_, _, [Signer | _]])               -> [signer(S, Signer)].
+
+signer(S, ?QUERY(_) = QId) ->
   Q = txs_oracles_eqc:get_query(S, QId),
   txs_oracles_eqc:get_oracle_account(S, Q#query.oracle);
-ga_signer_(_S, #query{ oracle = RawKey }) ->
+signer(_S, #query{ oracle = RawKey }) ->
   RawKey;
-ga_signer_(S, ?ORACLE(_) = OId) ->
+signer(S, ?ORACLE(_) = OId) ->
   txs_oracles_eqc:get_oracle_account(S, OId);
-ga_signer_(_S, ?ACCOUNT(_) = AccId) ->
+signer(_S, ?ACCOUNT(_) = AccId) ->
   AccId;
-ga_signer_(_S, {_, ?KEY(_)} = NewAcc) ->
+signer(_S, {_, ?KEY(_)} = NewAcc) ->
   NewAcc;
-ga_signer_(_S, Id) -> error({todo, Id}).
+signer(_S, Key = <<_:32/unit:8>>) ->
+  Key;
+signer(_S, {neither, Key = <<_:32/unit:8>>}) ->
+  Key;
+signer(_S, Id) -> error({todo, Id}).
 
 make_auth_data(S, GAAcc, ABI, NonceGood) ->
   case get_account(S, GAAcc) of
@@ -253,3 +299,27 @@ encode_calldata(ABI, Nonce) ->
 calc_nonce(N, good)         -> N;
 calc_nonce(N, {bad, Delta}) -> max(0, N + Delta).
 
+wga(GA, S = #{ ga := GAs  }) when is_list(GAs) -> S#{ ga => [GA | GAs] };
+wga(GA, S)                                     -> S#{ ga => [GA] }.
+
+not_wga(S = #{ ga := [_ | [_ | _] = GAs] }) -> S#{ ga => GAs };
+not_wga(S)                                  -> maps:remove(ga, S).
+
+sign(S, X, Y, GAAccount, Tx) ->
+  case get_account_key(S, GAAccount) of
+    X -> sign(S, Y, Tx);
+    Y -> sign(S, X, Tx);
+    _Neither -> aetx_sign:new(Tx, [])
+  end.
+
+sign(S, PubKey, Tx) ->
+  case lists:keyfind(PubKey, #key.public, maps:values(maps:get(keys, S))) of
+    false -> error;
+    #key{ private = PrivKey } -> aec_test_utils:sign_tx(Tx, PrivKey, false)
+  end.
+
+ga_bump_nonce(GAAccount, S) ->
+  case get_account(S, GAAccount) of
+    A = #account{ nonce = N } -> update_account(S, GAAccount, A#account{ nonce = N + 1 });
+    _ -> S
+  end.

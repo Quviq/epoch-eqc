@@ -42,7 +42,7 @@ spend_args(#{protocol := Protocol} = S) ->
 spend_valid(S, [Sender, {ReceiverTag, Receiver}, Tx]) ->
   is_account(S, Sender)
     andalso maps:get(nonce, Tx) == good
-    andalso check_balance(S, Sender, maps:get(amount, Tx) + maps:get(fee, Tx))
+    andalso check_balance(S, Sender, maps:get(amount, Tx), maps:get(fee, Tx))
     andalso valid_fee(S, Tx)
     andalso case ReceiverTag of
               account  -> true;
@@ -74,11 +74,11 @@ spend_next(S, _Value, [Sender, TaggedReceiver, Tx] = Args) ->
         false -> S;
         {contract, ContractId} ->
           reserve_fee(Fee,
-                      bump_and_charge(Sender, Amount + Fee,
+                      bump_and_charge(Sender, Amount, Fee,
                                       credit_contract(ContractId, Amount, S)));
         RKey ->
           reserve_fee(Fee,
-                      bump_and_charge(Sender, Amount + Fee,
+                      bump_and_charge(Sender, Amount, Fee,
                                       credit(RKey, Amount, S)))
       end
   end.

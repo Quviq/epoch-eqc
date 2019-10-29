@@ -103,9 +103,7 @@ ns_preclaim_next(S = #{height := Height}, _Value, [Account, {Name, Salt}, Tx] = 
                            expires_by = Height + aec_governance:name_preclaim_expiration(),
                            claimer = Account,
                            protocol = aec_hard_forks:protocol_effective_at_height(Height)},
-      reserve_fee(Fee,
-                  bump_and_charge(Account, Fee,
-                                  add(preclaims, Preclaim, S)));
+      reserve_fee(Fee, bump_and_charge(Account, Fee, add(preclaims, Preclaim, S)));
     _ -> S
   end.
 
@@ -133,7 +131,7 @@ ns_claim_args(S = #{protocol := Protocol}) ->
 ns_claim_valid(S = #{height := Height}, [Account, #{name := Name} = Tx]) ->
   Protocol = aec_hard_forks:protocol_effective_at_height(Height),
   valid([{account, is_account(S, Account)},
-         {balance, check_balance(S, Account, maps:get(fee, Tx) + name_fee(Tx))},
+         {balance, check_balance(S, Account, name_fee(Tx), maps:get(fee, Tx))},
          {nonce, maps:get(nonce, Tx) == good},
          {fee, tx_utils:valid_fee(S, Tx)},
          {preclaim, is_valid_preclaim(Protocol, S, Tx, Account)},  %% after Lima Salt distinguishes
@@ -166,7 +164,7 @@ ns_claim_next(S = #{height := Height}, _Value, [Account, Tx] = Args) ->
                          protocol = Protocol},
           remove_preclaim(Tx,
             reserve_fee(Fee,
-              bump_and_charge(Account, Fee + name_fee(Tx), add(claims, Claim, S))));
+              bump_and_charge(Account, name_fee(Tx), Fee, add(claims, Claim, S))));
         Timeout ->
           NameFee = maps:get(name_fee, Tx),
           NewBid = #auction{name = Name,
@@ -180,12 +178,12 @@ ns_claim_next(S = #{height := Height}, _Value, [Account, Tx] = Args) ->
             false ->
               remove_preclaim(Tx,
                 reserve_fee(Fee,
-                  bump_and_charge(Account, Fee + NameFee, S1)));
+                  bump_and_charge(Account, NameFee, Fee, S1)));
             #auction{claimer = PrevBidder,
                      bid = PrevBid} ->
               reserve_fee(Fee,
                 credit(PrevBidder, PrevBid,
-                  bump_and_charge(Account, Fee + NameFee, S1)))
+                  bump_and_charge(Account, NameFee, Fee, S1)))
           end
       end;
     _ -> S
@@ -229,7 +227,7 @@ ns_update_args(S = #{protocol := Protocol}) ->
 
 ns_update_valid(S, [Account, Name, _Pointers, Tx]) ->
   valid([{account, is_account(S, Account)},
-         {balance, check_balance(S, Account, maps:get(fee, Tx) + aec_governance:name_claim_locked_fee())},
+         {balance, check_balance(S, Account, maps:get(fee, Tx))},
          {nonce, maps:get(nonce, Tx) == good},
          {fee, tx_utils:valid_fee(S, Tx)},
          {name_expiry, maps:get(name_ttl, Tx) =< aec_governance:name_claim_max_expiration()},
@@ -442,7 +440,7 @@ good_claims(S = #{ claims := Cs, height := H}) ->
   [ Cl || Cl = #claim{ expires_by = H0, claimer = C } <- Cs, H0 >= H, is_good(S, C) ].
 
 is_good(S, Acc) ->
-  WGA = maps:get(with_ga, S, false),
+  WGA = maps:is_key(ga, S),
   case get_account(S, Acc) of
     #account{ ga = #ga{} } when WGA     -> true;
     #account{ ga = false } when not WGA -> true;
@@ -648,7 +646,7 @@ gen_bad_nc_pair(#{protocol := P} = S, NCs) ->
             [{1, ?LET({N, _}, elements(NCs), {N, gen_account(0, 1, S)})} || NCs /= []] ++
             [{1, ?LET({_, C}, elements(NCs), {gen_name(P), C})}          || NCs /= []]).
 
-gen_good_nc_pair(S = #{ with_ga := true }, NCs) ->
+gen_good_nc_pair(S = #{ ga := _ }, NCs) ->
   gen_elem(NCs, [ NC || NC = {_, C} <- NCs, is_ga(S, C) ]);
 gen_good_nc_pair(S, NCs) ->
   gen_elem(NCs, [ NC || NC = {_, C} <- NCs, not is_ga(S, C) ]).

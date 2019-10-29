@@ -165,7 +165,7 @@ query_oracle_valid(S = #{height := Height}, [Sender, Oracle, _QId, Tx]) ->
     is_oracle(S, Oracle)
     andalso is_account(S, Sender)
     andalso maps:get(nonce, Tx) == good
-    andalso check_balance(S, Sender, maps:get(fee, Tx) + maps:get(query_fee, Tx))
+    andalso check_balance(S, Sender, maps:get(query_fee, Tx), maps:get(fee, Tx))
     andalso valid_fee(S, Tx)
     andalso valid_ttl(Height, maps:get(query_ttl, Tx))
     andalso valid_ttl(Height, maps:get(response_ttl, Tx))
@@ -204,7 +204,7 @@ query_oracle_next(S = #{height := Height}, _Value, [Sender, Oracle, QId, Tx] = A
                            response_due = delta(Height, QueryTTL),
                            fee          = maps:get(query_fee, Tx)},
             reserve_fee(Fee,
-              bump_and_charge(Sender, Fee + QFee, update_query(QId, Query, S1)))
+              bump_and_charge(Sender, QFee, Fee, update_query(QId, Query, S)))
     end.
 
 calc_query_id(S, Sender, Oracle) ->
@@ -213,7 +213,8 @@ calc_query_id(S, Sender, Oracle) ->
         #account{ ga = #ga{ contract = CId }, key = Key } ->
             #contract{ abi = ABI } = txs_contracts_eqc:get_contract(S, CId),
             GAPK                   = get_pubkey(S, Key),
-            {ok, AuthData}         = txs_ga_eqc:make_auth_data(S, Sender, ABI, good),
+            %% We have already bumped the nonce when we get here :-) So, {bad, -1} is good!
+            {ok, AuthData}         = txs_ga_eqc:make_auth_data(S, Sender, ABI, {bad, -1}),
             GANonce                = aega_meta_tx:auth_id(GAPK, AuthData),
             aeo_query:ga_id(GANonce, OraclePK);
         #account{ key = Key, nonce = Nonce } ->
@@ -250,7 +251,7 @@ response_oracle_valid(S = #{height := Height}, [QueryId, Tx]) ->
     andalso is_oracle(S, Oracle)
     andalso is_account(S, Account)
     andalso maps:get(nonce, Tx) == good
-    andalso check_balance(S, Account,  maps:get(fee, Tx))
+    andalso check_balance(S, Account, maps:get(fee, Tx))
     andalso valid_fee(S, Tx)
     andalso query_query_ttl(S, QueryId) >= Height
     andalso query_response_ttl(S, QueryId) == maps:get(response_ttl, Tx)
@@ -277,7 +278,7 @@ response_oracle_next(S, _Value, [QueryId, Tx] = Args) ->
             #{ fee := Fee } = Tx,
             Q = #query{ fee = QFee, oracle = O } = get_query(S, QueryId),
             reserve_fee(Fee,
-              bump_and_charge(get_oracle_account(S, O), Fee - QFee,
+              bump_and_charge(get_oracle_account(S, O), -QFee, Fee,
                               update_query(QueryId, Q#query{ expired = true }, S)))
     end.
 
@@ -456,7 +457,7 @@ gen_oracle_id(New, Existing, S) ->
                                {New,      gen_account(1, 5, S)})
     end.
 
-gen_oracle_id(S = #{ with_ga := true }, Os) ->
+gen_oracle_id(S = #{ ga := _ }, Os) ->
   gen_elem(Os, [ O || O <- Os, is_ga(S, ?ORACLE(O)) ]);
 gen_oracle_id(S, Os) ->
   gen_elem(Os, [ O || O <- Os, not is_ga(S, ?ORACLE(O)) ]).
@@ -473,7 +474,7 @@ gen_query_id(New, Existing, S) ->
                              {New,      no_query()})
     end.
 
-gen_query_id(S = #{ with_ga := true }, Qs) ->
+gen_query_id(S = #{ ga := _ }, Qs) ->
   gen_freq(Qs, [ {N, Q} || {N, Q} <- Qs, is_ga(S, ?QUERY(Q)) ]);
 gen_query_id(S, Qs) ->
   gen_freq(Qs, [ {N, Q} || {N, Q} <- Qs, not is_ga(S, ?QUERY(Q)) ]).
@@ -487,7 +488,7 @@ weight_query({Q, #query{ expired = false }}) -> {20, Q}.
 
 no_query() -> #query{ id = noshrink(binary(32)), oracle = noshrink(binary(32)) }.
 
-gen_non_oracle_account(New, Existing, S = #{ with_ga := true }) ->
+gen_non_oracle_account(New, Existing, S = #{ ga := _ }) ->
     gen_account(New, Existing, S, fun(A) -> not is_oracle(S, A) andalso is_ga(S, ?ACCOUNT(A)) end);
 gen_non_oracle_account(New, Existing, S) ->
     gen_account(New, Existing, S, fun(A) -> not is_oracle(S, A) andalso not is_ga(S, ?ACCOUNT(A)) end).

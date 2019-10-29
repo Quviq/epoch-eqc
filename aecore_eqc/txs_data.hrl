@@ -24,8 +24,12 @@
 -record(preclaim,{name, salt, height, claimer, protocol, expires_by}).
 -record(claim,{name, height, expires_by, claimer, protocol}).
 -record(auction, {name, height, expires_by, bid, claimer, protocol}).
+
+-record(channel, {id, initiator, responder, amount, round = 1, ch_resv, lockp}).
+
 -define(ACCOUNT(A),  {'$acc', A}).
 -define(KEY(K),      {'$key', K}).
 -define(CONTRACT(C), {'$con', C}).
 -define(ORACLE(O),   {'$orc', O}).
 -define(QUERY(Q),    {'$qry', Q}).
+-define(CHANNEL(C),  {'$chn', C}).

@@ -118,11 +118,21 @@ update_nonce(S, Sender, #{nonce := Nonce} = Tx) ->
   end.
 
 %% -- Accounts handling
-check_balance(S, AccId, Amount) ->
+check_balance(S, AccId, Fee) ->
+  check_balance(S, AccId, 0, Fee).
+
+check_balance(S, AccId, Amount, Fees) ->
+  case maps:is_key(paying_for, S) of
+    true  -> check_balance_(S, AccId, Amount);
+    false -> check_balance_(S, AccId, Amount + Fees)
+  end.
+
+check_balance_(S, AccId, Amount) ->
   case get_account(S, AccId) of
     false   -> false;
     #account{ amount = Amount1 } -> Amount1 >= Amount %% + 100000000000000000000
   end.
+
 
 credit(AccId, Amount, S = #{ accounts := Accounts }) ->
   case get_account(S, AccId) of
@@ -133,23 +143,35 @@ credit(AccId, Amount, S = #{ accounts := Accounts }) ->
       S#{ accounts => Accounts#{NewId => #account{ key = Key, amount = Amount } } }
   end.
 
-charge(Key, Amount, S) -> credit(Key, -Amount, S).
-
 bump_nonce(AccId, S) ->
-  Acc = #account{ nonce = Nonce } = get_account(S, AccId),
-  update_account(S, AccId, Acc#account{ nonce = Nonce + 1 }).
+  Acc = #account{ nonce = Nonce, ga = GA } = get_account(S, AccId),
+  case GA of
+    false -> update_account(S, AccId, Acc#account{ nonce = Nonce + 1 });
+    _     -> S
+  end.
 
 reserve_fee(Fee, S = #{fees := Fees, height := H}) ->
   S#{fees => Fees ++ [{Fee, H}]}.
 
 bump_and_charge(AccId, Fee, S) ->
-  bump_nonce(AccId, charge(AccId, Fee, S)).
+  bump_nonce(AccId, charge(AccId, 0, Fee, S)).
 
-is_account(S = #{ with_ga := true }, A) ->
+bump_and_charge(AccId, Amount, Fee, S) ->
+  bump_nonce(AccId, charge(AccId, Amount, Fee, S)).
+
+charge(Key, Fee, S) ->
+  charge(Key, 0, Fee, S).
+
+charge(Key, Amount, Fee, S = #{ paying_for := Payer }) ->
+  credit(Key, -Amount, credit(Payer, -Fee, S));
+charge(Key, Amount, Fee, S) ->
+  credit(Key, -(Amount + Fee), S).
+
+is_account(S = #{ ga := true }, A) ->
   false /= get_account(S, A);
 is_account(S, A) ->
   case get_account(S, A) of
-    #account{ ga = #ga{} } -> false;
+    #account{ ga = #ga{} } -> lists:member(A, maps:get(ga, S, []));
     _                      -> true
   end.
 
