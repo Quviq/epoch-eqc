@@ -67,7 +67,12 @@ more_instructions() ->
      #instr{ op = 'RETURN', args = [] },
      #instr{ op = 'RETURNR', args = [{in, any, any}] },
      #instr{ op = 'CALL_R', args = [{in, immediate, integer}, {in, any, contract}, {in, any, integer}] },
-     #instr{ op = 'CALL_GR', args = [{in, immediate, integer}, {in, any, contract}, {in, any, integer}, {in, any, integer}] }
+     #instr{ op = 'CALL_GR', args = [{in, immediate, integer}, {in, any, contract}, {in, any, integer}, {in, any, integer}] },
+     #instr{ op = 'LOG0', args = [{in, any, string}]},
+     #instr{ op = 'LOG1', args = [{in, any, string}, {in, any, any}]},
+     #instr{ op = 'LOG2', args = [{in, any, string}, {in, any, any}, {in, any, any}]},
+     #instr{ op = 'LOG3', args = [{in, any, string}, {in, any, any}, {in, any, any}, {in, any, any}]},
+     #instr{ op = 'LOG4', args = [{in, any, string}, {in, any, any}, {in, any, any}, {in, any, any}, {in, any, any}]}
     ].
 
 spec_overrides() ->
@@ -163,11 +168,17 @@ instruction_spec(Op) ->
 
 -type frame() :: #frame{} | #r_frame{}.
 
+-record(event, {contract :: pubkey(),
+                payload  :: string(),
+                indices  :: [integer()] }).
+-type event() :: #event{}.
+
 -record(state, { stack      = []    :: [value()],
                  vars       = #{}   :: store(),
                  store      = #{}   :: store(),
                  args       = #{}   :: store(),
                  failed     = false :: boolean() | skip,
+                 events     = []    :: [event()],
                  chain_env  = #{}   :: chain_env(),
                  call_stack = []    :: [frame()] }).
 
@@ -227,6 +238,38 @@ on_account(Pubkey, Field, Fun, S = #state{ chain_env = Env = #{ accounts := Acco
 -spec set_store(pubkey(), store(), state()) -> state().
 set_store(Pubkey, Store, S) ->
     on_account(Pubkey, store, fun(_) -> Store end, S).
+
+-spec add_event(string(), [integer()], state()) -> state().
+add_event(Payload, Indices, S) ->
+    Event = #event{ contract = chain_env(S, address),
+                    payload  = Payload,
+                    indices  = lists:map(fun event_index_/1, Indices) },
+    S#state{ events = [Event | S#state.events] }.
+
+-spec valid_event_index(value()) -> boolean().
+valid_event_index(V) ->
+    case event_index(V) of
+        {ok, _} -> true;
+        false   -> false
+    end.
+
+event_index_(V) ->
+    {ok, N} = event_index(V),
+    N.
+
+event_index(N) when is_integer(N), 0 =< N, N < 1 bsl 256 -> {ok, N};
+event_index(true) -> {ok, 1};
+event_index(false) -> {ok, 0};
+event_index({address, <<N:256>>}) -> {ok, N};
+event_index({contract, <<N:256>>}) -> {ok, N};
+event_index({oracle, <<N:256>>}) -> {ok, N};
+event_index({oracle_query, <<N:256>>}) -> {ok, N};
+event_index({bytes, Bin}) when byte_size(Bin) =< 32 ->
+    Bytes = byte_size(Bin),
+    <<N:Bytes/unit:8>> = Bin,
+    {ok, N};
+event_index({bits, N}) -> event_index(N);
+event_index(_) -> false.
 
 push_call(S, N) -> push_call_stack(S, false, N).
 push_tailcall(S, N) -> push_call_stack(S, true, N).
@@ -420,7 +463,8 @@ check_mode(in, any, _)                    -> true;
 check_mode(in, immediate, {immediate, _}) -> true;
 check_mode(in, immediate, _)              -> false.
 
--spec match_type(Need :: type(), Have :: type()) -> boolean().
+-spec match_type(Need :: type() | [type()], Have :: type()) -> boolean().
+match_type(Ts, T) when is_list(Ts)           -> lists:any(fun(S) -> match_type(S, T) end, Ts);
 match_type(T, T)                             -> true;
 match_type(_, void)                          -> false;
 match_type(_, any)                           -> true;
@@ -664,6 +708,11 @@ eval_instr(S, 'RETURN', []) -> ?WhenS(false, S, []);
 eval_instr(S, 'RETURNR', [V]) ->
     ?WhenS(S#state.call_stack /= [],
            pop_call_stack(S, V), []);
+eval_instr(S, LOG, [Payload | Indices]) when LOG == 'LOG0'; LOG == 'LOG1';
+                                             LOG == 'LOG2'; LOG == 'LOG3'; LOG == 'LOG4' ->
+    ?WhenS(Payload /= <<>> andalso   %% BUG: empty payload crashes VM
+           lists:all(fun valid_event_index/1, Indices),
+           add_event(Payload, Indices, S), []);
 eval_instr(S, Op, Vs)           -> {S, [eval_instr(Op, Vs)]}.
 
 -spec step_instr(state(), instr()) -> state().
@@ -795,6 +844,12 @@ args_g(S, CALL_R, _) when CALL_R == 'CALL_R'; CALL_R == 'CALL_GR' ->
               [?constrained(_, choose(?MinGasCap, ?MaxBlockGas),
                             V, ?MinGasCap =< V andalso V =< ?MaxBlockGas)
                || CALL_R == 'CALL_GR' ]);
+args_g(S, LOG, _) when LOG == 'LOG1'; LOG == 'LOG2'; LOG == 'LOG3'; LOG == 'LOG4' ->
+    Ar = case LOG of 'LOG1' -> 1; 'LOG2' -> 2; 'LOG3' -> 3; 'LOG4' -> 4 end,
+    args_g(S, [{in, any, [string, bytes]}] ++
+              lists:duplicate(Ar,
+                ?constrained(_, event_index_g(),
+                             V, valid_event_index(V))));
 args_g(S, _Op, Spec) -> args_g(S, Spec).
 
 map_args_g(S, Rest) ->
@@ -880,9 +935,13 @@ instantiate_any(T) -> return(T).
 
 value_g() -> value_g(any).
 
+
+value_g(Types) when is_list(Types) ->
+    ?LET(Type, elements(Types), value_g(Type));
 value_g(Type) ->
     ?LET(Type1, instantiate_any(Type), value1_g(Type1)).
 
+value1_g(nat)          -> nat();
 value1_g(integer)      -> int();
 value1_g(boolean)      -> bool();
 value1_g(address)      -> {address, pubkey_g()};
@@ -918,7 +977,11 @@ value1_g(variant)      ->
 %% value1_g(typerep)      -> {todo, typerep};
 value1_g(void)         -> void.
 
-no_todo(X) -> not contains(todo, X).
+event_payload_g() -> value_g([string, bytes]).
+
+event_index_g()   ->
+    ?SUCHTHAT(V, value_g([nat, boolean, address, bits, bytes, contract, oracle, oracle_query]),
+              valid_event_index(V)).
 
 timestamp_g() -> choose(1550000000000, 1900000000000).
 
@@ -1323,23 +1386,25 @@ run1(Env0 = #{ address := Pubkey }, Cache, Function, Args, Trees) ->
     case timer:tc(fun() -> aefa_fate:run_with_cache(Spec, Env, Cache) end) of
         {Time, {ok, ES}} ->
             Res    = aefa_engine_state:accumulator(ES),
+            Events = aefa_engine_state:logs(ES),
             Trees1 = aefa_fate:final_trees(ES),
-            {Res, Trees1, stats(Env0, Time, ES)};
+            {Res, lists:reverse(Events), Trees1, stats(Env0, Time, ES)};
         {Time, {ErrTag, Err, ES}} when ErrTag == error; ErrTag == revert ->
             {{ErrTag, binary_to_list(Err)}, stats(Env0, Time, ES)}
     end.
 
 run(Env, Cache, Calls) ->
-    run(Env, Cache, Calls, make_trees(Env), #{ gas_per_us => 0.001, gas_used => 0, time => 0 }, []).
+    run(Env, Cache, Calls, make_trees(Env), #{ gas_per_us => 0.001, gas_used => 0, time => 0 }, [], []).
 
-run(_, _, [], _, Stats, Acc) -> {lists:reverse(Acc), Stats};
-run(Env0, Cache, [Call | Calls], Trees, Stats, Acc) ->
+run(_, _, [], _, Stats, Events, Acc) ->
+    {lists:reverse(Acc), lists:append(lists:reverse(Events)), Stats};
+run(Env0, Cache, [Call | Calls], Trees, Stats, Events, Acc) ->
     Env = Env0#{ caller     => Call#call.caller,
                  origin     => Call#call.caller,
                  address    => Call#call.contract,
                  call_value => Call#call.value },
-    {Res, Trees1, Stats1} = run1(Env, Cache, Call#call.function, Call#call.args, Trees),
-    run(Env0, Cache, Calls, Trees1, add_stats(Stats, Stats1), [Res | Acc]).
+    {Res, Events1, Trees1, Stats1} = run1(Env, Cache, Call#call.function, Call#call.args, Trees),
+    run(Env0, Cache, Calls, Trees1, add_stats(Stats, Stats1), [Events1 | Events], [Res | Acc]).
 
 %% -- Property ---------------------------------------------------------------
 
@@ -1388,17 +1453,19 @@ prop_instr() ->
             aggregate(fun check_instrs/1, UsedInstrs,
             try
                 Code1 = maps:map(fun(_, FCode) -> aeb_fate_code:deserialize(aeb_fate_code:serialize(FCode)) end, Code),
-                {Res, Stats} = run(ChainEnv, Code1, Calls),
+                {Res, Events, Stats} = run(ChainEnv, Code1, Calls),
                 ?WHENFAIL([ io:format("Deserialized fcode for ~p\n~s", [Pubkey, pp_fcode(FCode1)])
                             || {Pubkey, FCode1} <- maps:to_list(Code1),
                                FCode1 /= maps:get(Pubkey, Code) ],
                 measure(block_time, 6 / maps:get(gas_per_us, Stats),
                 measure(bb_size, lists:map(fun length/1, BBs),
+                measure(n_calls, length([ 1 || {set, _, {call, _, new_call, _}} <- Instrs ]),
                 collect(with_title(gas_used),   maps:get(gas_used, Stats) div 1000 * 1000,
                 aggregate(lists:map(fun classify/1, Res),
                 conjunction([ {result,   check_result(Res, RetValues)},
+                              {events,   check_events(Events, FinalState#state.events)},
                               {state,    check_state(FinalState)},
-                              {gas_cost, check_gas_cost(Stats)} ]))))))
+                              {gas_cost, check_gas_cost(Stats)} ])))))))
             catch _:Err ->
                 equals(ok, {'EXIT', Err, erlang:get_stacktrace()})
             end)))
@@ -1460,11 +1527,14 @@ check_result({error, Err}, Val) ->
     equals({error, Err}, Val));
 check_result(Have, Want) -> equals(Have, Want).
 
-    %% case Err of
-    %%     "Undefined var" ++ _ -> equals(error, Val);
-    %%     "Type error" ++ _    -> equals(error, Val);
-    %%     _                    -> true
-    %% end);
+check_events(Have, Want) ->
+    Ix = fun(<<N:256>>)            -> N;
+            (N) when is_integer(N) -> N;
+            (X)                    -> {bad_ix, X} end,
+    Ev = fun({C, Is, P})   -> #{ contract => C, payload => P, indices => lists:map(Ix, Is) } end,
+    Have1 = [ Ev(H) || H <- Have ],
+    Want1 = [ Ev({C, Is, P}) || #event{ contract = C, payload = P, indices = Is } <- lists:reverse(Want) ],
+    equals(Have1, Want1).
 
 check_state(S) ->
     ?WHENFAIL(io:format("Bad state:\n~p\nbecause", [S]),
