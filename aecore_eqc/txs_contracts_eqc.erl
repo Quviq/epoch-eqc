@@ -67,6 +67,8 @@ check_contract_opts(?FORTUNA_PROTOCOL_VSN, ?SOPHIA_FORTUNA,   aevm_sophia_2, abi
 check_contract_opts(?FORTUNA_PROTOCOL_VSN, ?SOPHIA_FORTUNA,   aevm_sophia_3, abi_aevm_1) -> true;
 check_contract_opts(?LIMA_PROTOCOL_VSN,    ?SOPHIA_LIMA_AEVM, aevm_sophia_4, abi_aevm_1) -> true;
 check_contract_opts(?LIMA_PROTOCOL_VSN,    ?SOPHIA_LIMA_FATE, fate_sophia_1, abi_fate_1) -> true;
+check_contract_opts(?IRIS_PROTOCOL_VSN,    ?SOPHIA_LIMA_AEVM, aevm_sophia_4, abi_aevm_1) -> true;
+check_contract_opts(?IRIS_PROTOCOL_VSN,    ?SOPHIA_LIMA_FATE, fate_sophia_1, abi_fate_1) -> true;
 check_contract_opts(_, _, _, _) -> false.
 
 contract_create_tx(S, Args) ->
@@ -335,7 +337,7 @@ gen_contract_opts(?FORTUNA_PROTOCOL_VSN) ->
     ?LET(VM, frequency([{60, aevm_sophia_3}, {39, aevm_sophia_2}, {1, elements([22, vm_solidity, aevm_sophia_1, aevm_sophia_4])}]),
     ?LET(ABI, frequency([{99, abi_aevm_1}, {1, elements([abi_fate_1, abi_raw])}]),
          {Compiler, VM, ABI})));
-gen_contract_opts(?LIMA_PROTOCOL_VSN) ->
+gen_contract_opts(Vsn) when Vsn == ?LIMA_PROTOCOL_VSN; Vsn == ?IRIS_PROTOCOL_VSN ->
     ?LET(Kind, elements([fate, aevm]),
          gen_contract_opts(?LIMA_PROTOCOL_VSN, Kind)).
 
@@ -413,7 +415,7 @@ contract_gas(_, _, _, _) -> 1000.
 
 contract_tx_fee(S, Type, Name, ABI) when is_atom(ABI) ->
   contract_tx_fee(S, Type, Name, abi_to_int(ABI));
-contract_tx_fee(#{with_ga := true}, Type, _Name, ABI) ->
+contract_tx_fee(#{ ga := _, protocol := P }, Type, _Name, ABI) when P < ?IRIS_PROTOCOL_VSN ->
   base_gas(Type, ABI);
 contract_tx_fee(_S, Type, Name, ABI) ->
   base_gas(Type, ABI) + 20 * size_gas(Type, Name, ABI).
