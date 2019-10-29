@@ -988,8 +988,8 @@ timestamp_g() -> choose(1550000000000, 1900000000000).
 balance_g() ->
     oneof([0, choose(0, 1000000)]).
 
--define(NumAccounts,  10).
--define(NumContracts, 10).
+-define(NumAccounts,  5).
+-define(NumContracts, 5).
 
 chain_env_g() ->
     ?LET({Accounts, Contracts}, {vector(?NumAccounts, pubkey_g()), vector(?NumContracts, pubkey_g())},
@@ -1017,14 +1017,12 @@ state_g() ->
 
 instr_weight(S, Op) when Op == 'INCA'; Op == 'DECA' ->
     case S#state.stack of
-        [N | _] when is_integer(N) -> 5;
+        [N | _] when is_integer(N) -> 1;
         _ -> 0
     end;
-instr_weight(_, Op) ->
-    try eval_instr(Op, undef) of
-        todo -> 0;
-        _    -> 1
-    catch _:_ -> 1 end.
+instr_weight(S, 'RETURN') -> if S#state.stack /= [] -> 3; true -> 0 end;
+instr_weight(_, 'RETURNR') -> 3;
+instr_weight(_, _) -> 1.
 
 instr_args(S) ->
     ?LET(#instr{ op = Op, args = ArgsSpec }, frequency([ {instr_weight(S, I#instr.op), I}
@@ -1433,7 +1431,7 @@ prop_instr() ->
     in_parallel(
     ?LET(Verbose, parameter(verbose, false),
     ?FORALL(ChainEnv, chain_env_g(),
-    ?FORALL(Instrs, commands(?MODULE, initial_state(ChainEnv)),
+    ?FORALL(Instrs, more_commands(20, commands(?MODULE, initial_state(ChainEnv))),
     begin
         FinalState0 = state_after(Instrs),
         ?FORALL(RetInstrs, return_instrs(FinalState0),
