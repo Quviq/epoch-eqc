@@ -21,6 +21,9 @@
 -record(oracle, {account, qfee, oracle_ttl}).
 -record(query,  {sender, oracle, id, fee, response_ttl, query_ttl, response_due, expired = false}).
 
+-record(preclaim,{name, salt, height, claimer, protocol, expires_by}).
+-record(claim,{name, height, expires_by, claimer, protocol}).
+-record(auction, {name, height, expires_by, bid, claimer, protocol}).
 -define(ACCOUNT(A),  {'$acc', A}).
 -define(KEY(K),      {'$key', K}).
 -define(CONTRACT(C), {'$con', C}).

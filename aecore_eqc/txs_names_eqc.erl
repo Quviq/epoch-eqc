@@ -19,11 +19,6 @@
                     "ddddddddddddddd", "eeeeeeeeeeeeeeeee", "ffffffffffffffff"
                    ]).
 
--record(preclaim,{name, salt, height, claimer, protocol, expires_by}).
--record(claim,{name, height, expires_by, claimer, protocol}).
--record(auction, {name, height, expires_by, bid, claimer, protocol}).
-
-
 %% -- State and state functions ----------------------------------------------
 initial_state(S) ->
   S#{preclaims => [],
@@ -148,12 +143,12 @@ ns_claim_valid(S = #{height := Height}, [Account, #{name := Name} = Tx]) ->
          {valid_name_fee, is_valid_name_fee(Protocol, Name, maps:get(name_fee, Tx))},
          {valid_bid, is_valid_bid(Protocol, S, Name, maps:get(name_fee, Tx))}]).
 
-ns_claim_tx(S = #{ protocol := P }, [Account, Tx]) ->
-  FixTx = case maps:get(name_fee, Tx) == prelima orelse P < ?LIMA_PROTOCOL_VSN of
-            true -> maps:remove(name_fee, Tx);
-            false -> Tx
-          end,
-  Tx1       = update_nonce(S, Account, FixTx),
+ns_claim_tx(S, [Account, Tx]) ->
+  %% FixTx = case maps:get(name_fee, Tx) == prelima orelse P < ?LIMA_PROTOCOL_VSN of
+  %%           true -> maps:remove(name_fee, Tx);
+  %%           false -> Tx
+  %%         end,
+  Tx1       = update_nonce(S, Account, Tx),
   AccountId = aeser_id:create(account, get_account_key(S, Account)),
   aens_claim_tx:new(Tx1#{ account_id => AccountId }).
 
@@ -541,8 +536,8 @@ is_claimed_name(#{claims := Names, height := Height}, Name) ->
 is_protected(S, Name) ->
   proplists:get_value(Name, maps:get(protected_names, S)) =/= undefined.
 
-is_valid_name_fee(Protocol, _Name, _NameFee) when Protocol < 4 ->
-  true;  %% we remove the field part
+is_valid_name_fee(Protocol, _Name, NameFee) when Protocol < ?LIMA_PROTOCOL_VSN ->
+  NameFee == prelima;
 is_valid_name_fee(Protocol, Name, NameFee) ->
   is_integer(NameFee) andalso
   NameFee >= name_claim_fee(Name, Protocol).
@@ -598,9 +593,9 @@ gen_name(P) ->
        return(iolist_to_binary(lists:join(".", [SubName] ++ [Suffix])))).
 
 gen_registrar(P) when P < ?LIMA_PROTOCOL_VSN ->
-  weighted_default({49, "test"}, {1, "aet"});
+  weighted_default({49, "test"}, {1, "chain"});
 gen_registrar(_P) ->
-  weighted_default({49, "aet"}, {1, "test"}).
+  weighted_default({49, "chain"}, {1, "test"}).
 
 gen_subname() ->
   ?LET(NFs, frequency([{1, non_empty(list(elements(?NAMEFRAGS)))},

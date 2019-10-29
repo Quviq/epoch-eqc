@@ -108,11 +108,6 @@ mine_features(_S, [_B], _Res) ->
   [].
 
 %% --- Operation: tx ---
--define(pre(Tx), list_to_atom(lists:concat([Tx, "_pre"]))).
--define(tx(Tx), list_to_atom(lists:concat([Tx, "_tx"]))).
--define(next(Tx), list_to_atom(lists:concat([Tx, "_next"]))).
--define(post(Tx), list_to_atom(lists:concat([Tx, "_post"]))).
--define(features(Tx), list_to_atom(lists:concat([Tx, "_features"]))).
 
 tx_pre(S) ->
   maps:is_key(accounts, S).

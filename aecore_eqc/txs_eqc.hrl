@@ -11,4 +11,11 @@
                     get_account_key/2, get_pubkey/2, get_account_nonce/2,
                     update_account/3, resolve_account/2]).
 
+-define(tx(Tx), list_to_atom(lists:concat([Tx, "_tx"]))).
+-define(next(Tx), list_to_atom(lists:concat([Tx, "_next"]))).
+-define(pre(Tx), list_to_atom(lists:concat([Tx, "_pre"]))).
+-define(post(Tx), list_to_atom(lists:concat([Tx, "_post"]))).
+-define(valid(Tx), list_to_atom(lists:concat([Tx, "_valid"]))).
+-define(features(Tx), list_to_atom(lists:concat([Tx, "_features"]))).
+
 -include("txs_data.hrl").

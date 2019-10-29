@@ -23,15 +23,13 @@ ga_attach_pre(S) ->
   length(non_ga_accounts(S)) > 0.
 
 ga_attach_args(#{protocol := P} = S) ->
-  %% ?LET(Account, ?LET(A, elements(non_ga_accounts(S)), ?ACCOUNT(A)), %gen_account(1, 49, S),
   ?LET(Account, gen_account(1, 49, S),
   ?LET(Name, gen_auth_contract(),
   ?LET({Compiler, VM, ABI}, gen_contract_opts(P),
   begin
-    %% io:format("Account: ~p (~p)\n", [Account, non_ga_accounts(S)]),
     TxFee   = contract_tx_fee(S, create, Name, ABI) + 32 * 20,
     GasUsed = contract_gas(Name, init, ABI, P),
-    SymName = list_to_atom(lists:concat(["contract_", maps:size(maps:get(contracts, S, []))])),
+    SymName = next_id(contract),
     [Account, Name, SymName, Compiler,
      #{vm_version  => VM,
        abi_version => ABI,
@@ -86,11 +84,9 @@ ga_attach_features(S, Args, Res) ->
   [{correct, false} || not Correct].
 
 %% --- Operation: ga_meta ---
--define(valid(Tx), list_to_atom(lists:concat([Tx, "_valid"]))).
--define(tx(Tx), list_to_atom(lists:concat([Tx, "_tx"]))).
--define(next(Tx), list_to_atom(lists:concat([Tx, "_next"]))).
--define(WGA(S), S#{ with_ga => true }).
--define(NO_WGA(S), maps:remove(with_ga, S)).
+-define(WGA(S),     S#{ ga => true }).
+-define(WGA(GA, S), wga(GA, S)).
+-define(NO_WGA(S),  not_wga(S)).
 
 ga_meta_pre(S) ->
   length(ga_accounts(S)) > 0.
