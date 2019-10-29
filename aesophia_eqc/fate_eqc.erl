@@ -1115,6 +1115,20 @@ push_code(CS, TailCall, Fun, Args) ->
 set_call_result(#code_st{ calls = [Call | Calls] } = S, V) ->
     S#code_st{ calls = [Call#call{ result = V } | Calls] }.
 
+-define(RetTypePlaceHolder, place_holder).
+
+update_result_type(#code_st{ bbs = [{Ref, [Call | Rest]} | BBs] } = S, Type) ->
+    RetType = {immediate, typerep(Type)},
+    NewCall =
+        case Call of
+            {'CALL_R', Remote, Fun, ArgTypes, ?RetTypePlaceHolder, Value} ->
+                {'CALL_R', Remote, Fun, ArgTypes, RetType, Value};
+            {'CALL_GR', Remote, Fun, ArgTypes, ?RetTypePlaceHolder, Value, GasCap} ->
+                {'CALL_GR', Remote, Fun, ArgTypes, RetType, Value, GasCap};
+            {'CALL', _} -> Call
+        end,
+    S#code_st{ bbs = [{Ref, [NewCall | Rest]} | BBs] }.
+
 pop_code(#code_st{ prev_state  = S,
                    current_fun = Fun,
                    arg_types   = ArgTypes } = CS, V, RetType) ->
@@ -1134,7 +1148,7 @@ pop_code(#code_st{ prev_state  = S,
         false ->
             case CallStack == [] of %% top-call?
                 true  -> set_call_result(CS2, V);
-                false -> CS2
+                false -> update_result_type(CS2, RetType)
             end;
         true  -> pop_code(CS2, V, RetType)
     end.
@@ -1154,10 +1168,10 @@ do_call_instr(CS = #code_st{ ref = Ref, prev_state = S, instrs = Acc, bbs = BBs 
             'CALL' -> {CALL, FunSym};
             'CALL_T' -> {CALL, FunSym};
             _ ->
-                ArgTypes  = typerep(infer_type({tuple, list_to_tuple(FunArgs)})),
-                RetType   = typerep(any), %% Filled in on return
+                ArgTypes = typerep(infer_type({tuple, list_to_tuple(FunArgs)})),
+                RetType  = ?RetTypePlaceHolder, %% Filled in on return
                 [Remote | Rest] = Args,
-                list_to_tuple([CALL, Remote, FunSym, {immediate, ArgTypes}, {immediate, RetType} | Rest])
+                list_to_tuple([CALL, Remote, FunSym, {immediate, ArgTypes}, RetType | Rest])
         end,
     BBs1    = [{Ref, [Instr | Acc]} | BBs],
     CS1     = CS#code_st{ ref = Ref1, instrs = [], bbs = BBs1, fun_ix = Ix + 1 },
