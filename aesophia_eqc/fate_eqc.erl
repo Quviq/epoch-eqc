@@ -1463,7 +1463,7 @@ build_fcode(CS, [{set, X, Call = {call, ?MODULE, instr, Args}} | Instrs]) ->
 make_store(undefined) -> aefa_stores:initial_contract_store();
 make_store(Store)     -> Store.
 
-make_trees(#{ accounts := Accounts, names := Names }) ->
+make_trees(Cache, #{ accounts := Accounts, names := Names }) ->
     %% All contracts and the caller must have accounts
     Trees = aec_trees:new_without_backend(),
     ATrees = lists:foldl(fun({Pubkey, #{balance := Balance}}, Acc) ->
@@ -1472,7 +1472,8 @@ make_trees(#{ accounts := Accounts, names := Names }) ->
                          end, aec_trees:accounts(Trees), maps:to_list(Accounts)),
     CTrees = maps:fold(fun(_,      #{ creator := none    }, Acc) -> Acc;
                           (Pubkey, #{ creator := Creator }, Acc) ->
-                                 Contract0 = aect_contracts:new(Creator, 1, #{vm => 5, abi => 3}, <<>>, 0),
+                                 Code      = maps:get(Pubkey, Cache, <<>>),
+                                 Contract0 = aect_contracts:new(Creator, 1, #{vm => 5, abi => 3}, Code, 0),
                                  Contract  = aect_contracts:set_state(aefa_stores:initial_contract_store(),
                                              aect_contracts:set_pubkey(Pubkey, Contract0)),
                                  aect_state_tree:insert_contract(Contract, Acc)
@@ -1499,10 +1500,11 @@ make_trees(#{ accounts := Accounts, names := Names }) ->
                                ATrees),
         aect_state_tree:commit_to_db(CTrees)).
 
-call_spec(#{ address := Contract, call_value := Value, gas_limit := GasLimit }, Function, Args, Store) ->
+call_spec(#{ address := Contract, call_value := Value, gas_limit := GasLimit }, Code, Function, Args, Store) ->
     Fun = aeb_fate_code:symbol_identifier(Function),
     #{ contract => Contract,
        gas      => GasLimit,
+       code     => Code,
        value    => Value,
        call     => aeb_fate_encoding:serialize({tuple, {Fun, {tuple, list_to_tuple(Args)}}}),
        store    => make_store(Store) }.
@@ -1553,9 +1555,10 @@ add_stats(#{ gas_used   := GasUsed1,
 run1(Env0 = #{ address := Pubkey }, Cache, Function, Args, Trees) ->
     {value, Contract} = aect_state_tree:lookup_contract(Pubkey, aec_trees:contracts(Trees)),
     Store = aect_contracts:state(Contract),
-    Spec  = call_spec(Env0, Function, Args, Store),
+    #{ byte_code := Code } = aect_sophia:deserialize(maps:get(Pubkey, Cache)),
+    Spec  = call_spec(Env0, Code, Function, Args, Store),
     Env   = call_env(Env0, Trees),
-    case timer:tc(fun() -> aefa_fate:run_with_cache(Spec, Env, Cache) end) of
+    case timer:tc(fun() -> aefa_fate:run(Spec, Env) end) of
         {Time, {ok, ES}} ->
             Res    = aefa_engine_state:accumulator(ES),
             Events = aefa_engine_state:logs(ES),
@@ -1566,7 +1569,7 @@ run1(Env0 = #{ address := Pubkey }, Cache, Function, Args, Trees) ->
     end.
 
 run(Env, Cache, Calls) ->
-    run(Env, Cache, Calls, make_trees(Env), #{ gas_per_us => 0.001, gas_used => 0, time => 0 }, [], []).
+    run(Env, Cache, Calls, make_trees(Cache, Env), #{ gas_per_us => 0.001, gas_used => 0, time => 0 }, [], []).
 
 run(_, _, [], _, Stats, Events, Acc) ->
     {lists:reverse(Acc), lists:append(lists:reverse(Events)), Stats};
@@ -1624,13 +1627,10 @@ prop_instr() ->
             aggregate(UsedInstrs,
             aggregate(fun check_instrs/1, UsedInstrs,
             try
-                Code1 = maps:map(fun(_, FCode) -> aeb_fate_code:deserialize(aeb_fate_code:serialize(FCode)) end, Code),
-                {Res, Events, Stats} = run(ChainEnv, Code1, Calls),
+                SerCode = maps:map(fun(_, FCode) -> serialize(FCode) end, Code),
+                {Res, Events, Stats} = run(ChainEnv, SerCode, Calls),
                 NCalls  = length([ 1 || {set, _, {call, _, new_call, _}} <- Instrs ]),
                 NInstrs = length([ 1 || {set, _, {call, _, instr, _}} <- Instrs ]),
-                ?WHENFAIL([ io:format("Deserialized fcode for ~p\n~s", [Pubkey, pp_fcode(FCode1)])
-                            || {Pubkey, FCode1} <- maps:to_list(Code1),
-                               FCode1 /= maps:get(Pubkey, Code) ],
                 measure(block_time, 6 / maps:get(gas_per_us, Stats),
                 measure(bb_size___, lists:map(fun length/1, BBs),
                 measure(n_calls___, NCalls,
@@ -1640,7 +1640,7 @@ prop_instr() ->
                 conjunction([ {result,   check_result(Res, RetValues)},
                               {events,   check_events(Events, FinalState#state.events)},
                               {state,    check_state(FinalState)},
-                              {gas_cost, check_gas_cost(Stats)} ]))))))))
+                              {gas_cost, check_gas_cost(Stats)} ])))))))
             catch _:Err ->
                 equals(ok, {'EXIT', Err, erlang:get_stacktrace()})
             end)))
@@ -1648,6 +1648,12 @@ prop_instr() ->
             equals(ok, {'EXIT', Err, erlang:get_stacktrace()})
         end))
     end)))).
+
+serialize(FCode) ->
+    aect_sophia:serialize(#{source_hash => <<0:256>>,
+                            byte_code   => aeb_fate_code:serialize(FCode),
+                            type_info   => [],
+                            payable     => true}, 3).
 
 get_return_value(S, {set, _, {call, ?MODULE, instr, [{'RETURN', []}]}}) ->
     get_value(S, {stack, 0});
