@@ -41,7 +41,8 @@ instructions() ->
                opname    := Op
              } <- aeb_fate_generate_ops:get_ops(),
             [a] == lists:usort(Format),
-            length(Format) == tuple_size(ArgTypes) + 1
+            length(Format) == tuple_size(ArgTypes) + 1,
+            not lists:member(Op, ['AENS_RESOLVE'])
         ] ++ more_instructions()).
 
 more_instructions() ->
@@ -72,7 +73,8 @@ more_instructions() ->
      #instr{ op = 'LOG1', args = [{in, any, string}, {in, any, any}]},
      #instr{ op = 'LOG2', args = [{in, any, string}, {in, any, any}, {in, any, any}]},
      #instr{ op = 'LOG3', args = [{in, any, string}, {in, any, any}, {in, any, any}, {in, any, any}]},
-     #instr{ op = 'LOG4', args = [{in, any, string}, {in, any, any}, {in, any, any}, {in, any, any}, {in, any, any}]}
+     #instr{ op = 'LOG4', args = [{in, any, string}, {in, any, any}, {in, any, any}, {in, any, any}, {in, any, any}]},
+     #instr{ op = 'AENS_RESOLVE', args = [{out, any, variant}, {in, any, string}, {in, any, string}, {in, immediate, typerep} ] }
     ].
 
 spec_overrides() ->
@@ -102,6 +104,7 @@ fix_type(T)         -> T.
 black_listed('MICROBLOCK')           -> true;   %% Not implemented
 black_listed('DUP')                  -> true;   %% Bugged
 black_listed('GAS')                  -> true;   %% Not modelling gas costs
+black_listed('INT_TO_ADDR')          -> true;
 black_listed('ORACLE_REGISTER')      -> true;   %% TODO: Oracle/AENS/Crypto
 black_listed('ORACLE_QUERY')         -> true;
 black_listed('ORACLE_GET_ANSWER')    -> true;
@@ -109,7 +112,6 @@ black_listed('ORACLE_GET_QUESTION')  -> true;
 black_listed('ORACLE_QUERY_FEE')     -> true;
 black_listed('ORACLE_CHECK')         -> true;
 black_listed('ORACLE_CHECK_QUERY')   -> true;
-black_listed('AENS_RESOLVE')         -> true;
 black_listed('VERIFY_SIG')           -> true;
 black_listed('VERIFY_SIG_SECP256K1') -> true;
 black_listed('ECVERIFY_SECP256K1')   -> true;
@@ -227,6 +229,12 @@ get_creator(S, A) -> get_account(S, A, creator, void).
 is_contract(S, A) ->
     get_account(S, A, creator, none) /= none.
 
+resolve_name(S, Name, Key) ->
+    case maps:get(Name, chain_env(S, names), undefined) of
+        #{Key := Val} -> Val;
+        _             -> not_found
+    end.
+
 all_accounts(S) -> maps:keys(chain_env(S, accounts)).
 all_contracts(S) ->
     [ Ct || {Ct, #{creator := Cr}} <- maps:to_list(chain_env(S, accounts)), Cr /= none ].
@@ -270,6 +278,27 @@ event_index({bytes, Bin}) when byte_size(Bin) =< 32 ->
     {ok, N};
 event_index({bits, N}) -> event_index(N);
 event_index(_) -> false.
+
+valid_aens_name_char($-) -> true;
+valid_aens_name_char(C) ->
+    lists:any(fun({A, B}) -> A =< C andalso C =< B end,
+              [{$0, $9}, {$a, $z}, {$A, $Z}]).
+
+valid_aens_name_part(<<>>) -> false;
+valid_aens_name_part(<<_, _, "--", _/binary>>) -> false;
+valid_aens_name_part(Name) ->
+    Chars = binary_to_list(Name),
+    lists:all(fun valid_aens_name_char/1, Chars) andalso
+    hd(Chars) /= $- andalso lists:last(Chars) /= $-.
+
+valid_aens_name(Name) when is_binary(Name) ->
+    case binary:split(Name, <<".">>) of
+        [Part, Ext] ->
+            valid_aens_name_part(Part) andalso
+            lists:member(Ext, [<<"chain">>, <<"test">>]);
+        _ -> false
+    end;
+valid_aens_name(_) -> false.
 
 push_call(S, N) -> push_call_stack(S, false, N).
 push_tailcall(S, N) -> push_call_stack(S, true, N).
@@ -428,6 +457,7 @@ is_variant(_, _) -> false.
 
 %% Check that an instruction can be executed in the given state.
 -spec check_instr(state(), instr()) -> boolean().
+check_instr(_, {'AENS_RESOLVE', _}) -> true;
 check_instr(S, {Op, Args}) ->
     case get_instr(Op) of
         undefined ->
@@ -755,6 +785,17 @@ eval_instr(S, LOG, [Payload | Indices]) when LOG == 'LOG0'; LOG == 'LOG1';
     ?WhenS(Payload /= <<>> andalso   %% BUG: empty payload crashes VM
            lists:all(fun valid_event_index/1, Indices),
            add_event(Payload, Indices, S), []);
+eval_instr(S, 'AENS_RESOLVE', [Name, Key, {typerep, Type}]) ->
+    None = {variant, [0, 1], 0, {}},
+    Some = fun(X) -> {variant, [0, 1], 1, {X}} end,
+    ?WhenS(valid_aens_name(Name), S,
+    case resolve_name(S, Name, Key) of
+        not_found -> [None];
+        Val -> case has_type(Val, Type) of
+                   true  -> [Some(Val)];
+                   false -> [None]
+               end
+    end);
 eval_instr(S, Op, Vs)           -> {S, [eval_instr(Op, Vs)]}.
 
 -spec step_instr(state(), instr()) -> state().
@@ -892,6 +933,14 @@ args_g(S, LOG, _) when LOG == 'LOG1'; LOG == 'LOG2'; LOG == 'LOG3'; LOG == 'LOG4
               lists:duplicate(Ar,
                 ?constrained(_, event_index_g(),
                              V, valid_event_index(V))));
+args_g(S, 'AENS_RESOLVE', _) ->
+    args_g(S, [{out, any, variant},
+               ?constrained(_, aens_name_g(S),
+                            V, lists:member(V, maps:keys(chain_env(S, names)))),
+               ?constrained([Name], aens_key_g(S, Name),
+                            Key, not_found /= resolve_name(S, Name, Key)),
+               ?constrained([Name, Key], {typerep, aens_key_type_g(S, Name, Key)},
+                            _, false) ]);
 args_g(S, _Op, Spec) -> args_g(S, Spec).
 
 map_args_g(S, Rest) ->
@@ -994,7 +1043,10 @@ value1_g(hash)         -> value1_g({bytes, 32});
 value1_g(signature)    -> value1_g({bytes, 64});
 value1_g(oracle)       -> {oracle, pubkey_g()};
 value1_g(oracle_query) -> {oracle_query, pubkey_g()};
-value1_g(string)       -> eqc_gen:fmap(fun list_to_binary/1, list(choose($!, $~)));
+value1_g(string)       -> oneof([eqc_gen:fmap(fun list_to_binary/1, list(choose($!, $~))),
+                                 aens_name_key_g(),
+                                 aens_name_part_g(),
+                                 aens_name_g()]);
 value1_g({list, T})    -> list(3, value1_g(T));
 value1_g({tuple, Ts})  -> {tuple, eqc_gen:fmap(fun list_to_tuple/1, [value1_g(T) || T <- Ts])};
 value1_g({variant, Tss}) ->
@@ -1015,12 +1067,60 @@ value1_g(variant)      ->
     ?LET(Tag, choose(0, length(Ar) - 1),
     ?LET(Args, vector(lists:nth(Tag + 1, Ar), value_g()),
          {variant, Ar, Tag, list_to_tuple(Args)})));
-%% value1_g(typerep)      -> {todo, typerep};
 value1_g(void)         -> void.
 
 event_index_g()   ->
     ?SUCHTHAT(V, value_g([nat, boolean, address, bits, bytes, contract, oracle, oracle_query]),
               valid_event_index(V)).
+
+aens_name_char_g() ->
+    oneof([choose($A, $Z), choose($a, $z), choose($0, $9), $-]).
+
+fixed_aens_names() ->
+    [<<"aeternity">>,
+     <<"google">>,
+     <<"coca-cola">>,
+     <<"twitter-analytics-marketing-department">>].
+
+aens_name_part_g() ->
+    weighted_default({3, elements(fixed_aens_names())},
+                     {1, ?SUCHTHAT(Name,
+                            eqc_gen:fmap(fun list_to_binary/1, non_empty(list(aens_name_char_g()))),
+                            valid_aens_name_part(Name))}).
+
+fixed_aens_keys() ->
+    [<<"address">>, <<"reply-to">>, <<"redirect">>].
+
+aens_name_key_g() ->
+    weighted_default({3, elements(fixed_aens_keys())},
+                     {1, value_g(string)}).
+
+prop_name() ->
+    ?FORALL(Name, aens_name_part_g(),
+            valid_aens_name_part(Name)).
+
+aens_name_g() ->
+    ?LET({S, Ext}, {aens_name_part_g(), elements([<<"test">>, <<"chain">>])},
+         <<S/binary, ".", Ext/binary>>).
+
+aens_name_g(S) ->
+    Names = maps:keys(chain_env(S, names)),
+    oneof(Names ++ [aens_name_g()]).
+
+aens_key_g(S, Name) ->
+    case maps:get(Name, chain_env(S, names), not_found) of
+        not_found -> value_g(string);
+        Pointers  ->
+            Keys = maps:keys(maps:remove(owner, Pointers)),
+            frequency([{9, elements(Keys)} || Keys /= []] ++
+                      [{1, value_g(string)}])
+    end.
+
+aens_key_type_g(S, Name, Key) ->
+    case resolve_name(S, Name, Key) of
+        not_found -> elements([address, contract, oracle]);
+        Val       -> infer_type(Val)
+    end.
 
 timestamp_g() -> choose(1550000000000, 1900000000000).
 
@@ -1030,12 +1130,24 @@ balance_g() ->
 -define(NumAccounts,  5).
 -define(NumContracts, 5).
 
+name_pointers_g() ->
+    eqc_gen:fmap(fun maps:from_list/1,
+                 list({aens_name_key_g(), value_g([address, contract, oracle])})).
+
+name_g(Accounts) ->
+    ?LET({Name, Owner, Pointers}, {aens_name_g(), elements(Accounts), name_pointers_g()},
+         {Name, Pointers#{owner => Owner}}).
+
+names_g(Accounts) ->
+    eqc_gen:fmap(fun maps:from_list/1, list(name_g(Accounts))).
+
 chain_env_g() ->
     ?LET({Accounts, Contracts}, {vector(?NumAccounts, pubkey_g()), vector(?NumContracts, pubkey_g())},
     begin
         GenAccount = noshrink(elements(Accounts ++ Contracts)),
         ?LET(Creators, maps:from_list([ {C, GenAccount} || C <- Contracts ]),
         ?LET(Beneficiary, GenAccount,
+        ?LET(Names, names_g(Accounts ++ Contracts),
         begin
             Acct = fun(C) -> {C, #{ balance => balance_g(), creator => maps:get(C, Creators, none), store => #{} }} end,
             #{ timestamp   => timestamp_g(),
@@ -1044,8 +1156,9 @@ chain_env_g() ->
                gas_price   => choose(1, 5),
                height      => choose(1, 10000),
                difficulty  => choose(0, 1000),
-               accounts    => maps:from_list(lists:map(Acct, Accounts ++ Contracts)) }
-        end))
+               names       => Names,
+               accounts    => eqc_gen:fmap(fun maps:from_list/1, lists:map(Acct, Accounts ++ Contracts)) }
+        end)))
     end).
 
 state_g() ->
@@ -1341,13 +1454,16 @@ build_fcode(CS, [{set, X, Call = {call, ?MODULE, instr, Args}} | Instrs]) ->
                                    bbs = [DeadBB(make_ref()), This | BBs],
                                    extra_bbs = lists:map(DeadBB, Skip) ++ ExtraBBs },
                       Instrs);
+        {'AENS_RESOLVE', Dst, Name, Key, {immediate, {typerep, Type}}} ->
+            I1 = {'AENS_RESOLVE', Dst, Name, Key, {immediate, typerep({variant, [{tuple, []}, {tuple, [Type]}]})}},
+            build_fcode(CS1#code_st{ instrs = [I1 | Acc] }, Instrs);
         _ -> build_fcode(CS1#code_st{ instrs = [I | Acc] }, Instrs)
     end.
 
 make_store(undefined) -> aefa_stores:initial_contract_store();
 make_store(Store)     -> Store.
 
-make_trees(#{ accounts := Accounts }) ->
+make_trees(#{ accounts := Accounts, names := Names }) ->
     %% All contracts and the caller must have accounts
     Trees = aec_trees:new_without_backend(),
     ATrees = lists:foldl(fun({Pubkey, #{balance := Balance}}, Acc) ->
@@ -1361,8 +1477,27 @@ make_trees(#{ accounts := Accounts }) ->
                                              aect_contracts:set_pubkey(Pubkey, Contract0)),
                                  aect_state_tree:insert_contract(Contract, Acc)
                          end, aec_trees:contracts(Trees), Accounts),
-    aec_trees:set_contracts(aec_trees:set_accounts(Trees, ATrees),
-                            aect_state_tree:commit_to_db(CTrees)).
+    NTrees = maps:fold(fun(NameStr, #{owner := Owner} = Pointers0, Acc) ->
+                                TTL  = 100,
+                                Pointers = [ begin
+                                                 Enc = case Val of
+                                                           {address, A}  -> aeser_id:create(account, A);
+                                                           {contract, A} -> aeser_id:create(contract, A);
+                                                           {oracle, A}   -> aeser_id:create(oracle, A)
+                                                       end,
+                                                 aens_pointer:new(Key, Enc)
+                                             end || {Key, Val} <- maps:to_list(Pointers0),
+                                                    Key /= owner ],
+                                {ok, NameStr1} = aens_utils:to_ascii(NameStr),
+                                NameHash = aens_hash:name_hash(NameStr1),
+                                Name0 = aens_names:new(NameHash, Owner, TTL),
+                                Name  = aens_names:update(Name0, 1000, 1000, Pointers),
+                                aens_state_tree:enter_name(Name, Acc)
+                       end, aec_trees:ns(Trees), Names),
+    aec_trees:set_contracts(
+        aec_trees:set_accounts(aec_trees:set_ns(Trees, NTrees),
+                               ATrees),
+        aect_state_tree:commit_to_db(CTrees)).
 
 call_spec(#{ address := Contract, call_value := Value, gas_limit := GasLimit }, Function, Args, Store) ->
     Fun = aeb_fate_code:symbol_identifier(Function),
@@ -1491,18 +1626,21 @@ prop_instr() ->
             try
                 Code1 = maps:map(fun(_, FCode) -> aeb_fate_code:deserialize(aeb_fate_code:serialize(FCode)) end, Code),
                 {Res, Events, Stats} = run(ChainEnv, Code1, Calls),
+                NCalls  = length([ 1 || {set, _, {call, _, new_call, _}} <- Instrs ]),
+                NInstrs = length([ 1 || {set, _, {call, _, instr, _}} <- Instrs ]),
                 ?WHENFAIL([ io:format("Deserialized fcode for ~p\n~s", [Pubkey, pp_fcode(FCode1)])
                             || {Pubkey, FCode1} <- maps:to_list(Code1),
                                FCode1 /= maps:get(Pubkey, Code) ],
                 measure(block_time, 6 / maps:get(gas_per_us, Stats),
-                measure(bb_size, lists:map(fun length/1, BBs),
-                measure(n_calls, length([ 1 || {set, _, {call, _, new_call, _}} <- Instrs ]),
-                collect(with_title(gas_used),   maps:get(gas_used, Stats) div 1000 * 1000,
+                measure(bb_size___, lists:map(fun length/1, BBs),
+                measure(n_calls___, NCalls,
+                measure(n_instrs__, if NCalls > 0 -> NInstrs / NCalls; true -> [] end,
+                measure(gas_used__, maps:get(gas_used, Stats),
                 aggregate(lists:map(fun classify/1, Res),
                 conjunction([ {result,   check_result(Res, RetValues)},
                               {events,   check_events(Events, FinalState#state.events)},
                               {state,    check_state(FinalState)},
-                              {gas_cost, check_gas_cost(Stats)} ])))))))
+                              {gas_cost, check_gas_cost(Stats)} ]))))))))
             catch _:Err ->
                 equals(ok, {'EXIT', Err, erlang:get_stacktrace()})
             end)))
