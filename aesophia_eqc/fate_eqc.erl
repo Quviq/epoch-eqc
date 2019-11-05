@@ -1028,20 +1028,23 @@ pubkey_g() -> noshrink(binary(32)).
 -define(TypeDepth, 2).
 
 type_g() ->
-    type_g(?TypeDepth).
+    type_g(maps).
 
-type_g(D) ->
-    ?LAZY(?SUCHTHAT(T,
+type_g(Maps) ->
+    type_g(?TypeDepth, Maps).
+
+type_g(D, Maps) ->
+    ?LAZY(
     frequency(
       [{5, elements([integer, boolean, address, bits, contract, {bytes, 32}, {bytes, 64},
                      oracle, oracle_query, string])}] ++
       [{1, {bytes, frequency([{3, choose(0, 6)}, {1, choose(0, 128)}])}}] ++
-      [{1, ?LETSHRINK([T], [type_g(D - 1)], {list, T})}               || D > 0] ++
-      [{1, ?LETSHRINK(Ts, list(3, type_g(D - 1)), {tuple, Ts})}       || D > 0] ++
-      [{1, ?LETSHRINK([K, V], vector(2, type_g(D - 1)), {map, K, V})} || D > 0] ++
-      [{1, ?LET(Tss, non_empty(list(3, list(2, type_g(D - 1)))),
+      [{1, ?LETSHRINK([T], [type_g(D - 1, Maps)], {list, T})}               || D > 0] ++
+      [{1, ?LETSHRINK(Ts, list(3, type_g(D - 1, Maps)), {tuple, Ts})}       || D > 0] ++
+      [{1, ?LETSHRINK([K, V], [type_g(D - 1, no_maps), type_g(D - 1, Maps)], {map, K, V})} || D > 0, Maps /= no_maps] ++
+      [{1, ?LET(Tss, non_empty(list(3, list(2, type_g(D - 1, Maps)))),
            ?LETSHRINK(_, lists:append(Tss),
-           {variant, [{tuple, Ts} || Ts <- Tss]}))}]), valid_type(T))).
+           {variant, [{tuple, Ts} || Ts <- Tss]}))}])).
 
 %% Shallow
 valid_type({map, K, _}) -> not contains(map, K);
@@ -1050,9 +1053,9 @@ valid_type(_) -> true.
 nomap(G) -> ?SUCHTHAT(T, G, not contains(map, T)).
 
 instantiate_any(any) -> type_g();
-instantiate_any(not_map) -> nomap(type_g());
+instantiate_any(not_map) -> type_g(no_maps);
 instantiate_any({map, K, V}) ->
-    {map, nomap(instantiate_any(K)), instantiate_any(V)};
+    {map, instantiate_any(substitute(any, not_map, K)), instantiate_any(V)};
 instantiate_any(T) when is_tuple(T) ->
     eqc_gen:fmap(fun list_to_tuple/1, instantiate_any(tuple_to_list(T)));
 instantiate_any(L) when is_list(L) ->
