@@ -69,11 +69,11 @@ more_instructions() ->
      #instr{ op = 'RETURNR', args = [{in, any, any}] },
      #instr{ op = 'CALL_R', args = [{in, immediate, integer}, {in, any, contract}, {in, any, integer}] },
      #instr{ op = 'CALL_GR', args = [{in, immediate, integer}, {in, any, contract}, {in, any, integer}, {in, any, integer}] },
-     #instr{ op = 'LOG0', args = [{in, any, string}]},
-     #instr{ op = 'LOG1', args = [{in, any, string}, {in, any, any}]},
-     #instr{ op = 'LOG2', args = [{in, any, string}, {in, any, any}, {in, any, any}]},
-     #instr{ op = 'LOG3', args = [{in, any, string}, {in, any, any}, {in, any, any}, {in, any, any}]},
-     #instr{ op = 'LOG4', args = [{in, any, string}, {in, any, any}, {in, any, any}, {in, any, any}, {in, any, any}]},
+     #instr{ op = 'LOG0', args = [{in, any, [string, bytes]}]},
+     #instr{ op = 'LOG1', args = [{in, any, [string, bytes]}, {in, any, any}]},
+     #instr{ op = 'LOG2', args = [{in, any, [string, bytes]}, {in, any, any}, {in, any, any}]},
+     #instr{ op = 'LOG3', args = [{in, any, [string, bytes]}, {in, any, any}, {in, any, any}, {in, any, any}]},
+     #instr{ op = 'LOG4', args = [{in, any, [string, bytes]}, {in, any, any}, {in, any, any}, {in, any, any}, {in, any, any}]},
      #instr{ op = 'AENS_RESOLVE', args = [{out, any, variant}, {in, any, string}, {in, any, string}, {in, immediate, typerep} ] }
     ].
 
@@ -85,14 +85,36 @@ spec_overrides() ->
          {in, any, integer}],
        'MAP_FROM_LIST' =>
         [{out, any, {map, not_map, any}},
-         {in, any, {list, {tuple, [not_map, any]}}}]
+         {in, any, {list, {tuple, [not_map, any]}}}],
+       'VERIFY_SIG' =>
+        [{out, any, boolean},
+         {in, any, hash},
+         {in, any, address},
+         {in, any, signature}],
+       'VERIFY_SIG_SECP256K1' =>
+        [{out, any, boolean},
+         {in, any, hash},
+         {in, any, {bytes, 64}},
+         {in, any, signature}],
+       'ECVERIFY_SECP256K1' =>
+        [{out, any, boolean},
+         {in, any, hash},
+         {in, any, {bytes, 20}},
+         {in, any, {bytes, 65}}],
+       'ECRECOVER_SECP256K1' =>
+        [{out, any, variant},
+         {in, any, hash},
+         {in, any, {bytes, 65}}]
      }.
 
 fix_types(#instr{ op = Op } = I) ->
     case maps:get(Op, spec_overrides(), none) of
-        none -> I#instr{ args = [ {Dir, Mode, fix_type(T)} || {Dir, Mode, T} <- I#instr.args ] };
-        Args -> #instr{op = Op, args = Args}
+        none -> I#instr{ args = fix_arguments(I#instr.args) };
+        Args -> #instr{op = Op, args = fix_arguments(Args)}
     end.
+
+fix_arguments(Args) ->
+    [ {Dir, Mode, fix_type(T)} || {Dir, Mode, T} <- Args ].
 
 fix_type(list)      -> {list, any};
 fix_type(map)       -> {map, any, any};
@@ -112,10 +134,6 @@ black_listed('ORACLE_GET_QUESTION')  -> true;
 black_listed('ORACLE_QUERY_FEE')     -> true;
 black_listed('ORACLE_CHECK')         -> true;
 black_listed('ORACLE_CHECK_QUERY')   -> true;
-black_listed('VERIFY_SIG')           -> true;
-black_listed('VERIFY_SIG_SECP256K1') -> true;
-black_listed('ECVERIFY_SECP256K1')   -> true;
-black_listed('ECRECOVER_SECP256K1')  -> true;
 black_listed(_)                      -> false.
 
 other_instructions() ->
@@ -249,8 +267,9 @@ set_store(Pubkey, Store, S) ->
 
 -spec add_event(string(), [integer()], state()) -> state().
 add_event(Payload, Indices, S) ->
+    Bin = fun({bytes, B}) -> B; (B) -> B end,
     Event = #event{ contract = chain_env(S, address),
-                    payload  = Payload,
+                    payload  = Bin(Payload),
                     indices  = lists:map(fun event_index_/1, Indices) },
     S#state{ events = [Event | S#state.events] }.
 
@@ -479,7 +498,7 @@ check_arguments(S, [{in, Mode, Type} | ArgSpec], [Arg | Args]) ->
              _          -> S
          end,
     check_mode(in, Mode, Arg) andalso
-    match_type(Type, get_type(S, Arg)) andalso
+    has_type(get_value(S, Arg), Type) andalso
     check_arguments(S1, ArgSpec, Args);
 check_arguments(S, [{inout, Mode, Type} | ArgSpec], [Arg | Args]) ->
     check_mode(out, Mode, Arg) andalso
@@ -687,6 +706,14 @@ eval_instr('BITS_AND',   [{bits, A}, {bits, B}]) -> {bits, A band B};
 eval_instr('BITS_DIFF',  [{bits, A}, {bits, B}]) -> {bits, A band bnot B};
 eval_instr('IS_ORACLE', [_])                       -> false;
 eval_instr('AUTH_TX_HASH', _)                      -> {variant, [0, 1], 0, {}};
+eval_instr('VERIFY_SIG', _)                        -> false;
+eval_instr('VERIFY_SIG_SECP256K1', _)              -> false;
+eval_instr('ECVERIFY_SECP256K1', _)                -> false;
+eval_instr('ECRECOVER_SECP256K1', [{bytes, Hash}, {bytes, Sig}]) ->
+    case ecrecover:recover(Hash, Sig) of
+        <<0:256>>                       -> {variant, [0, 1], 0, {}};
+        <<_:12/binary, Addr:20/binary>> -> {variant, [0, 1], 1, {{bytes, Addr}}}
+    end;
 eval_instr('CONTRACT_TO_ADDRESS', [{contract, A}]) -> {address, A};
 eval_instr('ADDRESS_TO_CONTRACT', [{address, A}])  -> {contract, A}.
 
@@ -782,7 +809,7 @@ eval_instr(S, 'RETURNR', [V]) ->
            pop_call_stack(S, V), []);
 eval_instr(S, LOG, [Payload | Indices]) when LOG == 'LOG0'; LOG == 'LOG1';
                                              LOG == 'LOG2'; LOG == 'LOG3'; LOG == 'LOG4' ->
-    ?WhenS(Payload /= <<>> andalso   %% BUG: empty payload crashes VM
+    ?WhenS(not lists:member(Payload, [<<>>, {bytes, <<>>}]) andalso   %% BUG: empty payload crashes VM
            lists:all(fun valid_event_index/1, Indices),
            add_event(Payload, Indices, S), []);
 eval_instr(S, 'AENS_RESOLVE', [Name, Key, {typerep, Type}]) ->
@@ -1162,19 +1189,24 @@ chain_env_g() ->
     end).
 
 state_g() ->
-    ?LET({ChainEnv, Stack, Vars, Args}, {chain_env_g(), list(value_g()), map(int(), value_g()), map(nat(), value_g())},
-         return(#state{ stack = Stack, vars = Vars, args = Args, chain_env = ChainEnv })).
+    StoreGen = map(nat(), value_g()),
+    ?LET({ChainEnv, Stack, Vars, Store, Args}, {chain_env_g(), list(value_g()), StoreGen, StoreGen, StoreGen},
+         return(#state{ stack = Stack, vars = Vars, store = Store, args = Args, chain_env = ChainEnv })).
 
 %% -- State machine ----------------------------------------------------------
 
 instr_weight(S, Op) when Op == 'INCA'; Op == 'DECA' ->
     case S#state.stack of
-        [N | _] when is_integer(N) -> 1;
+        [N | _] when is_integer(N) -> 5;
         _ -> 0
     end;
-instr_weight(S, 'RETURN') -> if S#state.stack /= [] -> 3; true -> 0 end;
-instr_weight(_, 'RETURNR') -> 3;
-instr_weight(_, _) -> 1.
+instr_weight(S, 'RETURN') -> if S#state.stack /= [] -> 15; true -> 0 end;
+instr_weight(_, 'RETURNR') -> 15;
+instr_weight(_, 'ECRECOVER_SECP256K1') -> 1;
+instr_weight(_, 'ECVERIFY_SECP256K1') -> 1;
+instr_weight(_, 'VERIFY_SIG_SECP256K1') -> 1;
+instr_weight(_, 'VERIFY_SIG') -> 1;
+instr_weight(_, _) -> 5.
 
 instr_args(S) ->
     ?LET(#instr{ op = Op, args = ArgsSpec }, frequency([ {instr_weight(S, I#instr.op), I}
@@ -1594,15 +1626,34 @@ prop_infer() ->
 
 prop_args_g() ->
     in_parallel(
-    ?FORALL(S,   state_g(),
-    ?FORALL([I], ?SUCHTHAT(X, instr_args(S), not contains(skip, X)),
+    ?FORALL(Op, elements(maps:keys(instruction_spec())),
+            prop_args_g(Op))).
+
+prop_args_g(Op) ->
+    #instr{op = Op, args = ArgsSpec } = instruction_spec(Op),
+    StoreGen = map(nat(), value_g()),
+    ?FORALL(ChainEnv, chain_env_g(),
+    ?LET(S0, return(initial_state(ChainEnv)),
+    ?FORALL(CallArgs, new_call_args(S0),
+    ?FORALL({Stack, Vars, Store, Args}, {list(value_g()), StoreGen, StoreGen, StoreGen},
     begin
-        S1 = instr_next(S, {var, -1}, [I]),
-        ?IMPLIES(not contains(skip, S1),
-            conjunction([{check_instr, check_instr(S, I)},
-                         {no_void, not contains(void, I)},
-                         {valid, check_valid_state(S1)}]))
-    end))).
+        S  = (new_call_next(S0, {var, 0}, CallArgs))
+                #state{ stack = Stack,
+                        vars  = Vars,
+                        store = Store,
+                        args  = Args },
+        ?FORALL(OpArgs, args_g(S, Op, ArgsSpec),
+        ?IMPLIES(not contains(skip, OpArgs),
+        begin
+            I  = {Op, OpArgs},
+            S1 = instr_next(S, {var, 0}, [I]),
+            ?IMPLIES(not contains(skip, S1),
+            ?WHENFAIL(io:format("Op = ~s\nArgs = ~p\ncheck_instr = ~p\n",
+                                [Op, [get_value(S, Arg) || Arg <- OpArgs], check_instr(S, I)]),
+                instr_pre(S, [I])))
+        end))
+    end)))).
+
 
 prop_instr() ->
     in_parallel(
