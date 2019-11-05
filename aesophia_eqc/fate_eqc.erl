@@ -1216,6 +1216,9 @@ instr_weight(_, 'ECVERIFY_SECP256K1') -> 1;
 instr_weight(_, 'VERIFY_SIG_SECP256K1') -> 1;
 instr_weight(_, 'VERIFY_SIG') -> 1;
 instr_weight(_, 'NOP') -> 1;
+instr_weight(_, 'MAP_UPDATE') -> 15;
+instr_weight(_, 'MAP_DELETE') -> 15;
+instr_weight(_, 'MAP_FROM_LIST') -> 15;
 instr_weight(_, _) -> 5.
 
 instr_args(S) ->
