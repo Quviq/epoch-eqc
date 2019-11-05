@@ -46,7 +46,8 @@ instructions() ->
         ] ++ more_instructions()).
 
 more_instructions() ->
-    [#instr{ op = 'TUPLE', args = [{out, any, tuple}, {in, immediate, integer}] },
+    [#instr{ op = 'NOP',   args = [] },
+     #instr{ op = 'TUPLE', args = [{out, any, tuple}, {in, immediate, integer}] },
      #instr{ op = 'PUSH', args = [{in, any, any}] },
      #instr{ op = 'DUP',  args = [{in, any, any}] },
      #instr{ op = 'DUPA', args = [] },
@@ -123,23 +124,29 @@ fix_type(hash)      -> {bytes, 32};
 fix_type(signature) -> {bytes, 64};
 fix_type(T)         -> T.
 
-black_listed('MICROBLOCK')           -> true;   %% Not implemented
-black_listed('DUP')                  -> true;   %% Bugged
-black_listed('GAS')                  -> true;   %% Not modelling gas costs
-black_listed('INT_TO_ADDR')          -> true;
-black_listed('ORACLE_REGISTER')      -> true;   %% TODO: Oracle/AENS/Crypto
-black_listed('ORACLE_QUERY')         -> true;
-black_listed('ORACLE_GET_ANSWER')    -> true;
-black_listed('ORACLE_GET_QUESTION')  -> true;
-black_listed('ORACLE_QUERY_FEE')     -> true;
-black_listed('ORACLE_CHECK')         -> true;
-black_listed('ORACLE_CHECK_QUERY')   -> true;
-black_listed(_)                      -> false.
+black_listed(Op) ->
+    NotImplemented = ['MICROBLOCK', 'DEACTIVATE'],
+    Disabled       = ['INT_TO_ADDR'],
+    Buggy          = ['DUP'],               %% Adds an extra copy of the top of the stack
+    NotModelled    = ['GAS'],               %% Not tracking gas costs
+    Errors         = ['EXIT', 'ABORT'],     %% Could actually be modelled
+    Oracles        = ['ORACLE_REGISTER', 'ORACLE_QUERY', 'ORACLE_RESPOND', 'ORACLE_EXTEND',
+                      'ORACLE_GET_ANSWER', 'ORACLE_GET_QUESTION', 'ORACLE_QUERY_FEE',
+                      'ORACLE_CHECK', 'ORACLE_CHECK_QUERY'],
+    Names          = ['AENS_PRECLAIM', 'AENS_CLAIM', 'AENS_UPDATE', 'AENS_TRANSFER', 'AENS_REVOKE'],
+    BlackList = NotImplemented ++
+                Disabled       ++
+                Buggy          ++
+                NotModelled    ++
+                Oracles        ++
+                Names          ++
+                Errors,
+    lists:member(Op, BlackList).
 
-other_instructions() ->
-    Simple = maps:from_list([{Op, true} || #instr{ op = Op } <- instructions() ]),
+missing_instructions() ->
+    Instrs = maps:from_list([{Op, true} || #instr{ op = Op } <- instructions() ]),
     [ Op || #{ opname := Op } <- aeb_fate_generate_ops:get_ops(),
-            not maps:is_key(Op, Simple),
+            not maps:is_key(Op, Instrs),
             not black_listed(Op) ].
 
 -define(InstrSpecCache, '$ispec_cache').
@@ -717,6 +724,7 @@ eval_instr('ECRECOVER_SECP256K1', [{bytes, Hash}, {bytes, Sig}]) ->
 eval_instr('CONTRACT_TO_ADDRESS', [{contract, A}]) -> {address, A};
 eval_instr('ADDRESS_TO_CONTRACT', [{address, A}])  -> {contract, A}.
 
+eval_instr(S, 'NOP', []) -> {S, []};
 eval_instr(S, 'BLOCKHASH', [H])  ->
     Current = chain_env(S, height),
     Hash = case 0 =< H andalso Current - 256 < H andalso H < Current of
@@ -1094,7 +1102,8 @@ value1_g(variant)      ->
     ?LET(Tag, choose(0, length(Ar) - 1),
     ?LET(Args, vector(lists:nth(Tag + 1, Ar), value_g()),
          {variant, Ar, Tag, list_to_tuple(Args)})));
-value1_g(void)         -> void.
+value1_g(typerep) -> eqc_gen:fmap(fun typerep/1, type_g());
+value1_g(void)    -> void.
 
 event_index_g()   ->
     ?SUCHTHAT(V, value_g([nat, boolean, address, bits, bytes, contract, oracle, oracle_query]),
@@ -1206,6 +1215,7 @@ instr_weight(_, 'ECRECOVER_SECP256K1') -> 1;
 instr_weight(_, 'ECVERIFY_SECP256K1') -> 1;
 instr_weight(_, 'VERIFY_SIG_SECP256K1') -> 1;
 instr_weight(_, 'VERIFY_SIG') -> 1;
+instr_weight(_, 'NOP') -> 1;
 instr_weight(_, _) -> 5.
 
 instr_args(S) ->
