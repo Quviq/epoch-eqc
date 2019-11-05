@@ -255,7 +255,7 @@ is_contract(S, A) ->
     get_account(S, A, creator, none) /= none.
 
 resolve_name(S, Name, Key) ->
-    case maps:get(Name, chain_env(S, names), undefined) of
+    case maps:get(binary_to_lower(Name), chain_env(S, names), undefined) of
         #{Key := Val} -> Val;
         _             -> not_found
     end.
@@ -1116,7 +1116,10 @@ fixed_aens_names() ->
     [<<"aeternity">>,
      <<"google">>,
      <<"coca-cola">>,
-     <<"twitter-analytics-marketing-department">>].
+     <<"twitter-analytics-marketing-department">>,
+     <<"AEternity">>,
+     <<"GOOglE">>,
+     <<"Twitter-Analytics-Marketing-Departement">>].
 
 aens_name_part_g() ->
     weighted_default({3, elements(fixed_aens_names())},
@@ -1166,13 +1169,16 @@ balance_g() ->
 -define(NumAccounts,  5).
 -define(NumContracts, 5).
 
+binary_to_lower(B) ->
+    list_to_binary(string:to_lower(binary_to_list(B))).
+
 name_pointers_g() ->
     eqc_gen:fmap(fun maps:from_list/1,
                  list({aens_name_key_g(), value_g([address, contract, oracle])})).
 
 name_g(Accounts) ->
     ?LET({Name, Owner, Pointers}, {aens_name_g(), elements(Accounts), name_pointers_g()},
-         {Name, Pointers#{owner => Owner}}).
+         {binary_to_lower(Name), Pointers#{owner => Owner}}).
 
 names_g(Accounts) ->
     eqc_gen:fmap(fun maps:from_list/1, list(name_g(Accounts))).
