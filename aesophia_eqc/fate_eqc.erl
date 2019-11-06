@@ -553,6 +553,15 @@ match_type(S, T)                             ->
 
 has_type(V, T) -> match_type(T, infer_type(V)).
 
+valid_map_key(M, K) ->
+    case infer_type(M) of
+        {map, KeyT, _} ->
+            KeyT1 = infer_type(K),
+            match_type(KeyT, KeyT1) andalso
+            not contains(map, KeyT1);
+        _              -> false
+    end.
+
 %% Would really want this to be a generator, but we compute the type at code
 %% generation time, where it's too late to do random generation.
 -spec make_polymorphic({[type()], type()}) -> {[type()], type()}.
@@ -656,10 +665,10 @@ eval_instr('SETELEMENT', [A, {tuple, B}, C]) ->
        {tuple, setelement(A + 1, B, C)});
 eval_instr('MAP_EMPTY', [])           -> #{};
 eval_instr('MAP_LOOKUP', [M, K])      -> ?When(maps:is_key(K, M), maps:get(K, M));
-eval_instr('MAP_LOOKUPD', [M, K, D])  -> maps:get(K, M, D);
-eval_instr('MAP_UPDATE', [M, K, V])   -> M#{ K => V };
-eval_instr('MAP_DELETE', [M, K])      -> maps:remove(K, M);
-eval_instr('MAP_MEMBER', [M, K])      -> maps:is_key(K, M);
+eval_instr('MAP_LOOKUPD', [M, K, D])  -> ?When(valid_map_key(M, K), maps:get(K, M, D));
+eval_instr('MAP_UPDATE', [M, K, V])   -> ?When(valid_map_key(M, K), M#{ K => V });
+eval_instr('MAP_DELETE', [M, K])      -> ?When(valid_map_key(M, K), maps:remove(K, M));
+eval_instr('MAP_MEMBER', [M, K])      -> ?When(valid_map_key(M, K), maps:is_key(K, M));
 eval_instr('MAP_FROM_LIST', [L])      -> maps:from_list([E || {tuple, E} <- L]);
 eval_instr('MAP_SIZE', [M])           -> maps:size(M);
 eval_instr('MAP_TO_LIST', [M])        -> [{tuple, E} || E <- maps:to_list(M)];
