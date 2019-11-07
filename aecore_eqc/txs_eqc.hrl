@@ -5,7 +5,7 @@
                     minimum_gas_price/1, next_id/1,
                     common_postcond/2]).
 
--import(txs_utils, [check_balance/3, check_balance/4, credit/3, charge/3,
+-import(txs_utils, [check_balance/3, check_balance/4, credit/3, charge/3, charge/4,
                     bump_nonce/2, bump_and_charge/3, bump_and_charge/4,
                     reserve_fee/2, is_ga/2, is_account/2, is_ga_account/2, get_account/2,
                     get_account_key/2, get_pubkey/2, get_account_nonce/2,

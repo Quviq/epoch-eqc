@@ -25,7 +25,10 @@
 -record(claim,{name, height, expires_by, claimer, protocol}).
 -record(auction, {name, height, expires_by, bid, claimer, protocol}).
 
--record(channel, {id, initiator, responder, amount, round = 1, ch_resv, lockp}).
+-record(cs, {i_am = 0, r_am = 0, c_am = 0, cmds = [], rnd = 1, cabi = ?ABI_AEVM_1}).
+-record(channel, {id, init, resp, rnd = 1, ch_rsv, lock_p,
+                  locked = false, solo_rnd = 0, state = #cs{},
+                  i_auth, r_auth}).
 
 -define(ACCOUNT(A),  {'$acc', A}).
 -define(KEY(K),      {'$key', K}).

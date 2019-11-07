@@ -10,10 +10,10 @@
 
 tx_models() ->
   [ txs_spend_eqc
-  %% , txs_channels_eqc
-  , txs_contracts_eqc
-  , txs_names_eqc
-  , txs_oracles_eqc
+  , txs_channels_eqc
+  %% , txs_contracts_eqc
+  %% , txs_names_eqc
+  %% , txs_oracles_eqc
   , txs_ga_eqc
   %% , txs_paying_for_eqc
   ].
@@ -122,10 +122,10 @@ tx_pre(S, [M, Tx, TxData]) ->
   try apply(M, ?pre(Tx), [S, TxData])
   catch _:_ -> true end.
 
-tx_call(S = #{height := Height}, [M, Tx, TxData]) ->
+tx_call(S = #{height := Height, protocol := P}, [M, Tx, TxData]) ->
   {ok, UTx} = apply(M, ?tx(Tx), [S, TxData]),
-  try apply_transaction(Height, UTx)
-  catch _:Reason -> {error, Reason} end.
+  try apply_transaction(Height, P, UTx)
+  catch _:Reason -> {error, Reason, erlang:get_stacktrace()} end.
 
 tx_next(S, Value, [M, Tx, TxData]) ->
   apply(M, ?next(Tx), [S, Value, TxData]).
@@ -137,8 +137,12 @@ tx_features(S, [M, Tx, TxData], Res) ->
   [{tx, Tx}]
     ++ apply(M, ?features(Tx), [S, TxData, Res]).
 
-apply_transaction(Height, Tx) ->
-  Env      = aetx_env:tx_env(Height),
+apply_transaction(_Height, _P, no_tx) ->
+  ok;
+apply_transaction(Height, P, Tx) ->
+  Env0     = aetx_env:tx_env(Height, P),
+  Env      = aetx_env:set_signed_tx(Env0, {value, aetx_sign:new(Tx, [])}),
+
   Trees    = get(trees),
 
   case aetx:process(Tx, Trees, Env) of
@@ -183,7 +187,7 @@ weight(_S, _)    -> 1.
 prop_txs() ->
   %% Forks = #{1=> 0, 2 => 3, 3 => 6, 4 => 9},
   %% Forks = #{1=> 0, 2 => 10, 3 => 20, 4 => 100, 5 => 1000},
-  Forks = #{1 => 0, 4 => 1},
+  Forks = #{1 => 0, 5 => 1},
   prop_txs(Forks).
 
 prop_txs(Forks) ->
@@ -259,7 +263,9 @@ stats(Features, Prop) ->
   Feats = lists:flatten([tx, correct, spend, mine] ++
                         [ [contract_create, contract_call]
                           || lists:member(txs_contracts_eqc, tx_models()) ] ++
-                        [ [sc_create, sc_deposit, sc_withdraw]
+                        [ [sc_create, sc_deposit, sc_withdraw, sc_close_mutual,
+                           sc_snapshot_solo, sc_close_solo, sc_settle,
+                           sc_slash, sc_offchain]
                           || lists:member(txs_channels_eqc, tx_models()) ] ++
                         [ [ga_attach, ga_meta, ga_meta_inner]
                           || lists:member(txs_ga_eqc, tx_models()) ] ++
@@ -344,6 +350,7 @@ propsetup(Forks, Prop) ->
             _ = application:load(aecore),
             application:load(aesophia),  %% Since we do in_parallel, we may have a race in line 86 of aesophia_compiler
             [ txs_contracts_eqc:compile_contracts() || lists:member(txs_contracts_eqc, tx_models())
+                                                       orelse lists:member(txs_channels_eqc, tx_models())
                                                        orelse lists:member(txs_ga_eqc, tx_models()) ],
             HardForksTeardown = setup_hard_forks(Forks),
             DataDirTeardown = setup_data_dir(),

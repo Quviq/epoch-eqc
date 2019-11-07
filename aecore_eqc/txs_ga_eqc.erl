@@ -245,7 +245,7 @@ ga_accounts(#{ accounts := As }) ->
   [A || {A, #account{ ga = GA }} <- maps:to_list(As), GA /= false ].
 
 -define(IS_SC_DOUBLE_SIGNED(Tx), (Tx == sc_create orelse Tx == sc_deposit
-                                  orelse Tx == sc_withdraw)).
+                                  orelse Tx == sc_withdraw orelse Tx == sc_close_mutual)).
 
 signers(S, [_, ga_meta, [_, _, TxArgs]]) -> signers(S, TxArgs);
 signers(S, [_, sc_create, [I, R, _, _]]) ->
@@ -257,6 +257,7 @@ signers(S, [_, response_oracle, [QId, _]]) ->
 signers(S, A = [_, _, [Signer | _]]) ->
   [signer(S, Signer)].
 
+%% ga_signer(S, [_, ga_meta, [_, _, TxArgs]])       -> ga_signer(S, TxArgs);
 ga_signer(S, [_, response_oracle, [QId, _]])     -> [signer(S, QId)];
 ga_signer(S, [_, Tx, [Actor, NotActor, _, _]]) when ?IS_SC_DOUBLE_SIGNED(Tx) ->
   case [signer(S, X) || X <- [Actor, NotActor], is_ga_account(S, X)] of
@@ -289,7 +290,6 @@ make_auth_data(S, GAAcc, ABI, NonceGood) ->
     _ ->
       {ok, <<123456789:256>>}
   end.
-
 
 -define(STUB, "contract X =\n  entrypoint nonce_correct : (int) => bool\n").
 
