@@ -1195,6 +1195,8 @@ name_g(Accounts) ->
 names_g(Accounts) ->
     eqc_gen:fmap(fun maps:from_list/1, list(name_g(Accounts))).
 
+-define(GC_BUG_HARD_FORK_HEIGHT, 170000).
+
 chain_env_g() ->
     ?LET({Accounts, Contracts}, {vector(?NumAccounts, pubkey_g()), vector(?NumContracts, pubkey_g())},
     begin
@@ -1208,7 +1210,7 @@ chain_env_g() ->
                beneficiary => Beneficiary,
                gas_limit   => choose(3000000, 6000000),
                gas_price   => choose(1, 5),
-               height      => choose(1, 10000),
+               height      => choose(?GC_BUG_HARD_FORK_HEIGHT, 1000000),
                difficulty  => choose(0, 1000),
                names       => Names,
                accounts    => eqc_gen:fmap(fun maps:from_list/1, lists:map(Acct, Accounts ++ Contracts)) }
