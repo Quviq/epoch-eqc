@@ -639,7 +639,7 @@ gen_claimed_name(#{claims := Cs} = S) ->
 gen_nc_pair(S = #{ protocol := P }, []) -> {gen_name(P), gen_account(1, 1, S)};
 gen_nc_pair(S, Ns) ->
   NCs = lists:map(fun nc_pair/1, Ns),
-  weighted_default({19, gen_good_nc_pair(S, NCs)}, {1, gen_bad_nc_pair(S, NCs)}).
+  weighted_default({39, gen_good_nc_pair(S, NCs)}, {1, gen_bad_nc_pair(S, NCs)}).
 
 gen_bad_nc_pair(#{protocol := P} = S, NCs) ->
   frequency([{1, {gen_name(P), gen_account(1, 1, S)}}] ++
