@@ -362,14 +362,16 @@ gen_contract_opts(?LIMA_PROTOCOL_VSN, fate) ->
          {Compiler, VM, ABI}))).
 
 gen_contract() ->
-    elements([identity, authorize_nonce]).
+    elements([identity, simple_state]).
 
 contract(Name) ->
     [{_, Map}] = ets:lookup(contracts, Name),
     Map.
 
 gen_contract_id(Invalid, Valid, S) ->
-  gen_contract_id_(Invalid, Valid, maps:keys(maps:get(contracts, S))).
+  gen_contract_id_(Invalid, Valid,
+    [ C || {C, #contract{ name = Name }} <- maps:to_list(maps:get(contracts, S)),
+           Name /= authorize_nonce, Name /= offchain ]).
 
 gen_contract_id_(_, _, []) ->
     fake_contract_id;
@@ -390,9 +392,17 @@ contracts() ->
            init_args => [],
            functions => [{"main", [choose(-100, 1000)]}]
           },
+         #{name => offchain,
+           init_args => [],
+           functions => []
+          },
          #{name => authorize_nonce,
            init_args => [],
-           functions => [{"check_nonce", [nat()]}, {"n_checks", []}]
+           functions => []
+          },
+         #{name => simple_state,
+           init_args => [12],
+           functions => [{"check", [nat()]}, {"n_checks", []}]
           }
         ],
     [ begin
@@ -412,14 +422,17 @@ contract_gas(identity, init, ?ABI_FATE_1, _) -> 56;
 contract_gas(identity, "main", ?ABI_AEVM_1, _) -> 192;
 contract_gas(identity, "main", ?ABI_FATE_1, _) -> 11;
 
-contract_gas(authorize_nonce, init, ?ABI_AEVM_1, _) -> 417;
+contract_gas(authorize_nonce, init, ?ABI_AEVM_1, _) -> 382;
 contract_gas(authorize_nonce, init, ?ABI_FATE_1, _) -> 103;
-contract_gas(authorize_nonce, "check_nonce", ?ABI_AEVM_1, P) when P < ?LIMA_PROTOCOL_VSN -> 422;
-contract_gas(authorize_nonce, "check_nonce", ?ABI_AEVM_1, _) -> 742;
-contract_gas(authorize_nonce, "check_nonce", ?ABI_FATE_1, _) -> 135;
-contract_gas(authorize_nonce, "n_checks", ?ABI_AEVM_1, P) when P < ?LIMA_PROTOCOL_VSN -> 357;
-contract_gas(authorize_nonce, "n_checks", ?ABI_AEVM_1, _) -> 677;
-contract_gas(authorize_nonce, "n_checks", ?ABI_FATE_1, _) -> 21;
+
+contract_gas(simple_state, init, ?ABI_AEVM_1, _) -> 413;
+contract_gas(simple_state, init, ?ABI_FATE_1, _) -> 103;
+contract_gas(simple_state, "check", ?ABI_AEVM_1, P) when P < ?LIMA_PROTOCOL_VSN -> 404;
+contract_gas(simple_state, "check", ?ABI_AEVM_1, _) -> 724;
+contract_gas(simple_state, "check", ?ABI_FATE_1, _) -> 147;
+contract_gas(simple_state, "n_checks", ?ABI_AEVM_1, P) when P < ?LIMA_PROTOCOL_VSN -> 327;
+contract_gas(simple_state, "n_checks", ?ABI_AEVM_1, _) -> 647;
+contract_gas(simple_state, "n_checks", ?ABI_FATE_1, _) -> 21;
 contract_gas(_, _, _, _) -> 1000.
 
 contract_tx_fee(S, Type, Name, ABI) when is_atom(ABI) ->
@@ -436,15 +449,17 @@ base_gas(_, _)              -> 450000.
 
 size_gas(create, identity, ?ABI_AEVM_1)        -> 1200;
 size_gas(create, identity, ?ABI_FATE_1)        -> 200;
-size_gas(create, authorize_nonce, ?ABI_AEVM_1) -> 2300;
-size_gas(create, authorize_nonce, ?ABI_FATE_1) -> 350;
+size_gas(create, authorize_nonce, ?ABI_AEVM_1) -> 1700;
+size_gas(create, authorize_nonce, ?ABI_FATE_1) -> 300;
+size_gas(create, simple_state, ?ABI_AEVM_1)    -> 2100;
+size_gas(create, simple_state, ?ABI_FATE_1)    -> 300;
 size_gas(call, _, ?ABI_AEVM_1)                 -> 230;
 size_gas(call, _, ?ABI_FATE_1)                 -> 110;
 size_gas(_, _, _)                              -> 1000.
 
-contract_payable_fun(authorize_nonce, "n_checks", VM) ->
+contract_payable_fun(simple_state, "n_checks", VM) ->
     VM /= aevm_sophia_4 andalso VM /= fate_sophia_1;
-contract_payable_fun(authorize_nonce, "check_nonce", VM) ->
+contract_payable_fun(simple_state, "check", VM) ->
     VM /= aevm_sophia_4 andalso VM /= fate_sophia_1;
 contract_payable_fun(_, _, _) -> true.
 
