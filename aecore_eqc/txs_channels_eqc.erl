@@ -514,21 +514,19 @@ sc_force_progress_next(S, _Value, Args = [Actor, Channel, Tx]) ->
                   ?ABI_FATE_1 -> 156
                 end,
 
-      C = #channel{ state = CS } = get_channel(S2, Channel),
+      C = #channel{ state = CS, solo_rnd = SRnd } = get_channel(S2, Channel),
       Lock = case C#channel.locked of
                false -> false;
                _ ->  {maps:get(height, S) + C#channel.lock_p, CS#cs.i_am, CS#cs.r_am}
              end,
-      C1 = case C#channel.solo_rnd of
-             0 -> C#channel{ solo_rnd = Rnd, rnd = Rnd, locked = Lock };
-             _ -> C#channel{ rnd = Rnd, locked = Lock }
-           end,
-      %% C1 = case maps:get(payload, Tx) of
-      %%          on_chain -> C#channel{ solo_rnd = Rnd, locked = Lock };
-      %%          %% BUG
-      %%          payload  -> C#channel{ solo_rnd = Rnd, rnd = Rnd - 1, locked = Lock }
-      %%          %% payload  -> C#channel{ solo_rnd = Rnd, locked = Lock }
+      %% C1 = case C#channel.solo_rnd of
+      %%        0 -> C#channel{ solo_rnd = Rnd, rnd = Rnd, locked = Lock };
+      %%        _ -> C#channel{ rnd = Rnd, locked = Lock }
       %%      end,
+      C1 = case maps:get(payload, Tx) of
+               on_chain when SRnd > 0 -> C#channel{ rnd = Rnd, locked = Lock };
+               _                      -> C#channel{ solo_rnd = Rnd, rnd = Rnd, locked = Lock }
+           end,
       S3 = update_channel(Channel, C1, S2),
       reserve_fee(maps:get(fee, Tx) + GasUsed * GasPrice,
         bump_and_charge(Actor, maps:get(fee, Tx) + GasUsed * GasPrice, S3))
