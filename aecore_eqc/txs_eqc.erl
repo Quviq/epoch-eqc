@@ -125,7 +125,8 @@ tx_pre(S, [M, Tx, TxData]) ->
 tx_call(S = #{height := Height, protocol := P}, [M, Tx, TxData]) ->
   {ok, UTx} = apply(M, ?tx(Tx), [S, TxData]),
   try apply_transaction(Height, P, UTx)
-  catch _:Reason -> {error, Reason, erlang:get_stacktrace()} end.
+  %% catch _:Reason -> {error, Reason, erlang:get_stacktrace()} end.
+  catch _:Reason -> {error, Reason} end.
 
 tx_next(S, Value, [M, Tx, TxData]) ->
   apply(M, ?next(Tx), [S, Value, TxData]).
@@ -203,6 +204,7 @@ prop_txs(Forks) ->
         Oracles  = maps:get(oracles, S, #{}),
         Total    = trees_total(),
         FeeTotal = lists:sum([ Fee || {Fee, _} <- maps:get(fees, S, [])]),
+        erase(ids),
         check_command_names(Cmds,
             measure(length__, commands_length(Cmds),
             measure(height__, Height,
