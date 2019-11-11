@@ -247,8 +247,8 @@ sc_close_mutual_valid(S, [Actor, NotActor, Channel, Tx]) ->
   andalso is_account(S, NotActor)
   andalso is_channel_party(S, Actor, Channel)
   andalso maps:get(nonce, Tx) == good
-  andalso check_balance(S, Actor, maps:get(fee, Tx))
   andalso is_valid_fee(S, sc_close_mutual, Tx)
+  %% andalso check_balance(S, Actor, maps:get(fee, Tx))
   andalso is_valid_close_mutual(S, Channel, Tx).
 
 sc_close_mutual_tx(S, [Actor, _NotActor, Channel, Tx]) ->
