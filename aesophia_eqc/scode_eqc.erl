@@ -91,12 +91,16 @@ args_g(Op) ->
     G    = fun(in) -> arg_g(); (out) -> out_arg_g() end,
     lists:map(G, Args).
 
-instr_g() ->
+simple_instr_g() ->
     ?LET(Op, elements(maps:keys(instruction_map()) -- desugared_instrs()),
          eqc_gen:fmap(fun list_to_tuple/1, [Op | args_g(Op)])).
 
+instr_g() ->
+    simple_instr_g().
+
 program_g() ->
-    list(instr_g()).
+    ?LET({Code, Loop}, {list(instr_g()), weighted_default({5, false}, {1, true})},
+         return(Code ++ [loop || Loop])).
 
 %% -- Symbolic evaluation ----------------------------------------------------
 
@@ -149,12 +153,16 @@ write_arg({var,   N}, V, #{ vars  := Vars  } = S) when N >= 0 -> S#{ vars  := Va
 write_arg({var,   N}, V, S) when N < 0  -> write_arg({store, -N}, V, S);
 write_arg({store, N}, V, #{ store := Store } = S) -> S#{ store := Store#{ N => V } }.
 
-side_effect(Op, Vs, #{ effects := Eff } = S) ->
+add_side_effect(E, #{ effects := Eff } = S) ->
+    S#{ effects := [E | Eff] }.
+
+side_effect(Op, Vs, S) ->
     case is_side_effect(Op) of
-        true  -> S#{ effects := [{Op, Vs} | Eff] };
+        true  -> add_side_effect({Op, Vs}, S);
         false -> S
     end.
 
+step(S, loop) -> S;
 step(S, {'TUPLE', Dst, {immediate, N}}) ->
     step(S, list_to_tuple(['TUPLE', Dst | lists:duplicate(N, {stack, 0})]));
 step(S, I) ->
@@ -184,12 +192,27 @@ sym('NOT', [X]) when ?is_value(X) -> not X;
 sym(Op, [])       -> Op;
 sym(Op, Vs)       -> list_to_tuple([Op | Vs]).
 
-sym_eval(S, [], Verbose) ->
-    [ io:format("- ~p\n", [S]) || Verbose ],
+pp_state(S, Verbose) ->
+    [ io:format("- ~p\n", [S]) || Verbose ].
+
+sym_eval(S, LoopCount, P, Verbose) ->
+    sym_eval(S, P, LoopCount, P, Verbose).
+
+sym_eval(S, _, _, [], Verbose) ->
+    pp_state(S, Verbose),
     S;
-sym_eval(S, [I | Is], Verbose) ->
-    [ io:format("- ~p\n~p\n", [S, I]) || Verbose ],
-    sym_eval(step(S, I), Is, Verbose).
+sym_eval(S, P0, LoopC, [I | Is], Verbose) ->
+    pp_state(S, Verbose),
+    [ io:format("~p\n", [I]) || Verbose ],
+    S1 = step(S, I),
+    case I of
+        loop when LoopC =< 0 ->
+            pp_state(S1, Verbose),
+            S1;
+        loop ->
+            sym_eval(S1, P0, LoopC - 1, P0, Verbose);
+        _ -> sym_eval(S1, P0, LoopC, Is, Verbose)
+    end.
 
 %% -- Properties -------------------------------------------------------------
 
@@ -201,7 +224,7 @@ optimize(Code, Opts) ->
 prop_eval() ->
     in_parallel(
     ?LET(Verbose, parameter(verbose, false),
-    ?FORALL(P, program_g(),
+    ?FORALL({LoopCount, P}, {choose(0, 3), program_g()},
     begin
         Opts = [ {debug, [opt_rules, opt]} || Verbose ],
         S0 = init_state(),
@@ -209,9 +232,9 @@ prop_eval() ->
         ?WHENFAIL(io:format("Optimized:\n  ~p\n", [P1]),
         try
             [ io:format("== Original ==\n") || Verbose ],
-            S1 = sym_eval(S0, P, Verbose),
+            S1 = sym_eval(S0, LoopCount, P, Verbose),
             [ io:format("== Optimized ==\n") || Verbose ],
-            S2 = sym_eval(S0, P1, Verbose),
+            S2 = sym_eval(S0, LoopCount, P1, Verbose),
             compare_states(S1, S2)
         catch K:Err ->
             equals({K, Err, erlang:get_stacktrace()}, ok)
