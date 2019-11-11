@@ -142,10 +142,6 @@ ns_claim_valid(S = #{height := Height}, [Account, #{name := Name} = Tx]) ->
          {valid_bid, is_valid_bid(Protocol, S, Name, maps:get(name_fee, Tx))}]).
 
 ns_claim_tx(S, [Account, Tx]) ->
-  %% FixTx = case maps:get(name_fee, Tx) == prelima orelse P < ?LIMA_PROTOCOL_VSN of
-  %%           true -> maps:remove(name_fee, Tx);
-  %%           false -> Tx
-  %%         end,
   Tx1       = update_nonce(S, Account, Tx),
   AccountId = aeser_id:create(account, get_account_key(S, Account)),
   aens_claim_tx:new(Tx1#{ account_id => AccountId }).
