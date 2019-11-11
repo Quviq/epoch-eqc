@@ -11,7 +11,7 @@
 
 -import(txs_eqc, [gen_tx/1]).
 
--import(txs_contracts_eqc, [gen_contract_opts/1, contract_tx_fee/4, contract_gas/4]).
+-import(txs_contracts_eqc, [gen_contract_opts/1, contract_gas/4]).
 
 -import(txs_channels_eqc, [is_channel_party/3]).
 
@@ -29,13 +29,12 @@ ga_attach_args(#{protocol := P} = S) ->
   ?LET(Name, gen_auth_contract(),
   ?LET({Compiler, VM, ABI}, gen_contract_opts(P),
   begin
-    TxFee   = contract_tx_fee(S, create, Name, ABI) + 32 * 20,
     GasUsed = contract_gas(Name, init, ABI, P),
     SymName = next_id(contract),
     [Account, Name, SymName, Compiler,
      #{vm_version  => VM,
        abi_version => ABI,
-       fee         => gen_fee_above(S, TxFee),
+       fee         => gen_fee(S, contract_create, ABI),
        gas_price   => gen_gas_price(P),
        gas         => gen_gas(GasUsed),
        nonce       => gen_nonce(),
@@ -121,7 +120,8 @@ ga_meta_valid(S = #{protocol := P}, [GAAccount, MTx, TxArgs = [_, Tx, _]]) ->
   andalso is_valid_auth_gas(S, GAAccount, maps:get(abi_version, MTx), P, maps:get(gas, MTx))
   andalso check_abi(S, GAAccount, maps:get(abi_version, MTx))
   andalso check_relevant_signer(S, GAAccount, TxArgs)
-  andalso txs_contracts_eqc:valid_contract_fee(S, ga_meta_tx_fee(Tx), MTx).
+  andalso is_valid_meta_fee(S, Tx, MTx)
+  andalso txs_contracts_eqc:is_valid_gas_price(S, MTx).
 
 ga_meta_tx(S, [GAAccount, MTx, [M, Tx, TxData]]) ->
   {ok, InnerTx} = apply(M, ?tx(Tx), [?WGA(GAAccount, ga_bump_nonce(GAAccount, S)), TxData]),
@@ -201,15 +201,22 @@ gen_meta_params(S = #{ protocol := P }, GA, Tx) ->
       %% {txs_contracts_eqc:gen_abi(ABI), ga_meta_tx_fee() * 1000000, gen_gas(500), gen_gas_price(P)};
       ABI = txs_contracts_eqc:abi_to_int(SymABI),
       #account{ nonce = N } = get_account(S, GA),
-      {txs_contracts_eqc:gen_abi(SymABI), ga_meta_tx_fee(Tx) * 1000000, gen_auth_gas(auth_gas(ABI, N + 1, P)), gen_gas_price(P)};
+      {txs_contracts_eqc:gen_abi(SymABI), gen_meta_fee(S, Tx), gen_auth_gas(auth_gas(ABI, N + 1, P)), gen_gas_price(P)};
     _ ->
-      {elements([abi_fate_1, abi_aevm_1]), ga_meta_tx_fee(Tx) * 1000000, 500, 1000000}
+      {elements([abi_fate_1, abi_aevm_1]), gen_meta_fee(S, Tx), 500, 1000000}
   end.
 
-ga_meta_tx_fee(contract_create) ->
-  125000;
-ga_meta_tx_fee(_) ->
-  99999.
+-define(GA_META_BASE_FEE, 75000).
+gen_meta_fee(#{ protocol := P }, Tx) ->
+  SizeFee = case P < ?IRIS_PROTOCOL_VSN of
+              true  -> 5000 + txs_utils:size_extra_fee(not_used, Tx);
+              false -> 5000
+            end,
+  weighted_default({49, ?LET(Delta, choose(0, 5000), (?GA_META_BASE_FEE + SizeFee + Delta) * minimum_gas_price(P))},
+                   {1,  ?LET(Delta, choose(1, 2000), (?GA_META_BASE_FEE - Delta) * minimum_gas_price(P))}).
+
+is_valid_meta_fee(#{ protocol := P }, _Tx, #{ fee := Fee }) ->
+  Fee >= ?GA_META_BASE_FEE * minimum_gas_price(P).
 
 %% -- Local helpers ---------------------------------------------------------
 is_valid_auth_gas(S, GA, ABI, P, Gas) ->
@@ -254,7 +261,7 @@ signers(S, [_, Tx, [S1, S2, ChId, _]]) when ?IS_SC_DOUBLE_SIGNED(Tx) ->
   [S1 || is_channel_party(S, S1, ChId)] ++ [S2 || is_channel_party(S, S2, ChId)];
 signers(S, [_, response_oracle, [QId, _]]) ->
   [signer(S, QId)];
-signers(S, A = [_, _, [Signer | _]]) ->
+signers(S, [_, _, [Signer | _]]) ->
   [signer(S, Signer)].
 
 %% ga_signer(S, [_, ga_meta, [_, _, TxArgs]])       -> ga_signer(S, TxArgs);

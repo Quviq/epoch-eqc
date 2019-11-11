@@ -25,7 +25,7 @@ spend_pre(S) ->
 %% here we should add spending to oracle and contract
 %% aeser_id:specialize_type(Recv),
 %% names are always accounts, hard coded in tx_processor
-spend_args(#{protocol := Protocol} = S) ->
+spend_args(S) ->
   ?LET([Sender, To], [gen_account_id(1, 49, S),
                       frequency([{10, {account, gen_account_id(2, 1, S)}},
                                  {2, {oracle, gen_account_id(1, 49, S)}}] ++      %% There is no check account really is an oracle!
@@ -35,7 +35,7 @@ spend_args(#{protocol := Protocol} = S) ->
        ,
        [Sender, To,
         #{ amount  => gen_spend_amount(S, Sender),
-           fee     => gen_fee(Protocol),
+           fee     => gen_fee(S, spend),
            nonce   => gen_nonce(),
            payload => utf8() }]).
 
@@ -43,7 +43,7 @@ spend_valid(S, [Sender, {ReceiverTag, Receiver}, Tx]) ->
   is_account(S, Sender)
     andalso maps:get(nonce, Tx) == good
     andalso check_balance(S, Sender, maps:get(amount, Tx), maps:get(fee, Tx))
-    andalso valid_fee(S, Tx)
+    andalso is_valid_fee(S, spend, Tx)
     andalso case ReceiverTag of
               account  -> true;
               oracle   -> true; %% an account is generated if oracle does not exist

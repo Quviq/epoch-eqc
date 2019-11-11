@@ -28,13 +28,12 @@ contract_create_args(#{protocol := Protocol} = S) ->
     ?LET(Name, noshrink(gen_contract()),
     ?LET({Compiler, VM, ABI}, gen_contract_opts(Protocol),
         begin
-            Fixed   = contract_tx_fee(S, create, Name, ABI),
             GasUsed = contract_gas(Name, init, ABI, Protocol),
             SymName = next_id(contract),
             [Creator, Name, SymName, Compiler,
              #{vm_version  => VM,
                abi_version => ABI,
-               fee         => gen_fee_above(S, Fixed),
+               fee         => gen_fee(S, conctract_create, ABI),
                gas_price   => gen_gas_price(Protocol),
                gas         => gen_gas(GasUsed),
                nonce       => gen_nonce(),
@@ -45,14 +44,14 @@ contract_create_args(#{protocol := Protocol} = S) ->
 
 contract_create_valid(S, [Creator, Name, _SymName, CompilerVersion, Tx]) ->
     ABI      = maps:get(abi_version, Tx),
-    Fixed    = contract_tx_fee(S, create, Name, ABI),
     Protocol = maps:get(protocol, S),
     Gas      = maps:get(gas, Tx),
     is_account(S, Creator)
     andalso maps:get(nonce, Tx) == good
     andalso check_balance(S, Creator, maps:get(amount, Tx) + maps:get(deposit, Tx),
                                       maps:get(fee, Tx) + Gas * maps:get(gas_price, Tx))
-    andalso valid_contract_fee(S, Fixed, Tx)
+    andalso is_valid_fee(S, contract_create, ABI, Tx)
+    andalso is_valid_gas_price(S, Tx)
     andalso check_contract_opts(Protocol, CompilerVersion, maps:get(vm_version, Tx), ABI).
 
 check_contract_opts(?ROMA_PROTOCOL_VSN,    ?SOPHIA_ROMA,      aevm_sophia_1, abi_aevm_1) -> true;
@@ -155,7 +154,7 @@ contract_call_args(#{protocol := Protocol} = S) ->
              UseGas = contract_gas(Name, Fun, ABI, Protocol),
              [Caller, ContractId,
               #{abi_version => abi_to_int(ABI),
-                fee         => gen_fee_above(S, contract_tx_fee(S, call, Name, ABI)),
+                fee         => gen_fee(S, contract_call, ABI),
                 gas_price   => gen_gas_price(Protocol),
                 gas         => gen_gas(UseGas),
                 nonce       => gen_nonce(),
@@ -181,7 +180,8 @@ contract_call_valid(S, [Caller, CId = ?CONTRACT(_), Tx]) ->
     is_account(S, Caller)
     andalso Nonce == good
     andalso check_balance(S, Caller, Amount, Fee + Gas * GasPrice)
-    andalso valid_contract_fee(S, contract_tx_fee(S, call, Name, ABI), Tx)
+    andalso is_valid_fee(S, contract_call, ABI, Tx)
+    andalso is_valid_gas_price(S, Tx)
     andalso is_valid_gas(Name, F, ABI, VM, maps:get(protocol, S), Gas)
     andalso ABI == abi_to_int(CABI);
 contract_call_valid(_, _) ->
@@ -286,9 +286,8 @@ is_payable_contract(S, C) ->
           not lists:member(VM, [fate_sophia_1, aevm_sophia_4])
     end.
 
-valid_contract_fee(S, Fixed, #{ fee := Fee, gas_price := GasPrice }) ->
-    GasPrice >= minimum_gas_price(maps:get(protocol, S))
-        andalso Fee >= Fixed * minimum_gas_price(maps:get(protocol, S)).
+is_valid_gas_price(S, #{ gas_price := GasPrice }) ->
+    GasPrice >= minimum_gas_price(maps:get(protocol, S)).
 
 is_valid_gas(Name, Fun, ABI, VM, P, Gas) ->
     GasUse = contract_gas(Name, Fun, ABI, P),
@@ -434,28 +433,6 @@ contract_gas(simple_state, "n_checks", ?ABI_AEVM_1, P) when P < ?LIMA_PROTOCOL_V
 contract_gas(simple_state, "n_checks", ?ABI_AEVM_1, _) -> 647;
 contract_gas(simple_state, "n_checks", ?ABI_FATE_1, _) -> 21;
 contract_gas(_, _, _, _) -> 1000.
-
-contract_tx_fee(S, Type, Name, ABI) when is_atom(ABI) ->
-  contract_tx_fee(S, Type, Name, abi_to_int(ABI));
-contract_tx_fee(#{ ga := _, protocol := P }, Type, _Name, ABI) when P < ?IRIS_PROTOCOL_VSN ->
-  base_gas(Type, ABI);
-contract_tx_fee(_S, Type, Name, ABI) ->
-  base_gas(Type, ABI) + 20 * size_gas(Type, Name, ABI).
-
-base_gas(create, _)         -> 75000;
-base_gas(call, ?ABI_AEVM_1) -> 450000;
-base_gas(call, ?ABI_FATE_1) -> 180000;
-base_gas(_, _)              -> 450000.
-
-size_gas(create, identity, ?ABI_AEVM_1)        -> 1200;
-size_gas(create, identity, ?ABI_FATE_1)        -> 200;
-size_gas(create, authorize_nonce, ?ABI_AEVM_1) -> 1700;
-size_gas(create, authorize_nonce, ?ABI_FATE_1) -> 300;
-size_gas(create, simple_state, ?ABI_AEVM_1)    -> 2100;
-size_gas(create, simple_state, ?ABI_FATE_1)    -> 300;
-size_gas(call, _, ?ABI_AEVM_1)                 -> 230;
-size_gas(call, _, ?ABI_FATE_1)                 -> 110;
-size_gas(_, _, _)                              -> 1000.
 
 contract_payable_fun(simple_state, "n_checks", VM) ->
     VM /= aevm_sophia_4 andalso VM /= fate_sophia_1;

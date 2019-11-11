@@ -76,14 +76,14 @@ ns_preclaim_args(S = #{protocol := P}) ->
   ?LET([Account, Name, Salt],
        [gen_account(1, 49, S), gen_name(P), gen_salt()],
        [Account, {Name, Salt},
-        #{fee => gen_fee(P),
+        #{fee => gen_fee(S, ns_preclaim),
           nonce => gen_nonce()}]).
 
 ns_preclaim_valid(S, [Account, {Name, Salt}, Tx]) ->
   valid([{account, is_account(S, Account)},
          {balance, check_balance(S, Account, maps:get(fee, Tx))},
          {nonce, maps:get(nonce, Tx) == good},
-         {fee, tx_utils:valid_fee(S, Tx)},
+         {fee, is_valid_fee(S, ns_preclaim, Tx)},
          {new_name_and_salt, new_name_and_salt(maps:get(preclaims, S, []), Name, Salt)}
         ]).
 
@@ -119,12 +119,12 @@ ns_preclaim_features(S, [_Account, {_Name, _Salt}, _Tx] = Args, Res) ->
 ns_claim_pre(S) ->
   maps:is_key(accounts, S) andalso maps:get(auctions, S) ++ maps:get(preclaims, S, []) /= [].
 
-ns_claim_args(S = #{protocol := Protocol}) ->
+ns_claim_args(S) ->
   ?LET({Name, Salt, Account}, gen_claim(S),
        [Account,
         #{name => Name,
           name_salt => Salt,
-          fee => gen_fee(Protocol),
+          fee => gen_fee(S, ns_claim),
           name_fee => gen_name_claim_fee(S, Name),
           nonce => gen_nonce()}]).
 
@@ -133,7 +133,7 @@ ns_claim_valid(S = #{height := Height}, [Account, #{name := Name} = Tx]) ->
   valid([{account, is_account(S, Account)},
          {balance, check_balance(S, Account, name_fee(Tx), maps:get(fee, Tx))},
          {nonce, maps:get(nonce, Tx) == good},
-         {fee, tx_utils:valid_fee(S, Tx)},
+         {fee, is_valid_fee(S, ns_claim, Tx)},
          {preclaim, is_valid_preclaim(Protocol, S, Tx, Account)},  %% after Lima Salt distinguishes
          {valid_name, valid_name(Protocol, maps:get(name,Tx))},
          {unclaimed, not is_claimed(S, Name)},
@@ -214,14 +214,14 @@ ns_claim_features(S =  #{height := Height}, [_Account, Tx] = Args, Res) ->
 ns_update_pre(S) ->
   maps:is_key(accounts, S).
 
-ns_update_args(S = #{protocol := Protocol}) ->
+ns_update_args(S) ->
   ?LET({{Name, Account}, Pointers},
        {gen_claimed_name(S), gen_pointers(S)},
        [Account, Name, Pointers,
         #{name_id => aeser_id:create(name, aens_hash:name_hash(Name)),
           name_ttl => frequency([{10, nat()}, {1, 36000}, {10, 25000}, {1, choose(30000, 60000)}]),
           client_ttl => nat(),
-          fee => gen_fee(Protocol),
+          fee => gen_fee(S, ns_update),
           nonce => gen_nonce()
          }]).
 
@@ -229,7 +229,7 @@ ns_update_valid(S, [Account, Name, _Pointers, Tx]) ->
   valid([{account, is_account(S, Account)},
          {balance, check_balance(S, Account, maps:get(fee, Tx))},
          {nonce, maps:get(nonce, Tx) == good},
-         {fee, tx_utils:valid_fee(S, Tx)},
+         {fee, is_valid_fee(S, ns_update, Tx)},
          {name_expiry, maps:get(name_ttl, Tx) =< aec_governance:name_claim_max_expiration()},
          {claimed_name, is_claimed_name(S, Name)},
          {owner, owns_name(S, Account, Name)}]).
@@ -278,11 +278,11 @@ ns_update_features(S, [_Account, _Name, Pointers, _Tx] = Args, Res) ->
 ns_revoke_pre(S) ->
   maps:is_key(accounts, S).
 
-ns_revoke_args(#{protocol := Protocol} = S) ->
+ns_revoke_args(S) ->
   ?LET({Name, Account}, gen_claimed_name(S),
        [Account, Name,
         #{name_id => aeser_id:create(name, aens_hash:name_hash(Name)),
-          fee => gen_fee(Protocol),
+          fee => gen_fee(S, ns_revoke),
           nonce => gen_nonce()
          }]).
 
@@ -290,7 +290,7 @@ ns_revoke_valid(S, [Account, Name, Tx]) ->
   valid([{account, is_account(S, Account)},
          {balance, check_balance(S, Account, maps:get(fee, Tx))},
          {nonce, maps:get(nonce, Tx) == good},
-         {fee, tx_utils:valid_fee(S, Tx)},
+         {fee, is_valid_fee(S, ns_revoke, Tx)},
          {claimed_name, is_claimed_name(S, Name)},
          {owner, owns_name(S, Account, Name)}]).
 
@@ -337,7 +337,7 @@ ns_transfer_args(#{protocol := Protocol} = S) ->
                   [{10, {name, elements(ExistingNames)}} || ExistingNames /= []])},
        [Account, To, Name,
         #{name_id => aeser_id:create(name, aens_hash:name_hash(Name)),
-          fee     => gen_fee(Protocol),
+          fee     => gen_fee(S, ns_transfer),
           nonce   => gen_nonce()
          }]).
 
@@ -345,7 +345,7 @@ ns_transfer_valid(S, [Account, To, Name, Tx]) ->
   valid([{account, is_account(S, Account)},
          {balance, check_balance(S, Account, maps:get(fee, Tx))},
          {nonce, maps:get(nonce, Tx) == good},
-         {fee, tx_utils:valid_fee(S, Tx)},
+         {fee, is_valid_fee(S, ns_transfer, Tx)},
          {claimed_name, is_claimed_name(S, Name)},
          {owner, owns_name(S, Account, Name)},
          {receiver_account,

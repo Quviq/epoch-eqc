@@ -42,13 +42,13 @@ mine_features(#{height := Height} = S, [Blocks], _Res) ->
 register_oracle_pre(S) ->
     maps:is_key(accounts, S).
 
-register_oracle_args(S = #{protocol := Protocol}) ->
+register_oracle_args(S) ->
      ?LET(Account, gen_non_oracle_account(1, 49, S),
           [Account,
            #{query_format    => <<"send me any string"/utf8>>,
              response_format => <<"boolean()"/utf8>>,
              query_fee       => gen_query_fee(),
-             fee             => gen_fee(Protocol),
+             fee             => gen_fee(S, register_oracle),
              nonce           => gen_nonce(),
              oracle_ttl      => frequency([{9, {delta, 1001}},
                                            {1, {delta, elements([0, 1, 2])}},
@@ -59,7 +59,7 @@ register_oracle_valid(S = #{height := Height}, [Account, Tx]) ->
     is_account(S, Account)
     andalso check_balance(S, Account, maps:get(fee, Tx))
     andalso maps:get(nonce, Tx) == good
-    andalso valid_fee(S, Tx)
+    andalso is_valid_fee(S, register_oracle, Tx)
     andalso valid_ttl(Height, maps:get(oracle_ttl, Tx))
     andalso (not is_oracle(S, Account) orelse oracle_ttl(S, mk_oracle_id(Account)) < Height).
     %% Very nice shrinking example if removing 'oracle_ttl(S, Account) < Height'
@@ -94,13 +94,13 @@ register_oracle_features(S, [_Account, _Tx] = Args, Res) ->
 extend_oracle_pre(S) ->
     maps:is_key(accounts, S).
 
-extend_oracle_args(S = #{protocol := Protocol}) ->
+extend_oracle_args(S) ->
     ?LET({OracleId, DeltaTTL},
          {gen_oracle_id(1, 49, S), gen_ttl()},  %% TTL always relative
          [resolve_oracle(S, OracleId),
           #{nonce      => gen_nonce(),
             oracle_ttl => {delta, DeltaTTL},
-            fee        => gen_fee(Protocol)
+            fee        => gen_fee(S, extend_oracle)
            }]).
 
 extend_oracle_valid(S = #{height := Height}, [Oracle, Tx]) ->
@@ -109,7 +109,7 @@ extend_oracle_valid(S = #{height := Height}, [Oracle, Tx]) ->
     andalso is_account(S, Account)
     andalso maps:get(nonce, Tx) == good
     andalso check_balance(S, Account, maps:get(fee, Tx))
-    andalso valid_fee(S, Tx)
+    andalso is_valid_fee(S, extend_oracle, Tx)
     andalso oracle_ttl(S, Oracle) >= Height.
 
 extend_oracle_tx(S, [Oracle, Tx]) ->
@@ -139,7 +139,7 @@ extend_oracle_features(S, Args, Res) ->
 query_oracle_pre(S) ->
      maps:is_key(accounts, S).
 
-query_oracle_args(#{protocol := Protocol} = S) ->
+query_oracle_args(S) ->
      ?LET({Sender, Oracle0},
           {gen_account(1, 49, S), gen_oracle_id(1, 49, S)},
           begin
@@ -153,7 +153,7 @@ query_oracle_args(#{protocol := Protocol} = S) ->
                  query_fee    => gen_query_fee(QueryFee),
                  query_ttl    => weighted_default({10, {delta, choose(1, 5)}}, {1, {block, choose(0, 1000)}}),
                  response_ttl => {delta, choose(1, 5)},  %% Always relative
-                 fee          => gen_fee(Protocol),
+                 fee          => gen_fee(S, query_oracle),
                  nonce        => gen_nonce()
                 }]
           end).
@@ -166,7 +166,7 @@ query_oracle_valid(S = #{height := Height}, [Sender, Oracle, _QId, Tx]) ->
     andalso is_account(S, Sender)
     andalso maps:get(nonce, Tx) == good
     andalso check_balance(S, Sender, maps:get(query_fee, Tx), maps:get(fee, Tx))
-    andalso valid_fee(S, Tx)
+    andalso is_valid_fee(S, query_oracle, Tx)
     andalso valid_ttl(Height, maps:get(query_ttl, Tx))
     andalso valid_ttl(Height, maps:get(response_ttl, Tx))
     andalso oracle_query_fee(S, Oracle) =< maps:get(query_fee, Tx)
@@ -235,12 +235,12 @@ query_oracle_features(S, [_Sender, _Oracle, _SymId, _Tx] = Args, Res) ->
 response_oracle_pre(S) ->
      maps:is_key(queries, S).
 
-response_oracle_args(#{protocol := Protocol} = S) ->
+response_oracle_args(S) ->
      ?LET(QueryId, gen_query_id(1, 49, S),
           [QueryId,
            #{response     => weighted_default({9, <<"yes, you can">>}, {1, utf8()}),
              response_ttl => gen_query_response_ttl(S, QueryId),
-             fee          => gen_fee(Protocol),
+             fee          => gen_fee(S, response_oracle),
              nonce        => gen_nonce()
             }]).
 
@@ -252,7 +252,7 @@ response_oracle_valid(S = #{height := Height}, [QueryId, Tx]) ->
     andalso is_account(S, Account)
     andalso maps:get(nonce, Tx) == good
     andalso check_balance(S, Account, maps:get(fee, Tx))
-    andalso valid_fee(S, Tx)
+    andalso is_valid_fee(S, response_oracle, Tx)
     andalso query_query_ttl(S, QueryId) >= Height
     andalso query_response_ttl(S, QueryId) == maps:get(response_ttl, Tx)
     andalso not is_expired_query(S, QueryId).

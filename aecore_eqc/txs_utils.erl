@@ -58,16 +58,6 @@ valid_fee(#{protocol := P}, #{ fee := Fee }) ->
 
 %% Shared generators
 
-gen_fee(Protocol) ->
-    frequency([{98, ?LET(F, choose(20000, 30000), F * minimum_gas_price(Protocol))},
-               {1,  ?LET(F, choose(0, 15000), F)},   %%  too low (and very low for hard fork)
-               {1,  ?LET(F, choose(0, 15000), F * minimum_gas_price(Protocol))}]).    %% too low
-
-gen_fee_above(Protocol, Amount) ->
-    frequency([{198, ?LET(F, choose(Amount, Amount + 10000), F * minimum_gas_price(Protocol))},
-               {1,  ?LET(F, choose(0, Amount - 5000), F)},   %%  too low (and very low for hard fork)
-               {1,  ?LET(F, choose(0, Amount - 5000), F * minimum_gas_price(Protocol))}]).    %% too low
-
 gen_nonce() ->
     weighted_default({99, good}, {1, {bad, elements([-1, 1, -5, 5, 10000])}}).
 
@@ -249,3 +239,46 @@ next_id(Type) ->
   put(ids, Ids#{ Type := X + 1 }),
   list_to_atom(lists:concat([Type, "_", X])).
 
+%% --- TX fee
+
+size_extra_fee(S, Tx) -> size_extra_fee(S, Tx, 0).
+
+size_extra_fee(#{ga := _, protocol := P}, _Tx, _ABI) when P < ?IRIS_PROTOCOL_VSN -> 1000;
+size_extra_fee(_, Tx, ABI) ->
+  case Tx of
+    sc_snapshot_solo  -> 25000;
+    sc_close_solo     -> 25000;
+    sc_force_progress -> 100000;
+    sc_slash          -> 25000;
+    contract_create when ABI == ?ABI_FATE_1 -> 10000;
+    contract_create   -> 45000;
+    ga_meta           -> 10000;
+    ns_update         -> 5000;
+    ns_claim          -> 5000;
+    _                 -> 3000
+  end.
+
+base_gas(Tx, ABI) ->
+  case Tx of
+    contract_create   -> 75000;
+    contract_call when ABI == ?ABI_FATE_1 -> 180000;
+    contract_call     -> 450000;
+    sc_force_progress -> 450000;
+    paying_for        -> 3000;
+    _                 -> 15000
+  end.
+
+gen_fee(S, Tx) -> gen_fee(S, Tx, 0).
+
+gen_fee(S = #{ protocol := P }, Tx, ABI) ->
+    BaseCost   = base_gas(Tx, ABI),
+    NormalCost = BaseCost + size_extra_fee(S, Tx, ABI),
+    frequency([{49, ?LET(Delta, choose(0, 5000), (NormalCost + Delta) * minimum_gas_price(P))},
+               {1,  ?LET(Delta, choose(1, 2999), (BaseCost - Delta) * minimum_gas_price(P))}]).
+
+is_valid_fee(S, Tx, TxData) -> is_valid_fee(S, Tx, 0, TxData).
+
+is_valid_fee(S, Tx, ABI, #{ fee := Fee }) ->
+  is_valid_fee(S, Tx, ABI, Fee);
+is_valid_fee(S = #{ protocol := P }, Tx, ABI, Fee) when is_integer(Fee) ->
+  (base_gas(Tx, ABI) + size_extra_fee(S, Tx, ABI)) * minimum_gas_price(P) =< Fee.

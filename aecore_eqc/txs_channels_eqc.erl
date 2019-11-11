@@ -19,7 +19,7 @@ initial_state(S) -> S#{ channels => #{} }.
 sc_create_pre(S) ->
   maps:size(maps:get(accounts, S)) > 1.
 
-sc_create_args(S = #{ protocol := P }) ->
+sc_create_args(S) ->
   ?LET(Initiator, gen_account(1, 49, S),
   ?LET(Responder, gen_account(1, 49, maps:remove(ga, S#{paying_for => Initiator})), %% Avoid I == R
   ?LET({IAmt, RAmt, ChResv}, gen_sc_create_amounts(S, Initiator, Responder),
@@ -28,7 +28,7 @@ sc_create_args(S = #{ protocol := P }) ->
            responder_amount => RAmt,
            channel_reserve  => ChResv,
            lock_period      => gen_lock_period(),
-           fee              => gen_fee(P),
+           fee              => gen_fee(S, sc_create),
            nonce            => gen_nonce()
          }]))).
 
@@ -40,7 +40,7 @@ sc_create_valid(S, [Init, Resp, _, Tx]) ->
   andalso is_account(S, Resp)
   andalso Init /= Resp
   andalso maps:get(nonce, Tx) == good
-  andalso valid_fee(S, Tx)
+  andalso is_valid_fee(S, sc_create, Tx)
   andalso check_balance(S, Init, maps:get(initiator_amount, Tx), maps:get(fee, Tx))
   andalso check_balance(S, Resp, maps:get(responder_amount, Tx), 0)
   andalso maps:get(initiator_amount, Tx) >= maps:get(channel_reserve, Tx)
@@ -106,7 +106,7 @@ sc_deposit_args(S) ->
     NotActor = get_not_actor(S, Channel, Actor),
     [Actor, NotActor, Channel,
      #{ amount => gen_amount(S, Actor),
-        fee    => gen_fee(S),
+        fee    => gen_fee(S, sc_deposit),
         nonce  => gen_nonce(),
         round  => gen_round(S, Channel)
       }]
@@ -120,7 +120,7 @@ sc_deposit_valid(S, [Actor, NotActor, Channel, Tx]) ->
   andalso is_channel_party(S, Actor, Channel)
   andalso is_channel_active(S, Channel)
   andalso maps:get(nonce, Tx) == good
-  andalso valid_fee(S, Tx)
+  andalso is_valid_fee(S, sc_deposit, Tx)
   andalso check_balance(S, Actor, maps:get(amount, Tx), maps:get(fee, Tx))
   andalso is_valid_round(S, Channel, maps:get(round, Tx)).
 
@@ -163,7 +163,7 @@ sc_withdraw_args(S) ->
     NotActor = get_not_actor(S, Channel, Actor),
     [Actor, NotActor, Channel,
      #{ amount => gen_withdraw_amount(S, Channel),
-        fee    => gen_fee(S),
+        fee    => gen_fee(S, sc_withdraw),
         nonce  => gen_nonce(),
         round  => gen_round(S, Channel)
       }]
@@ -188,7 +188,7 @@ sc_withdraw_valid(S, [Actor, NotActor, Channel, Tx]) ->
   andalso is_channel_party(S, Actor, Channel)
   andalso is_channel_active(S, Channel)
   andalso maps:get(nonce, Tx) == good
-  andalso valid_fee(S, Tx)
+  andalso is_valid_fee(S, sc_withdraw, Tx)
   andalso check_balance(S, Actor, maps:get(fee, Tx))
   andalso is_valid_withdraw(S, Channel, maps:get(amount, Tx))
   andalso is_valid_round(S, Channel, maps:get(round, Tx)).
@@ -230,7 +230,7 @@ sc_close_mutual_args(S) ->
   ?LET({Actor, Channel}, gen_channel_id(1, 39, S),
   begin
     NotActor = get_not_actor(S, Channel, Actor),
-    ?LET(Fee, gen_fee(S),
+    ?LET(Fee, gen_fee(S, sc_close_mutual),
     ?LET({IAmt, RAmt}, gen_close_mutual_amounts(S, Channel, Fee),
          [Actor, NotActor, Channel,
           #{ initiator_amount_final => IAmt,
@@ -247,8 +247,8 @@ sc_close_mutual_valid(S, [Actor, NotActor, Channel, Tx]) ->
   andalso is_account(S, NotActor)
   andalso is_channel_party(S, Actor, Channel)
   andalso maps:get(nonce, Tx) == good
-  andalso valid_fee(S, Tx)
   andalso check_balance(S, Actor, maps:get(fee, Tx))
+  andalso is_valid_fee(S, sc_close_mutual, Tx)
   andalso is_valid_close_mutual(S, Channel, Tx).
 
 sc_close_mutual_tx(S, [Actor, _NotActor, Channel, Tx]) ->
@@ -284,7 +284,7 @@ sc_snapshot_solo_pre(S) ->
 
 sc_snapshot_solo_args(S) ->
   ?LET({Actor, Channel}, gen_active_channel_id(1, 39, S),
-       [Actor, Channel, #{ fee   => gen_big_fee(S),
+       [Actor, Channel, #{ fee   => gen_fee(S, sc_snapshot_solo),
                            round => gen_round(S, Channel),
                            nonce => gen_nonce() }]).
 
@@ -295,7 +295,7 @@ sc_snapshot_solo_valid(S, [Actor, Channel, Tx]) ->
   andalso is_channel_party(S, Actor, Channel)
   andalso is_channel_active(S, Channel)
   andalso maps:get(nonce, Tx) == good
-  andalso valid_sc_fee(S, Tx)
+  andalso is_valid_fee(S, sc_snapshot_solo, Tx)
   andalso check_balance(S, Actor, maps:get(fee, Tx))
   andalso is_valid_round(S, Channel, maps:get(round, Tx)).
 
@@ -334,7 +334,7 @@ sc_close_solo_pre(S) ->
 sc_close_solo_args(S) ->
   ?LET({Actor, Channel}, gen_active_channel_id(1, 39, S),
   ?LET({PayLoad, Round}, {gen_payload(S, Channel), gen_round(S, Channel)},
-       [Actor, Channel, #{ fee     => gen_big_fee(S),
+       [Actor, Channel, #{ fee     => gen_fee(S, sc_close_solo),
                            payload => if PayLoad == on_chain -> PayLoad; true -> {PayLoad, Round} end,
                            nonce   => gen_nonce() }])).
 
@@ -348,7 +348,7 @@ sc_close_solo_valid(S, [Actor, Channel, Tx = #{ payload := PayLoad }]) ->
   andalso is_channel_party(S, Actor, Channel)
   andalso is_channel_active(S, Channel)
   andalso maps:get(nonce, Tx) == good
-  andalso valid_sc_fee(S, Tx)
+  andalso is_valid_fee(S, sc_close_solo, Tx)
   andalso check_balance(S, Actor, maps:get(fee, Tx))
   andalso is_valid_payload(S, Channel, PayLoad)
   andalso (case PayLoad of on_chain -> true;
@@ -398,7 +398,7 @@ sc_settle_pre(S) ->
 
 sc_settle_args(S) ->
   ?LET({Actor, Channel}, gen_closed_channel_id(1, 39, S),
-  ?LET(Fee, gen_fee(S),
+  ?LET(Fee, gen_fee(S, sc_settle),
   ?LET({IAmt, RAmt}, gen_settle_amounts(S, Channel),
        [Actor, Channel,
         #{ initiator_amount_final => IAmt,
@@ -414,7 +414,7 @@ sc_settle_valid(S, [Actor, Channel, Tx]) ->
   andalso is_channel_party(S, Actor, Channel)
   andalso is_channel_closed(S, Channel)
   andalso maps:get(nonce, Tx) == good
-  andalso valid_fee(S, Tx)
+  andalso is_valid_fee(S, sc_settle, Tx)
   andalso check_balance(S, Actor, maps:get(fee, Tx))
   andalso is_valid_settle(S, Channel, Tx).
 
@@ -452,7 +452,7 @@ sc_force_progress_pre(S) ->
 sc_force_progress_args(S) ->
   ?LET({Actor, Channel}, gen_active_channel_id(1, 39, S),
   ?LET(Payload, gen_fp_payload(S, Channel),
-       [Actor, Channel, #{ fee     => gen_big_fee(S, 1000000),
+       [Actor, Channel, #{ fee     => gen_fee(S, sc_force_progress),
                            payload => Payload,
                            round   => gen_round(S, Channel, Payload),
                            nonce   => gen_nonce() }])).
@@ -463,7 +463,7 @@ sc_force_progress_valid(S, [Actor, Channel, Tx = #{ payload := Payload }]) ->
   is_account(S, Actor)
   andalso is_channel_party(S, Actor, Channel)
   andalso maps:get(nonce, Tx) == good
-  andalso valid_sc_fee(S, Tx)
+  andalso is_valid_fee(S, sc_force_progress, Tx)
   andalso is_valid_fp_payload(S, Channel, maps:get(payload, Tx))
   andalso is_valid_round(S, Channel, Payload, maps:get(round, Tx), fp)
   andalso check_balance(S, Actor, maps:get(fee, Tx)).
@@ -511,7 +511,7 @@ sc_force_progress_next(S, _Value, Args = [Actor, Channel, Tx]) ->
 
       GasUsed = case ABI of
                   ?ABI_AEVM_1 -> 10000;
-                  ?ABI_FATE_1 -> 156
+                  ?ABI_FATE_1 -> 166
                 end,
 
       C = #channel{ state = CS, solo_rnd = SRnd } = get_channel(S2, Channel),
@@ -547,7 +547,7 @@ sc_slash_pre(S) ->
 
 sc_slash_args(S) ->
   ?LET({Actor, Channel}, gen_locked_channel_id(1, 39, S),
-       [Actor, Channel, #{ fee   => gen_big_fee(S),
+       [Actor, Channel, #{ fee   => gen_fee(S, sc_slash),
                            round => gen_round(S, Channel),
                            nonce => gen_nonce() }]).
 
@@ -558,7 +558,7 @@ sc_slash_valid(S, [Actor, Channel, Tx]) ->
   andalso is_channel_party(S, Actor, Channel)
   andalso is_channel_locked(S, Channel)
   andalso maps:get(nonce, Tx) == good
-  andalso valid_sc_fee(S, Tx)
+  andalso is_valid_fee(S, sc_slash, Tx)
   andalso is_valid_round(S, Channel, maps:get(round, Tx))
   andalso check_balance(S, Actor, maps:get(fee, Tx)).
 
@@ -740,7 +740,8 @@ gen_round_(S, ChId, MaxDelta) ->
       Rnd = lists:max([OffChainRnd, OnChainRnd, SoloRnd]),
       frequency([{39, Rnd + 1},
                  {10, ?LET(Delta, choose(1, MaxDelta), OnChainRnd + Delta) },
-                 {1,  ?LET(Delta, choose(0, 5), max(0, OnChainRnd - Delta))}])
+                 {1,  ?LET(Delta, choose(0, 5), max(0, OnChainRnd - Delta))}]
+                ++ [{5, ?LET(Delta, choose(1, MaxDelta), SoloRnd + Delta) } || SoloRnd > 0 ])
   end.
 
 gen_sc_create_amounts(S, Init, Resp) ->
@@ -818,16 +819,7 @@ gen_payload(S, ChId) ->
       payload
   end.
 
-gen_big_fee(S) -> gen_big_fee(S, 40000).
-
-gen_big_fee(#{ protocol := P }, Min) ->
-  weighted_default({49, ?LET(Delta, choose(0, 5000), (Min + Delta) * minimum_gas_price(P))},
-                   {1 , ?LET(Delta, choose(0, 2000), (17000 - Delta) * minimum_gas_price(P))}).
-
 %% --- local helpers ------
-valid_sc_fee(#{protocol := P}, #{ fee := Fee }) ->
-  Fee > (17000 * minimum_gas_price(P)).
-
 get_channel(S, ?CHANNEL(C)) -> get_channel(S, C);
 get_channel(#{ channels := Cs }, C) ->
   maps:get(C, Cs, false).

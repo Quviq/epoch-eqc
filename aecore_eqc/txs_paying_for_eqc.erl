@@ -28,7 +28,7 @@ paying_for_pre(S) ->
 paying_for_args(S) ->
   ?LET(Paying, gen_account(1, 49, S),
   ?LET(TxArgs = [_M, _Tx, _TxData], gen_tx(?PAYING(Paying, not_wga(S))),
-  ?LET({Nonce, Fee}, {gen_nonce(), gen_fee_above(S, 7000)},
+  ?LET({Nonce, Fee}, {gen_nonce(), gen_fee(S, paying_for)},
     [Paying, #{ nonce => Nonce, fee => Fee }, TxArgs]
   ))).
 
@@ -40,7 +40,7 @@ paying_for_valid(S = #{protocol := P}, [Paying, PTx, [M, Tx, TxData]]) ->
   P >= ?IRIS_PROTOCOL_VSN
   andalso is_account(S, Paying)
   andalso check_balance(S, Paying, maps:get(fee, PTx) + deep_fee(TxData))
-  andalso maps:get(fee, PTx) >= 7000 * minimum_gas_price(P)
+  andalso is_valid_fee(S, paying_for, PTx)
   andalso maps:get(nonce, PTx) == good
   andalso apply(M, ?valid(Tx), [?PAYING(Paying, not_wga(S)), TxData]).
 
