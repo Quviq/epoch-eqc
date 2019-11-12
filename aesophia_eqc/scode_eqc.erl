@@ -67,15 +67,22 @@ string_g() ->
 immediate_g() ->
     {immediate, fate_eqc:value_g()}.
 
+immediate_g(Type) ->
+    {immediate, fate_eqc:value_g(Type)}.
+
 out_arg_g() ->
     oneof([{stack, 0},
            {arg,   choose(0, 2)},
            {var,   choose(0, 2)},
            {store, choose(1, 3)}]).
 
-arg_g() -> out_arg_g().
-    %% weighted_default({0, immediate_g()},
-    %%                  {9, out_arg_g()}).
+arg_g() ->
+    weighted_default({1,  immediate_g()},
+                     {19, out_arg_g()}).
+
+arg_g(Type) ->
+    weighted_default({1, immediate_g(Type)},
+                     {19, out_arg_g()}).
 
 args_g('CALL_R') ->
     ?LET({Fun, [R | Args]}, {string_g(), vector(4, arg_g())},
@@ -101,7 +108,7 @@ switch_g() ->
 
 switch_type_g() ->
     oneof([boolean, tuple,
-           {variant, eqc_gen:fmap(fun(N) -> lists:duplicate(N, any) end, choose(1, 3))}]).
+           {variant, eqc_gen:fmap(fun(N) -> lists:duplicate(N, tuple) end, choose(1, 3))}]).
 
 switch_alt_g(D) ->
     weighted_default(
@@ -121,7 +128,7 @@ switch_g(D) ->
     ?LET(Type, switch_type_g(),
     ?LET(Alts, switch_alts_g(Type, D - 1),
     ?LET(Def,  smaller(2, switch_alt_g(D - 1)),
-        {switch, arg_g(), Type, Alts, Def})))).
+        {switch, arg_g(Type), Type, Alts, Def})))).
 
 smaller(K, G) -> ?SIZED(N, resize(N div K, G)).
 longer_list(K, G) -> ?SIZED(N, resize(N * K, list(resize(N, G)))).
@@ -146,6 +153,8 @@ init_state() ->
        store => #{},
        effects => [] }.
 
+op_view(switch_body) ->
+    {switch_body, none, []};
 op_view(I) when element(1, I) == 'PUSH';
                 element(1, I) == 'CALL';
                 element(1, I) == 'CALL_R';
@@ -160,6 +169,23 @@ op_view(I) ->
         {[out | _], [Dst | In]} -> {Op, Dst, In};
         _                       -> {Op, none, Args}
     end.
+
+is_value(N) when is_integer(N) -> true;
+is_value(S) when is_binary(S)  -> true;
+is_value(false)                -> true;
+is_value(true)                 -> true;
+is_value({bits, _})            -> true;
+is_value({bytes, _})           -> true;
+is_value({address, _})         -> true;
+is_value({contract, _})        -> true;
+is_value({oracle, _})          -> true;
+is_value({oracle_query, _})    -> true;
+is_value({tuple, _})           -> true;
+is_value({variant, _, _, _})   -> true;
+is_value(L) when is_list(L)    -> true;
+is_value(M) when is_map(M)     -> true;
+is_value({typerep, _})         -> true;
+is_value(_)                    -> false.
 
 read_arg(#{ stack := Stack } = S, {stack, 0}) ->
     case Stack of
@@ -199,35 +225,75 @@ side_effect(Op, Vs, S) ->
         false -> S
     end.
 
-alt_tag(boolean, 1)      -> false;
-alt_tag(boolean, 2)      -> true;
-alt_tag(tuple,   1)      -> tuple;
+alt_tag(boolean, 0)      -> false;
+alt_tag(boolean, 1)      -> true;
+alt_tag(tuple,   0)      -> tuple;
 alt_tag({variant, _}, I) -> {con, I}.
 
-branches(_Path, _Reads, missing, []) -> [];
-branches(Path, Reads, missing, [C | Catchalls]) ->
-    branches(Path, Reads, C, Catchalls);
-branches(Path, Reads, [switch_body | Code], _) ->
+branches(_S, _Path, _Reads, missing, []) -> [];
+branches(S, Path, Reads, missing, [C | Catchalls]) ->
+    branches(S, Path, Reads, C, Catchalls);
+branches(_S, Path, Reads, [switch_body | Code], _) ->
     [{lists:reverse(Path), [ {read, R} || R <- lists:reverse(Reads) ] ++ Code}];
-branches(Path, Reads, [{switch, _, _, _, _} = Switch], Catchalls) ->
-    branches(Path, Reads, Switch, Catchalls);
-branches(Path, Reads, {switch, Arg, Type, Alts, Def}, Catchalls) ->
+branches(S, Path, Reads, [{switch, _, _, _, _} = Switch], Catchalls) ->
+    branches(S, Path, Reads, Switch, Catchalls);
+branches(S, Path, Reads, {switch, Arg, Type, Alts, Def}, Catchalls) ->
+    {V, S1} = read_arg(S, Arg),
+    type_check(V, Type),
     Catchalls1 = [Def || Def /= missing] ++ Catchalls,
     [ {Path1, Code}
-      || {I, Alt} <- ix(Alts),
-         {Path1, Code} <- branches([alt_tag(Type, I) | Path], [Arg | Reads], Alt, Catchalls1) ].
+      || {I, Alt} <- ix(0, Alts),
+         {Path1, Code} <- branches(S1, [alt_tag(Type, I) | Path], [Arg | Reads], Alt, Catchalls1) ].
 
-branches(Switch) ->
-    branches([], [], Switch, []).
+branches(S, Switch) ->
+    branches(S, [], [], Switch, []).
+
+prune_branches(S, Alts) ->
+    lists:flatmap(fun({Path, Code}) -> prune_branch(S, Path, Code, [], []) end, Alts).
+
+type_check(V, Type) ->
+    Value = is_value(V),
+    try
+        case Type of
+            _ when not Value -> ok;
+            boolean          -> true = lists:member(V, [false, true]);
+            tuple            -> {tuple, _} = V;
+            {variant, Ar}    -> {variant, Ar, _, _} = V
+        end
+    catch _:_ -> throw(type_error)
+    end.
+
+match_tag(Tag, V) ->
+    Value = is_value(V),
+    case {Tag, V} of
+        _ when not Value -> maybe;
+        {false, _}                     -> Tag == V;
+        {true,  _}                     -> Tag == V;
+        {tuple, {tuple, _}}            -> true;
+        {tuple, _}                     -> false;
+        {{con, I}, {variant, _, I, _}} -> true;
+        {{con, _}, _}                  -> false
+    end.
+
+prune_branch(S, [Tag | Path], [I = {read, R} | Code], AccP, AccC) ->
+    {V, S1} = read_arg(S, R),
+    case match_tag(Tag, V) of
+        true  -> prune_branch(S1, Path, Code, AccP, [I || R == {stack, 0}] ++ AccC);
+        false -> [];
+        maybe -> prune_branch(S1, Path, Code, [Tag | AccP], [I | AccC])
+    end;
+prune_branch(_, [], Code, AccP, AccC) ->
+    [{lists:reverse(AccP), lists:reverse(AccC) ++ Code}].
 
 step(S, {read, Arg}) ->
     {_, S1} = read_arg(S, Arg),
     S1;
 step(S, loop) -> S;
 step(S, Switch = {switch, _Arg, _Type, _Alts, _Def}) ->
-    case branches(Switch) of
-        [] -> S#{ abort => "Incomplete patterns" };
+    try branches(S, Switch) of
         Bs -> {fork, Bs}
+    catch throw:type_error ->
+        S#{ skip => true }
     end;
 step(S, {'TUPLE', Dst, {immediate, N}}) ->
     step(S, list_to_tuple(['TUPLE', Dst | lists:duplicate(N, {stack, 0})]));
@@ -249,16 +315,24 @@ sym('POP',   [V]) -> V;
 sym('PUSH',  [V]) -> V;
 sym('IS_NIL', [{'CONS', _, _}]) -> false;
 sym('IS_NIL', ['NIL']) -> true;
-sym(Op, [X, Y]) when ?is_cmp(Op), ?is_value(X), ?is_value(Y) ->
+sym(Op, [X, Y]) when ?is_cmp(Op) ->
+    Value = is_value(X) andalso is_value(Y),
     case Op of
-        'LT'  -> X < Y;
-        'GT'  -> X > Y;
-        'EQ'  -> X =:= Y;
-        'ELT' -> X =< Y;
-        'EGT' -> X >= Y;
-        'NEQ' -> X =/= Y
+        _ when not Value -> {Op, X, Y};
+        'LT'             -> X < Y;
+        'GT'             -> X > Y;
+        'EQ'             -> X =:= Y;
+        'ELT'            -> X =< Y;
+        'EGT'            -> X >= Y;
+        'NEQ'            -> X =/= Y
     end;
-sym('NOT', [X]) when ?is_value(X) -> not X;
+sym('ADD', [X, Y]) when is_integer(X), is_integer(Y) -> X + Y;
+sym('SUB', [X, Y]) when is_integer(X), is_integer(Y) -> X - Y;
+sym('MUL', [X, Y]) when is_integer(X), is_integer(Y) -> X * Y;
+sym('DIV', [X, Y]) when is_integer(X), is_integer(Y), Y /= 0 -> X div Y;
+sym('MOD', [X, Y]) when is_integer(X), is_integer(Y), Y /= 0 -> X rem Y;
+sym('NOT', [false]) -> true;
+sym('NOT', [true])  -> false;
 sym(Op, [])       -> Op;
 sym(Op, Vs)       -> list_to_tuple([Op | Vs]).
 
@@ -280,8 +354,12 @@ sym_eval(S, Trace, P0, LoopC, [I | Is], Verbose) ->
     S1 = step(S, I),
     case S1 of
         {fork, Alts}                 ->
-            lists:append([ sym_eval(S, [{switch, Path} | Trace], P0, LoopC, Alt, Verbose)
-                           || {Path, Alt} <- Alts ]);
+            case prune_branches(S, Alts) of
+                [] -> [{lists:reverse(Trace), S#{ abort => "Incomplete patterns" }}];
+                Alts1 ->
+                    lists:append([ sym_eval(S, [{switch, Path} | Trace], P0, LoopC, Alt ++ Is, Verbose)
+                                   || {Path, Alt} <- Alts1 ])
+            end;
         _ when I == loop, LoopC =< 0 -> pp_state(S1, Verbose), [{lists:reverse(Trace), S1}];
         _ when I == loop             -> sym_eval(S1, [loop | Trace], P0, LoopC - 1, P0, Verbose);
         _                            -> sym_eval(S1, Trace, P0, LoopC, Is, Verbose)
@@ -304,16 +382,17 @@ prop_eval() ->
         P2 = optimize(P1, Opts),
         ?WHENFAIL(io:format("Optimized:\n  ~p\n", [P2]),
         try
-            %% [ io:format("== Original ==\n") || Verbose ],
-            S1 = sym_eval(S0, LoopCount, P1, false),
-            %% [ io:format("== Optimized ==\n") || Verbose ],
-            S2 = sym_eval(S0, LoopCount, P2, false),
+            [ io:format("== Original ==\n") || Verbose ],
+            S1 = sym_eval(S0, LoopCount, P1, Verbose),
+            [ io:format("== Optimized ==\n") || Verbose ],
+            S2 = sym_eval(S0, LoopCount, P2, Verbose),
             Size1 = code_size(P1),
             Size2 = code_size(P2),
+            ?IMPLIES(not lists:any(fun({_, S}) -> maps:is_key(skip, S) end, S1),
             measure(branches, length(S1),
             measure(optimize, (1 + Size2) / (1 + Size1),
                 conjunction([{size, ?WHENFAIL(io:format("~p > ~p\n", [Size2, Size1]), Size2 =< Size1)},
-                             {state, compare_states(S1, S2)}])))
+                             {state, compare_states(S1, S2)}]))))
         catch K:Err ->
             equals({K, Err, erlang:get_stacktrace()}, ok)
         end)
@@ -322,11 +401,11 @@ prop_eval() ->
 compare_states(Ss1, Ss2) when is_list(Ss1), is_list(Ss2) ->
     {Trace1, _} = lists:unzip(Ss1),
     {Trace2, _} = lists:unzip(Ss2),
-    case Trace1 == Trace2 of
+    case compare_trace(Trace1, Trace2) of
         true  ->
             TSS = keyuniq(2, [ {T, {S1, S2}} || {{T, S1}, {_, S2}} <- lists:zip(Ss1, Ss2) ]),
             conjunction([ {Trace, compare_states(S1, S2)} || {Trace, {S1, S2}} <- TSS ]);
-        false -> equals(Trace1, Trace2)
+        false -> equals({trace, Trace1}, {trace, Trace2})
     end;
 compare_states(#{ stack := Stack1, store := Store1, effects := Eff1 } = S1,
                #{ stack := Stack2, store := Store2, effects := Eff2 } = S2) ->
@@ -338,6 +417,13 @@ compare_states(#{ stack := Stack1, store := Store1, effects := Eff1 } = S1,
                               {store, equals(Store1, Store2)},
                               {effects, equals(lists:reverse(Eff1), lists:reverse(Eff2))}])
     end.
+
+compare_trace(T1, T2) when length(T1) /= length(T2) -> false;
+compare_trace(T1, T2) ->
+    Flat = fun({switch, Tags}) -> Tags;
+              (Tag)            -> [Tag] end,
+    Cmp = fun({P1, P2}) -> lists:flatmap(Flat, P1) == lists:flatmap(Flat, P2) end,
+    lists:all(Cmp, lists:zip(T1, T2)).
 
 code_size(P) when is_list(P) ->
     lists:sum([ code_size(I) || I <- P ]);
