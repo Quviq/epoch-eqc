@@ -255,23 +255,25 @@ size_extra_fee(_, Tx, ABI) ->
     ga_meta           -> 10000;
     ns_update         -> 5000;
     ns_claim          -> 5000;
+    spend             -> 2000;
     _                 -> 3000
   end.
 
-base_gas(Tx, ABI) ->
+base_gas(P, Tx, ABI) ->
   case Tx of
-    contract_create   -> 75000;
-    contract_call when ABI == ?ABI_FATE_1 -> 180000;
-    contract_call     -> 450000;
-    sc_force_progress -> 450000;
-    paying_for        -> 3000;
-    _                 -> 15000
+    contract_create                                  -> 75000;
+    contract_call when ABI == ?ABI_FATE_1            -> 180000;
+    contract_call                                    -> 450000;
+    sc_force_progress when P < ?FORTUNA_PROTOCOL_VSN -> 15000;
+    sc_force_progress                                -> 450000;
+    paying_for                                       -> 3000;
+    _                                                -> 15000
   end.
 
 gen_fee(S, Tx) -> gen_fee(S, Tx, 0).
 
 gen_fee(S = #{ protocol := P }, Tx, ABI) ->
-    BaseCost   = base_gas(Tx, ABI),
+    BaseCost   = base_gas(P, Tx, ABI),
     NormalCost = BaseCost + size_extra_fee(S, Tx, ABI),
     frequency([{49, ?LET(Delta, choose(0, 5000), (NormalCost + Delta) * minimum_gas_price(P))},
                {1,  ?LET(Delta, choose(1, 2999), (BaseCost - Delta) * minimum_gas_price(P))}]).
@@ -281,4 +283,6 @@ is_valid_fee(S, Tx, TxData) -> is_valid_fee(S, Tx, 0, TxData).
 is_valid_fee(S, Tx, ABI, #{ fee := Fee }) ->
   is_valid_fee(S, Tx, ABI, Fee);
 is_valid_fee(S = #{ protocol := P }, Tx, ABI, Fee) when is_integer(Fee) ->
-  (base_gas(Tx, ABI) + size_extra_fee(S, Tx, ABI)) * minimum_gas_price(P) =< Fee.
+  %% io:format("Is ~p a valid fee for ~p at ~p? ~p\n", [Fee, {Tx, ABI}, P, (base_gas(P, Tx, ABI) + size_extra_fee(S, Tx, ABI)) * minimum_gas_price(P) =< Fee]),
+  %% io:format("Base: ~p Size: ~p\n", [base_gas(P, Tx, ABI), size_extra_fee(S, Tx, ABI)]),
+  (base_gas(P, Tx, ABI) + size_extra_fee(S, Tx, ABI)) * minimum_gas_price(P) =< Fee.

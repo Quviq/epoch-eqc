@@ -120,7 +120,7 @@ ga_meta_valid(S = #{protocol := P}, [GAAccount, MTx, TxArgs = [_, Tx, _]]) ->
   andalso is_valid_auth_gas(S, GAAccount, maps:get(abi_version, MTx), P, maps:get(gas, MTx))
   andalso check_abi(S, GAAccount, maps:get(abi_version, MTx))
   andalso check_relevant_signer(S, GAAccount, TxArgs)
-  andalso is_valid_meta_fee(S, Tx, MTx)
+  andalso is_valid_meta_fee(S, maps:get(abi_version, MTx), Tx, MTx)
   andalso txs_contracts_eqc:is_valid_gas_price(S, MTx).
 
 ga_meta_tx(S, [GAAccount, MTx, [M, Tx, TxData]]) ->
@@ -201,22 +201,26 @@ gen_meta_params(S = #{ protocol := P }, GA, Tx) ->
       %% {txs_contracts_eqc:gen_abi(ABI), ga_meta_tx_fee() * 1000000, gen_gas(500), gen_gas_price(P)};
       ABI = txs_contracts_eqc:abi_to_int(SymABI),
       #account{ nonce = N } = get_account(S, GA),
-      {txs_contracts_eqc:gen_abi(SymABI), gen_meta_fee(S, Tx), gen_auth_gas(auth_gas(ABI, N + 1, P)), gen_gas_price(P)};
+      {txs_contracts_eqc:gen_abi(SymABI), gen_meta_fee(S, ABI, Tx), gen_auth_gas(auth_gas(ABI, N + 1, P)), gen_gas_price(P)};
     _ ->
-      {elements([abi_fate_1, abi_aevm_1]), gen_meta_fee(S, Tx), 500, 1000000}
+      {elements([abi_fate_1, abi_aevm_1]), gen_meta_fee(S, 1, Tx), 500, 1000000}
   end.
 
--define(GA_META_BASE_FEE, 75000).
-gen_meta_fee(#{ protocol := P }, Tx) ->
-  SizeFee = case P < ?IRIS_PROTOCOL_VSN of
-              true  -> 5000 + txs_utils:size_extra_fee(not_used, Tx);
-              false -> 5000
-            end,
-  weighted_default({49, ?LET(Delta, choose(0, 5000), (?GA_META_BASE_FEE + SizeFee + Delta) * minimum_gas_price(P))},
-                   {1,  ?LET(Delta, choose(1, 2000), (?GA_META_BASE_FEE - Delta) * minimum_gas_price(P))}).
+gen_meta_fee(#{ protocol := P }, ABI, Tx) ->
+  MGP = minimum_gas_price(P),
+  weighted_default(
+    {49, ?LET(Delta, choose(0, 5000), (ga_meta_base(ABI) + ga_extra_size(Tx) + Delta) * MGP)},
+    {1,  ?LET(Delta, choose(1, 2000), (75000 - Delta) * MGP)}).
 
-is_valid_meta_fee(#{ protocol := P }, _Tx, #{ fee := Fee }) ->
-  Fee >= ?GA_META_BASE_FEE * minimum_gas_price(P).
+is_valid_meta_fee(#{ protocol := P }, _ABI, _Tx, #{ fee := Fee }) ->
+  Fee >= 75000 * minimum_gas_price(P).
+
+%% Extra size only needed pre IRIS, but always add it so we can shrink.
+ga_extra_size(Tx) ->
+  txs_utils:size_extra_fee(not_used, Tx).
+
+ga_meta_base(?ABI_AEVM_1) -> 85000 + 4000;
+ga_meta_base(?ABI_FATE_1) -> 85000 + 1500.
 
 %% -- Local helpers ---------------------------------------------------------
 is_valid_auth_gas(S, GA, ABI, P, Gas) ->
