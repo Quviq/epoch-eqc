@@ -229,6 +229,9 @@ step(S, Switch = {switch, _Arg, _Type, _Alts, _Def}) ->
     end;
 step(S, {'TUPLE', Dst, {immediate, N}}) ->
     step(S, list_to_tuple(['TUPLE', Dst | lists:duplicate(N, {stack, 0})]));
+step(S, {'ABORT', Reg}) ->
+    {Msg, S1} = read_arg(S, Reg),
+    S1#{ abort => Msg };
 step(S, I) ->
     {Op, Dst, Args} = op_view(I),
     {Vals, S1} = read_args(S, Args),
@@ -318,11 +321,16 @@ compare_states(Ss1, Ss2) when is_list(Ss1), is_list(Ss2) ->
             conjunction([ {Trace, compare_states(S1, S2)} || {Trace, {S1, S2}} <- TSS ]);
         false -> equals(Trace1, Trace2)
     end;
-compare_states(#{ stack := Stack1, store := Store1, effects := Eff1 },
-               #{ stack := Stack2, store := Store2, effects := Eff2 }) ->
-    conjunction([{stack, equals(Stack1, Stack2)},
-                 {store, equals(Store1, Store2)},
-                 {effects, equals(lists:reverse(Eff1), lists:reverse(Eff2))}]).
+compare_states(#{ stack := Stack1, store := Store1, effects := Eff1 } = S1,
+               #{ stack := Stack2, store := Store2, effects := Eff2 } = S2) ->
+    Abort1 = maps:get(abort, S1, false),
+    Abort2 = maps:get(abort, S2, false),
+    case Abort1 == false andalso Abort2 == false of
+        false -> equals({abort, Abort1}, {abort, Abort2});
+        true  -> conjunction([{stack, equals(Stack1, Stack2)},
+                              {store, equals(Store1, Store2)},
+                              {effects, equals(lists:reverse(Eff1), lists:reverse(Eff2))}])
+    end.
 
 ix(I, Xs) ->
     lists:zip(lists:seq(I, I + length(Xs) - 1), Xs).
