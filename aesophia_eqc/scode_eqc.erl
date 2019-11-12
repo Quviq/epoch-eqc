@@ -152,6 +152,8 @@ op_view(I) when element(1, I) == 'PUSH';
                 element(1, I) == 'CALL_GR' ->
     [Op | Args] = tuple_to_list(I),
     {Op, {stack, 0}, Args};
+op_view({'POP', R}) ->
+    {'POP', R, [{stack, 0}]};
 op_view(I) ->
     [Op | Args] = tuple_to_list(I),
     case {instruction(Op), Args} of
@@ -243,7 +245,8 @@ step(S, I) ->
                    X == 'ELT' orelse X == 'EGT' orelse X == 'NEQ').
 
 sym('STORE', [V]) -> V;
-sym('PUSH', [V])  -> V;
+sym('POP',   [V]) -> V;
+sym('PUSH',  [V]) -> V;
 sym('IS_NIL', [{'CONS', _, _}]) -> false;
 sym('IS_NIL', ['NIL']) -> true;
 sym(Op, [X, Y]) when ?is_cmp(Op), ?is_value(X), ?is_value(Y) ->
@@ -294,19 +297,23 @@ optimize(Code, Opts) ->
 prop_eval() ->
     in_parallel(
     ?LET(Verbose, parameter(verbose, false),
-    ?FORALL({LoopCount, P}, {choose(0, 3), program_g()},
+    ?FORALL({LoopCount, P1}, {choose(0, 3), program_g()},
     begin
         Opts = [ {debug, [opt_rules, opt]} || Verbose ],
         S0 = init_state(),
-        P1 = optimize(P, Opts),
-        ?WHENFAIL(io:format("Optimized:\n  ~p\n", [P1]),
+        P2 = optimize(P1, Opts),
+        ?WHENFAIL(io:format("Optimized:\n  ~p\n", [P2]),
         try
             %% [ io:format("== Original ==\n") || Verbose ],
-            S1 = sym_eval(S0, LoopCount, P, false),
+            S1 = sym_eval(S0, LoopCount, P1, false),
             %% [ io:format("== Optimized ==\n") || Verbose ],
-            S2 = sym_eval(S0, LoopCount, P1, false),
+            S2 = sym_eval(S0, LoopCount, P2, false),
+            Size1 = code_size(P1),
+            Size2 = code_size(P2),
             measure(branches, length(S1),
-                compare_states(S1, S2))
+            measure(optimize, (1 + Size2) / (1 + Size1),
+                conjunction([{size, ?WHENFAIL(io:format("~p > ~p\n", [Size2, Size1]), Size2 =< Size1)},
+                             {state, compare_states(S1, S2)}])))
         catch K:Err ->
             equals({K, Err, erlang:get_stacktrace()}, ok)
         end)
@@ -331,6 +338,14 @@ compare_states(#{ stack := Stack1, store := Store1, effects := Eff1 } = S1,
                               {store, equals(Store1, Store2)},
                               {effects, equals(lists:reverse(Eff1), lists:reverse(Eff2))}])
     end.
+
+code_size(P) when is_list(P) ->
+    lists:sum([ code_size(I) || I <- P ]);
+code_size(missing) -> 0;
+code_size({switch, _, _, Alts, Def}) ->
+    1 + code_size([Def | Alts]);
+code_size({'POP', {var, 9999}}) -> 0;   %% Don't count popping unused stack elems
+code_size(_) -> 1.
 
 ix(I, Xs) ->
     lists:zip(lists:seq(I, I + length(Xs) - 1), Xs).
