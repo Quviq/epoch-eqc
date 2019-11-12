@@ -355,7 +355,7 @@ sym('IS_NIL', ['NIL']) -> true;
 sym(Op, [X, Y]) when ?is_cmp(Op) ->
     Value = is_value(X) andalso is_value(Y),
     case Op of
-        _ when not Value -> {Op, X, Y};
+        _ when not Value -> {Op, truncate(X), truncate(Y)};
         'LT'             -> X < Y;
         'GT'             -> X > Y;
         'EQ'             -> X =:= Y;
@@ -374,7 +374,20 @@ sym('MOD', [X, Y]) when is_integer(X), is_integer(Y), Y /= 0 -> X rem Y;
 sym('NOT', [false]) -> true;
 sym('NOT', [true])  -> false;
 sym(Op, [])       -> Op;
-sym(Op, Vs)       -> list_to_tuple([Op | Vs]).
+sym(Op, Vs)       -> list_to_tuple([Op | truncate(Vs)]).
+
+-define(TermDepth, 3).
+truncate(X) -> truncate(?TermDepth, X).
+
+truncate(0, X) when is_atom(X); is_integer(X) -> X;
+truncate(0, _) -> '...';
+truncate(D, L) when is_list(L) ->
+    [ truncate(D - 1, X) || X <- L ];
+truncate(D, T) when is_tuple(T) ->
+    list_to_tuple(truncate(D, tuple_to_list(T)));
+truncate(D, M) when is_map(M) ->
+    maps:map(fun(_, V) -> truncate(D - 1, V) end, M);
+truncate(_, X) -> X.
 
 pp_state(S, Verbose) ->
     [ io:format("- ~p\n", [S]) || Verbose ].
@@ -432,14 +445,34 @@ prop_eval() ->
             Branches = length(S1),
             ?IMPLIES(not lists:any(fun({_, S}) -> maps:is_key(skip, S) end, S1),
             measure(optimize, (1 + Size2) / (1 + Size1),
-                conjunction([{skip, equals([], [ TS || {_, #{skip := _}} = TS <- S2 ])},
+                conjunction([% {skip, equals([], [ TS || {_, #{skip := _}} = TS <- S2 ])},
                              {branches, check_branches(Branches, P1)},
                              {size, ?WHENFAIL(io:format("~p > ~p\n", [Size2, Size1]), Size2 =< Size1)},
-                             {state, compare_states(S1, S2)}])))
+                             {state, compare_states(S1, S2)},
+                             %% {term_size, check_term_size(S1)},
+                             {true, true}])))
         catch K:Err ->
             equals({K, Err, erlang:get_stacktrace()}, ok)
         end)
     end)))).
+
+check_term_size(Ss) ->
+    Check = fun(#{ stack := Stack, store := Store }) ->
+                    StackI = [{{stack, I}, V} || {I, V} <- ix(0, proper_list(Stack))],
+                    StoreI = [{{store, I}, V} || {I, V} <- maps:to_list(Store)],
+                    equals([], [ {Name, Val} || {Name, Val} <- StackI ++ StoreI,
+                                                term_size(Val) > 5000 ])
+            end,
+    conjunction([ {Trace, Check(S)} || {Trace, S} <- Ss ]).
+
+term_size(L) when is_list(L) ->
+    lists:sum([ term_size(X) || X <- L ]);
+term_size(T) when is_tuple(T) ->
+    term_size(tuple_to_list(T));
+term_size(M) when is_map(M) ->
+    term_size(maps:to_list(M));
+term_size(B) when is_binary(B) -> byte_size(B);
+term_size(_) -> 1.
 
 check_branches(B, P) ->
     ?WHENFAIL(
@@ -483,6 +516,9 @@ code_size({switch, _, _, Alts, Def}) ->
     1 + code_size([Def | Alts]);
 code_size({'POP', {var, 9999}}) -> 0;   %% Don't count popping unused stack elems
 code_size(_) -> 1.
+
+proper_list([H | T]) -> [H | proper_list(T)];
+proper_list(_)       -> [].
 
 ix(I, Xs) ->
     lists:zip(lists:seq(I, I + length(Xs) - 1), Xs).
