@@ -273,30 +273,31 @@ branches(S, Path, Reads, [{switch, _, _, _, _} = Switch], Catchalls) ->
     branches(S, Path, Reads, Switch, Catchalls);
 branches(S, Path, Reads, {switch, Arg, Type, Alts, Def}, Catchalls) ->
     {V, S1} = read_arg(S, Arg),
-    type_check(V, Type),
-    Catchalls1 = [Def || Def /= missing] ++ Catchalls,
-    [ {Path1, Rs, Code}
-      || {I, Alt} <- ix(0, Alts),
-         {Path1, Rs, Code} <- branches(S1, [alt_tag(Type, I) | Path], [Arg | Reads], Alt, Catchalls1) ].
+    case type_check(V, Type) of
+        false ->
+            [{Path, [{read, R} || R <- lists:reverse(Reads)], [{'ABORT', {immediate, "Type error"}}]}];
+        true ->
+            Catchalls1 = [Def || Def /= missing] ++ Catchalls,
+            [ {Path1, Rs, Code}
+              || {I, Alt} <- ix(0, Alts),
+                 {Path1, Rs, Code} <- branches(S1, [alt_tag(Type, I) | Path], [Arg | Reads], Alt, Catchalls1) ]
+    end.
 
 branches(S, Switch) ->
     branches(S, [], [], Switch, []).
-
-prune_branches(S, Alts) ->
-    uniq(lists:flatmap(fun({Path, Reads, Code}) -> prune_branch(S, Path, Reads, Code, [], []) end, Alts)).
 
 type_check(V, Type) ->
     Value = is_value(V),
     try
         case Type of
-            _ when not Value -> ok;
-            boolean          -> true = lists:member(V, [false, true]);
-            tuple            -> {tuple, _} = V;
+            _ when not Value -> true;
+            boolean          -> lists:member(V, [false, true]);
+            tuple            -> {tuple, _} = V, true;
             {variant, Ar}    -> {variant, Ar1, _, _} = V,
-                                true = length(Ar) == length(Ar1)
+                                length(Ar) == length(Ar1)
         end
     catch _:_ ->
-        throw(type_error)
+        false
     end.
 
 match_tag(Tag, V) ->
@@ -311,6 +312,9 @@ match_tag(Tag, V) ->
         {{con, I}, {variant, _, I, _}} -> true;
         {{con, _}, _}                  -> false
     end.
+
+prune_branches(S, Alts) ->
+    uniq(lists:flatmap(fun({Path, Reads, Code}) -> prune_branch(S, Path, Reads, Code, [], []) end, Alts)).
 
 prune_branch(S, [Tag | Path], [I = {read, R} | Reads], Code, AccP, AccC) ->
     {V, S1} = read_arg(S, R),
@@ -327,11 +331,7 @@ step(S, {read, Arg}) ->
     S1;
 step(S, loop) -> S;
 step(S, Switch = {switch, _Arg, _Type, _Alts, _Def}) ->
-    try branches(S, Switch) of
-        Bs -> {fork, Bs}
-    catch throw:type_error ->
-        S#{ skip => true }
-    end;
+    {fork, branches(S, Switch)};
 step(S, {'TUPLE', Dst, {immediate, N}}) ->
     step(S, list_to_tuple(['TUPLE', Dst | lists:duplicate(N, {stack, 0})]));
 step(S, {'ABORT', Reg}) ->
