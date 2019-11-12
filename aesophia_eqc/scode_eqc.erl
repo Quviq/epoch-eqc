@@ -364,6 +364,9 @@ sym(Op, [X, Y]) when ?is_cmp(Op) ->
         'NEQ'            -> X =/= Y
     end;
 sym('ADD', [X, Y]) when is_integer(X), is_integer(Y) -> X + Y;
+sym('ADD', [1, Y]) -> {'INC', Y};
+sym('ADD', [X, 1]) -> {'INC', X};
+sym('SUB', [X, 1]) -> {'DEC', X};
 sym('SUB', [X, Y]) when is_integer(X), is_integer(Y) -> X - Y;
 sym('MUL', [X, Y]) when is_integer(X), is_integer(Y) -> X * Y;
 sym('DIV', [X, Y]) when is_integer(X), is_integer(Y), Y /= 0 -> X div Y;
