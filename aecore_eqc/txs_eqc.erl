@@ -43,9 +43,9 @@ init_pre(S) ->
   not maps:is_key(accounts, S) andalso not maps:is_key(keys, S).
 
 init_args(_S) ->
-  [].
+  [next_id(key)].
 
-init() ->
+init(_) ->
   put(trees, initial_trees()),
   ok.
 
@@ -53,9 +53,8 @@ initial_trees() ->
   {PA, _Secret, PAmount} = patron(),
   trees_with_accounts([{account, PA, PAmount}]).
 
-init_next(S, _Value, []) ->
+init_next(S, _Value, [KeyId]) ->
   {PA, Secret, PAmount} = patron(),
-  KeyId    = next_id(key),
   Keys     = #{ KeyId     => #key{ private = Secret, public = PA } },
   Accounts = #{ account_0 => #account{ key = KeyId, amount = PAmount } },
   S#{accounts => Accounts, keys => Keys}.
