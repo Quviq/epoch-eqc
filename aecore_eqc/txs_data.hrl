@@ -13,6 +13,14 @@
 -define(ABI_AEVM_1, 1).
 -define(ABI_FATE_1, 3).
 
+-define(VM_NO_VM,           16#00).
+-define(VM_AEVM_SOPHIA_1,   16#01).
+-define(VM_AEVM_SOLIDITY_1, 16#02).
+-define(VM_AEVM_SOPHIA_2,   16#03).
+-define(VM_AEVM_SOPHIA_3,   16#04).
+-define(VM_FATE_SOPHIA_1,   16#05).
+-define(VM_AEVM_SOPHIA_4,   16#06).
+
 -record(account, {key, amount, nonce = 1, ga = false}).
 -record(ga, {contract, auth_fun}).
 -record(key,     {public, private}).
@@ -25,8 +33,8 @@
 -record(claim,{name, height, expires_by, claimer, protocol}).
 -record(auction, {name, height, expires_by, bid, claimer, protocol}).
 
--record(cs, {i_am = 0, r_am = 0, c_am = 0, cmds = [], rnd = 1, cabi = ?ABI_AEVM_1}).
--record(channel, {id, init, resp, rnd = 1, ch_rsv, lock_p,
+-record(cs, {i_am = 0, r_am = 0, c_am = 0, cmds = [], rnd = 1}).
+-record(channel, {id, init, resp, rnd = 1, ch_rsv, lock_p, ct_version,
                   locked = false, solo_rnd = 0, state = #cs{},
                   i_auth, r_auth}).
 

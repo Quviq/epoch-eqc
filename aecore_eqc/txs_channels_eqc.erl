@@ -65,6 +65,7 @@ sc_create_next(S, _Value, Args = [Init, Resp, ChId, Tx]) ->
                      i_auth = get_auth(S, Init), r_auth = get_auth(S, Resp),
                      ch_rsv = maps:get(channel_reserve, Tx),
                      lock_p = maps:get(lock_period, Tx),
+                     ct_version = offchain_ct_version(S),
                      state  = init_cs(Init, Resp, Tx)},
       S1 = update_channel(ChId, Ch, S),
       reserve_fee(maps:get(fee, Tx),
@@ -136,9 +137,10 @@ sc_deposit_next(S, _Value, Args = [Actor, _NotActor, Channel, Tx]) ->
     false -> S;
     true ->
       C = get_channel(S, Channel),
-      C1 = C#channel{ rnd      = maps:get(round, Tx),
-                      solo_rnd = 0,
-                      state    = deposit_cs(S, Channel, Actor, Tx) },
+      C1 = C#channel{ rnd        = maps:get(round, Tx),
+                      solo_rnd   = 0,
+                      ct_version = offchain_ct_version(S),
+                      state      = deposit_cs(S, Channel, Actor, Tx) },
       S1 = update_channel(Channel, C1, S),
       reserve_fee(maps:get(fee, Tx),
         bump_and_charge(Actor, maps:get(amount, Tx), maps:get(fee, Tx), S1))
@@ -205,9 +207,10 @@ sc_withdraw_next(S, _Value, Args = [Actor, _NotActor, Channel, Tx]) ->
     false -> S;
     true ->
       C = get_channel(S, Channel),
-      C1 = C#channel{ rnd      = maps:get(round, Tx),
-                      solo_rnd = 0,
-                      state    = withdraw_cs(S, Channel, Actor, Tx) },
+      C1 = C#channel{ rnd        = maps:get(round, Tx),
+                      solo_rnd   = 0,
+                      ct_version = offchain_ct_version(S),
+                      state      = withdraw_cs(S, Channel, Actor, Tx) },
       S1 = update_channel(Channel, C1, S),
       reserve_fee(maps:get(fee, Tx),
         bump_and_charge(Actor, -maps:get(amount, Tx), maps:get(fee, Tx), S1))
@@ -246,6 +249,7 @@ sc_close_mutual_valid(S, [Actor, NotActor, Channel, Tx]) ->
   is_account(S, Actor)
   andalso is_account(S, NotActor)
   andalso is_channel_party(S, Actor, Channel)
+  andalso (maps:get(protocol, S) >= ?LIMA_PROTOCOL_VSN orelse is_channel_active(S, Channel))
   andalso maps:get(nonce, Tx) == good
   andalso is_valid_fee(S, sc_close_mutual, Tx)
   %% andalso check_balance(S, Actor, maps:get(fee, Tx))
@@ -312,7 +316,8 @@ sc_snapshot_solo_next(S, _Value, Args = [Actor, Channel, Tx]) ->
     true ->
       C   = #channel{ state = CS } = get_channel(S, Channel),
       Rnd = maps:get(round, Tx),
-      C1  = C#channel{ rnd = Rnd, solo_rnd = 0, state = CS#cs{ rnd = Rnd } },
+      C1  = C#channel{ rnd = Rnd, solo_rnd = 0, state = CS#cs{ rnd = Rnd },
+                       ct_version = offchain_ct_version(S) },
       S1  = update_channel(Channel, C1, S),
       reserve_fee(maps:get(fee, Tx),
         bump_and_charge(Actor, maps:get(fee, Tx), S1))
@@ -361,7 +366,7 @@ sc_close_solo_tx(S, [Actor, Channel, Tx]) ->
                 on_chain -> <<>>;
                 {_, Rnd} -> calc_payload(S, Channel, Rnd)
               end,
-  POI       = calc_poi(S, Channel),
+  POI       = calc_poi(S, Channel, maps:get(payload, Tx)),
   Tx1 = Tx#{from_id => ActorId, channel_id => ChannelId,
             payload => Payload, poi => POI},
   aesc_close_solo_tx:new(update_nonce(S, Actor, Tx1)).
@@ -373,10 +378,10 @@ sc_close_solo_next(S, _Value, Args = [Actor, Channel, Tx]) ->
       C  = #channel{ state = CS } = get_channel(S, Channel),
       C1 = case maps:get(payload, Tx) of
              on_chain -> C;
-             {_, Rnd} -> C#channel{ solo_rnd = 0, rnd = Rnd, state = CS#cs{ rnd = Rnd } }
+             {_, Rnd} -> C#channel{ solo_rnd = 0, rnd = Rnd, state = CS#cs{ rnd = Rnd },
+                                    ct_version = offchain_ct_version(S) }
            end,
       Lock = {maps:get(height, S) + C#channel.lock_p, CS#cs.i_am, CS#cs.r_am},
-      %% C2 = C1#channel{ solo_rnd = C1#channel.rnd, locked = Lock },
       C2 = C1#channel{ locked = Lock },
       S1 = update_channel(Channel, C2, S),
       reserve_fee(maps:get(fee, Tx),
@@ -457,6 +462,15 @@ sc_force_progress_args(S) ->
                            round   => gen_round(S, Channel, Payload),
                            nonce   => gen_nonce() }])).
 
+sc_force_progress_pre(S, [_Actor, Channel, #{ payload := on_chain }]) ->
+  case get_channel(S, Channel) of
+    #channel{ ct_version = {_, _, P, _} } ->
+      P == maps:get(protocol, S);
+    _ -> true
+  end;
+sc_force_progress_pre(_, _) ->
+  true.
+
 sc_force_progress_valid(_S, [{neither, _}, _Channel, _Tx]) -> false;
 sc_force_progress_valid(_S, [_, fake_channel_id, _Tx]) -> false;
 sc_force_progress_valid(S, [Actor, Channel, Tx = #{ payload := Payload }]) ->
@@ -503,14 +517,15 @@ sc_force_progress_next(S, _Value, Args = [Actor, Channel, Tx]) ->
           payload  -> {create_cs(S, Channel, Rnd0), Rnd0 + 1} end,
 
       S2 = call_cs(S1, Channel, Actor, Rnd),
-      Update = calc_update(S2, Channel),
 
-      %% TODO: cleanup
-      ABI = aesc_offchain_update:extract_abi_version(Update),
-      {_, GasPrice, _} = aesc_offchain_update:extract_amounts(Update),
+      CT = {ABI, _, _, _} = offchain_ct_version(S),
+      GasPrice            = 1000000,
 
+      #channel{ state = #cs{ c_am = CAmtPre } } = get_channel(S1, Channel),
       GasUsed = case ABI of
-                  ?ABI_AEVM_1 -> 10000;
+                  ?ABI_AEVM_1 when CAmtPre > 1 -> 22364;
+                  ?ABI_AEVM_1 -> 13364;
+                  %% ?ABI_AEVM_1 -> 100000;
                   ?ABI_FATE_1 -> 166
                 end,
 
@@ -519,15 +534,12 @@ sc_force_progress_next(S, _Value, Args = [Actor, Channel, Tx]) ->
                false -> false;
                _ ->  {maps:get(height, S) + C#channel.lock_p, CS#cs.i_am, CS#cs.r_am}
              end,
-      %% C1 = case C#channel.solo_rnd of
-      %%        0 -> C#channel{ solo_rnd = Rnd, rnd = Rnd, locked = Lock };
-      %%        _ -> C#channel{ rnd = Rnd, locked = Lock }
-      %%      end,
       C1 = case maps:get(payload, Tx) of
                on_chain when SRnd > 0 -> C#channel{ rnd = Rnd, locked = Lock };
                _                      -> C#channel{ solo_rnd = Rnd, rnd = Rnd, locked = Lock }
            end,
-      S3 = update_channel(Channel, C1, S2),
+      C2 = C1#channel{ ct_version = CT }, %% <- weird design decision...
+      S3 = update_channel(Channel, C2, S2),
       reserve_fee(maps:get(fee, Tx) + GasUsed * GasPrice,
         bump_and_charge(Actor, maps:get(fee, Tx) + GasUsed * GasPrice, S3))
   end.
@@ -566,7 +578,7 @@ sc_slash_tx(S, [Actor, Channel, Tx]) ->
   ActorId   = aeser_id:create(account, get_actor_key(S, Actor)),
   ChannelId = aeser_id:create(channel, get_channel_id(S, Channel)),
   Payload   = calc_payload(S, Channel, maps:get(round, Tx)),
-  POI       = calc_poi(S, Channel),
+  POI       = calc_poi(S, Channel, payload),
   Tx1 = Tx#{from_id => ActorId, channel_id => ChannelId,
             payload => Payload, poi => POI},
   aesc_slash_tx:new(update_nonce(S, Actor, Tx1)).
@@ -575,15 +587,14 @@ sc_slash_next(S, _Value, Args = [Actor, Channel, Tx]) ->
   case sc_slash_valid(S, Args) of
     false -> S;
     true ->
-      C  = #channel{ state = CS } = get_channel(S, Channel),
-      C1 = C#channel{ rnd   = maps:get(round, Tx),
-                      state = CS#cs{ rnd = maps:get(round, Tx) } },
-
-      Lock = {maps:get(height, S) + C1#channel.lock_p, CS#cs.i_am, CS#cs.r_am},
-      %% C2 = C1#channel{ solo_rnd = C1#channel.rnd, locked = Lock },
-      C2 = C1#channel{ solo_rnd = 0, locked = Lock },
-      %% C2 =  C1#channel{ locked = Lock },
-      S1 = update_channel(Channel, C2, S),
+      C    = #channel{ state = CS } = get_channel(S, Channel),
+      Lock = {maps:get(height, S) + C#channel.lock_p, CS#cs.i_am, CS#cs.r_am},
+      C1   = C#channel{ rnd   = maps:get(round, Tx),
+                        state = CS#cs{ rnd = maps:get(round, Tx) },
+                        solo_rnd = 0, locked = Lock,
+                        ct_version = offchain_ct_version(S)
+                      },
+      S1 = update_channel(Channel, C1, S),
       reserve_fee(maps:get(fee, Tx),
         bump_and_charge(Actor, maps:get(fee, Tx), S1))
   end.
@@ -968,6 +979,23 @@ dep_wtd_cs(S, ChId, A, Cmd, Amt, Rnd) ->
     _ -> #cs{ }
   end.
 
+offchain_ct_code(VM) ->
+  Contract = txs_contracts_eqc:contract(offchain),
+  case VM of
+    ?VM_FATE_SOPHIA_1 -> maps:get({code, 5}, Contract);
+    ?VM_AEVM_SOPHIA_3 -> maps:get({code, 3}, Contract);
+    ?VM_AEVM_SOPHIA_2 -> maps:get({code, 2}, Contract);
+    ?VM_AEVM_SOPHIA_1 -> maps:get({code, 1}, Contract)
+  end.
+
+offchain_ct_version(#{ protocol := P, height := H }) ->
+  case P of
+    Vsn when Vsn >= ?LIMA_PROTOCOL_VSN -> {?ABI_FATE_1, ?VM_FATE_SOPHIA_1, P, H};
+    ?FORTUNA_PROTOCOL_VSN              -> {?ABI_AEVM_1, ?VM_AEVM_SOPHIA_3, P, H};
+    ?MINERVA_PROTOCOL_VSN              -> {?ABI_AEVM_1, ?VM_AEVM_SOPHIA_2, P, H};
+    ?ROMA_PROTOCOL_VSN                 -> {?ABI_AEVM_1, ?VM_AEVM_SOPHIA_1, P, H}
+  end.
+
 create_cs(S, ChId, Rnd) ->
   case get_channel(S, ChId) of
     C = #channel{ state = CS, init = Init, resp = Resp, ch_rsv = Rsv } ->
@@ -979,10 +1007,7 @@ create_cs(S, ChId, Rnd) ->
           #cs{ i_am = IA, r_am = RA, cmds = Cmds } = CS,
           IA2 = (IA - Rsv) div 2,
           RA2 = (RA - Rsv) div 2,
-          ABI = case maps:get(protocol, S) >= ?LIMA_PROTOCOL_VSN of
-                  true -> ?ABI_FATE_1; false -> ?ABI_AEVM_1 end,
-          CS1 = CS#cs{ i_am = IA - IA2, r_am = RA - RA2,
-                       c_am = IA2 + RA2, cabi = ABI,
+          CS1 = CS#cs{ i_am = IA - IA2, r_am = RA - RA2, c_am = IA2 + RA2,
                        rnd  = Rnd, cmds = Cmds ++ [{Rnd, {wtd, Init, IA2}},
                                                    {Rnd, {wtd, Resp, RA2}},
                                                    {Rnd, {contract, IA2 + RA2}}] },
@@ -997,9 +1022,9 @@ call_cs(S, ChId, ?ACCOUNT(A), Rnd) ->
     C = #channel{ state = CS } ->
       case [x || {_, {contract, _}} <- CS#cs.cmds ] of
         [_] ->
-          #cs{ c_am = CA, cmds = Cmds, cabi = ABI } = CS,
+          #cs{ c_am = CA, cmds = Cmds } = CS,
           CS1 = CS#cs{ c_am = CA - CA div 2, rnd = Rnd,
-                       cmds = Cmds ++ [{Rnd, {ccall, A, Rnd, ABI}}] },
+                       cmds = Cmds ++ [{Rnd, {ccall, A, Rnd}}] },
           CS2 = if A == C#channel.init -> credit_cs(CS1, i, CA div 2);
                    A == C#channel.resp -> credit_cs(CS1, r, CA div 2);
                    true                -> CS
@@ -1017,71 +1042,75 @@ calc_state_hash(S, ?CHANNEL(_) = ChId) ->
   #channel{ state = CS } = get_channel(S, ChId),
   calc_state_hash(S, CS);
 calc_state_hash(S, #cs{ cmds = Cmds }) ->
-  Trees = calc_state_trees(S, Cmds),
+  Trees = calc_state_trees(S, offchain_ct_version(S), Cmds),
   aec_trees:hash(Trees);
 calc_state_hash(_, _) -> <<0:256>>.
 
-calc_state_trees(S, Cmds) ->
-  calc_state_trees(S, Cmds, aec_trees:new_without_backend()).
+calc_state_trees(S, CT, Cmds) ->
+  R = calc_state_trees(S, CT, Cmds, aec_trees:new_without_backend()),
+  %% io:format("CST: ~p\n -> ~p\n", [{CT, Cmds}, aec_trees:hash(R)]),
+  R.
 
-calc_state_trees(_S, [], Trees) -> Trees;
-calc_state_trees(S, [{R, {wtd, A, Amt}} | Cmds], Trees) ->
-  calc_state_trees(S, [{R, {dep, A, -Amt}} | Cmds], Trees);
-calc_state_trees(S, [{R, {trf, A, B, Amt}} | Cmds], Trees) ->
-  calc_state_trees(S, [{R, {wtd, A, Amt}}, {R, {dep, B, Amt}} | Cmds], Trees);
-calc_state_trees(S, [{_, {dep, A, Amt}} | Cmds], Trees) ->
+calc_state_trees(_S, _, [], Trees) -> Trees;
+calc_state_trees(S, CT, [{R, {wtd, A, Amt}} | Cmds], Trees) ->
+  calc_state_trees(S, CT, [{R, {dep, A, -Amt}} | Cmds], Trees);
+calc_state_trees(S, CT, [{R, {trf, A, B, Amt}} | Cmds], Trees) ->
+  calc_state_trees(S, CT, [{R, {wtd, A, Amt}}, {R, {dep, B, Amt}} | Cmds], Trees);
+calc_state_trees(S, CT, [{_, {dep, A, Amt}} | Cmds], Trees) ->
   ATrees0  = aec_trees:accounts(Trees),
   A0       = aec_accounts_trees:get(get_account_key(S, ?ACCOUNT(A)), ATrees0),
   {ok, A1} = earn(A0, Amt),
   ATrees1  = aec_accounts_trees:enter(A1, ATrees0),
-  calc_state_trees(S, Cmds, aec_trees:set_accounts(Trees, ATrees1));
+  calc_state_trees(S, CT, Cmds, aec_trees:set_accounts(Trees, ATrees1));
 
-calc_state_trees(S, [{_, {contract, Amt}} | Cmds], Trees) ->
+calc_state_trees(S, CT, [{_, {contract, Amt}} | Cmds], Trees) ->
   AC = aec_accounts:new(<<1:256>>, Amt),
   ATrees = aec_accounts_trees:enter(AC, aec_trees:accounts(Trees)),
   Trees1 = aec_trees:set_accounts(Trees, ATrees),
 
   OwnerId  = aeser_id:create(account, <<1:256>>),
-  {VmVersion, ABIVersion, Code} =
-    case maps:get(protocol, S) of
-      Vsn when Vsn >= ?LIMA_PROTOCOL_VSN -> {5, 3, maps:get({code, 5}, txs_contracts_eqc:contract(offchain))}
-    end,
-  {ok, CallData} = calc_calldata(ABIVersion, init),
-  CreateOp = aesc_offchain_update:op_new_contract(OwnerId, VmVersion, ABIVersion, Code, Amt, CallData),
-  Env      = aetx_env:tx_env(maps:get(height, S), maps:get(protocol, S)),
+  {ABI, VM, P, H} = CT,
+  Code      = offchain_ct_code(VM),
+  {ok, CallData} = calc_calldata(ABI, init),
+  CreateOp = aesc_offchain_update:op_new_contract(OwnerId, VM, ABI, Code, Amt, CallData),
+  Env      = aetx_env:tx_env(H, P),
   NoTrees  = aec_trees:new_without_backend(),
   Trees2   = aesc_offchain_update:apply_on_trees(CreateOp, Trees1, NoTrees, Env, 1, 0),
-  calc_state_trees(S, Cmds, Trees2);
+  calc_state_trees(S, CT, Cmds, Trees2);
 
-calc_state_trees(S = #{ protocol := P }, [{_, {ccall, A, Round, ABI}} | Cmds], Trees) ->
+calc_state_trees(S, CT, [{_, {ccall, A, Round}} | Cmds], Trees) ->
+  {ABI, _, P, H} = CT,
   CallOp   = calc_call_op(S, A, ABI),
-  Env      = aetx_env:tx_env(maps:get(height, S), P),
+  Env      = aetx_env:tx_env(H, P),
   NoTrees  = aec_trees:new_without_backend(),
   PTrees   = aect_call_state_tree:prune_without_backend(Trees),
+  %% io:format("YY2: ~p\n", [{CallOp, aec_trees:hash(PTrees), aec_trees:hash(NoTrees), Env, max(1, Round)}]),
   Trees1   = aesc_offchain_update:apply_on_trees(CallOp, PTrees, NoTrees, Env, max(1, Round), 0),
-  calc_state_trees(S, Cmds, Trees1);
+  %% io:format("YY3: ~p\n", [aec_trees:hash(Trees1)]),
+  calc_state_trees(S, CT, Cmds, Trees1);
 
-calc_state_trees(S, [{_, {create, I, IA, R, RA}} | Cmds], Trees) ->
+calc_state_trees(S, CT, [{_, {create, I, IA, R, RA}} | Cmds], Trees) ->
   AI     = aec_accounts:new(get_account_key(S, ?ACCOUNT(I)), IA),
   AR     = aec_accounts:new(get_account_key(S, ?ACCOUNT(R)), RA),
   ATrees = aec_accounts_trees:enter(AI,
              aec_accounts_trees:enter(AR, aec_trees:accounts(Trees))),
-  calc_state_trees(S, Cmds, aec_trees:set_accounts(Trees, ATrees)).
+  calc_state_trees(S, CT, Cmds, aec_trees:set_accounts(Trees, ATrees)).
 
-calc_call_op(S = #{ protocol := P }, A, ABI) ->
+calc_call_op(S, A, ABI) ->
   CallerId = aeser_id:create(account, get_account_key(S, ?ACCOUNT(A))),
   ContractPK = aect_contracts:compute_contract_pubkey(<<1:256>>, 1),
   ContractId = aeser_id:create(contract, ContractPK),
   {ok, CallData} = calc_calldata(ABI, transfer),
   aesc_offchain_update:op_call_contract(CallerId, ContractId, ABI, 0,
-                                        CallData, [], minimum_gas_price(P), 10000).
+                                        CallData, [], 1000000, 100000).
 
 calc_update(S, ChId) ->
   case get_channel(S, ChId) of
     #channel{ state = CS } ->
+      {ABI, _, _, _} = offchain_ct_version(S),
       case lists:last(CS#cs.cmds) of
-        {_, {ccall, A, _R, ABI}} -> calc_call_op(S, A, ABI);
-        _                        -> aesc_offchain_update:op_meta(<<>>)
+        {_, {ccall, A, _R}} -> calc_call_op(S, A, ABI);
+        _                   -> aesc_offchain_update:op_meta(<<>>)
       end;
     _ -> aesc_offchain_update:op_meta(<<>>)
   end.
@@ -1093,12 +1122,17 @@ calc_payload(S, ChId, Round) ->
 calc_payload_and_trees(S, ChId, Round) ->
   case get_channel(S, ChId) of
     #channel{ state = CS, init = Init, resp = Resp, i_auth = IA, r_auth = RA } ->
-      Trees = calc_state_trees(S, CS#cs.cmds),
+      Trees = calc_state_trees(S, offchain_ct_version(S), CS#cs.cmds),
       StateHash = aec_trees:hash(Trees),
 
       ChannelId = aeser_id:create(channel, get_channel_id(S, ChId)),
+      Updates   = case maps:get(protocol, S) of
+                    Vsn when Vsn < ?FORTUNA_PROTOCOL_VSN -> [];
+                    _Vsn                                 -> none
+                  end,
       {ok, Tx}  = aesc_offchain_tx:new(#{ state_hash => StateHash,
                                           channel_id => ChannelId,
+                                          updates    => Updates,
                                           round      => Round}),
       STx = sign(S, [{Init, IA}, {Resp, RA}], Tx),
       {aetx_sign:serialize_to_binary(STx), Trees};
@@ -1106,10 +1140,14 @@ calc_payload_and_trees(S, ChId, Round) ->
       {<<>>, aec_trees:new_without_backend()}
   end.
 
-calc_poi(S, ChId) ->
+calc_poi(S, ChId, Mode) ->
   case get_channel(S, ChId) of
-    #channel{ state = CS, init = Init, resp = Resp } ->
-      Trees = calc_state_trees(S, CS#cs.cmds),
+    C = #channel{ state = CS, init = Init, resp = Resp } ->
+      CT = case Mode of
+             on_chain -> C#channel.ct_version;
+             _        -> offchain_ct_version(S)
+           end,
+      Trees = calc_state_trees(S, CT, CS#cs.cmds),
       poi([{account, get_account_key(S, ?ACCOUNT(Init))},
            {account, get_account_key(S, ?ACCOUNT(Resp))}], Trees);
     _ ->
