@@ -37,7 +37,7 @@ spend_args(S) ->
         #{ amount  => gen_spend_amount(S, Sender),
            fee     => gen_fee(S, spend),
            nonce   => gen_nonce(),
-           payload => utf8() }]).
+           payload => gen_payload() }]).
 
 spend_valid(S, [Sender, {ReceiverTag, Receiver}, Tx]) ->
   is_account(S, Sender)
@@ -152,3 +152,6 @@ gen_spend_amount(S, Key) ->
 gen_amount() -> ?LET(X, choose(1, 9), X * 10000000).
 rnd(X) when X < 1000000000000 -> X;
 rnd(X) -> (X div 1000000000000) * 1000000000000.
+
+gen_payload() ->
+  weighted_default({5, <<>>}, {1, ?LET(Size, choose(1, 8), noshrink(binary(Size)))}).
