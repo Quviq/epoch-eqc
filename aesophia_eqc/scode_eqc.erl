@@ -140,6 +140,36 @@ instr_g() ->
 code_g() -> longer_list(5, instr_g()).
 coda_g() -> weighted_default({4, []}, {1, [loop]}).
 
+-define(MaxBranches, 2000).
+
+max_branches(0) -> 1000;
+max_branches(1) -> 30;
+max_branches(2) -> 10;
+max_branches(_) -> 6.
+
+count_branches([I | Is]) ->
+    count_branches(I) * count_branches(Is);
+count_branches(S = {switch, _, _, _, _}) ->
+    Bs = try prune_branches(init_state(), branches(init_state(), S)) catch throw:type_error -> [] end,
+    max(1, lists:sum([ count_branches(Code) || {_, Code} <- Bs ]));
+count_branches(_) -> 1.
+
+cap_branches(_, []) -> [];
+cap_branches(Cap, [I | Is]) ->
+    B = count_branches(I),
+    case B > Cap of
+        true  -> cap_branches(Cap, Is);
+        false ->
+            Cap1 = if B =< 1 -> Cap;
+                      true   -> Cap div B end,
+            [I | cap_branches(Cap1, Is)]
+    end.
+
+
+program_g(MaxBranches) ->
+    ?LET(P, program_g(),
+         cap_branches(MaxBranches, P)).
+
 program_g() ->
     ?LET({Code, Coda}, {code_g(), coda_g()},
          return(Code ++ Coda)).
@@ -234,22 +264,22 @@ branches(_S, _Path, _Reads, missing, []) -> [];
 branches(S, Path, Reads, missing, [C | Catchalls]) ->
     branches(S, Path, Reads, C, Catchalls);
 branches(_S, Path, Reads, [switch_body | Code], _) ->
-    [{lists:reverse(Path), [ {read, R} || R <- lists:reverse(Reads) ] ++ Code}];
+    [{lists:reverse(Path), [ {read, R} || R <- lists:reverse(Reads) ], Code}];
 branches(S, Path, Reads, [{switch, _, _, _, _} = Switch], Catchalls) ->
     branches(S, Path, Reads, Switch, Catchalls);
 branches(S, Path, Reads, {switch, Arg, Type, Alts, Def}, Catchalls) ->
     {V, S1} = read_arg(S, Arg),
     type_check(V, Type),
     Catchalls1 = [Def || Def /= missing] ++ Catchalls,
-    [ {Path1, Code}
+    [ {Path1, Rs, Code}
       || {I, Alt} <- ix(0, Alts),
-         {Path1, Code} <- branches(S1, [alt_tag(Type, I) | Path], [Arg | Reads], Alt, Catchalls1) ].
+         {Path1, Rs, Code} <- branches(S1, [alt_tag(Type, I) | Path], [Arg | Reads], Alt, Catchalls1) ].
 
 branches(S, Switch) ->
     branches(S, [], [], Switch, []).
 
 prune_branches(S, Alts) ->
-    lists:flatmap(fun({Path, Code}) -> prune_branch(S, Path, Code, [], []) end, Alts).
+    uniq(lists:flatmap(fun({Path, Reads, Code}) -> prune_branch(S, Path, Reads, Code, [], []) end, Alts)).
 
 type_check(V, Type) ->
     Value = is_value(V),
@@ -258,14 +288,17 @@ type_check(V, Type) ->
             _ when not Value -> ok;
             boolean          -> true = lists:member(V, [false, true]);
             tuple            -> {tuple, _} = V;
-            {variant, Ar}    -> {variant, Ar, _, _} = V
+            {variant, Ar}    -> {variant, Ar1, _, _} = V,
+                                true = length(Ar) == length(Ar1)
         end
-    catch _:_ -> throw(type_error)
+    catch _:_ ->
+        throw(type_error)
     end.
 
 match_tag(Tag, V) ->
     Value = is_value(V),
     case {Tag, V} of
+        {catchall, _}                  -> maybe;
         _ when not Value -> maybe;
         {false, _}                     -> Tag == V;
         {true,  _}                     -> Tag == V;
@@ -275,14 +308,14 @@ match_tag(Tag, V) ->
         {{con, _}, _}                  -> false
     end.
 
-prune_branch(S, [Tag | Path], [I = {read, R} | Code], AccP, AccC) ->
+prune_branch(S, [Tag | Path], [I = {read, R} | Reads], Code, AccP, AccC) ->
     {V, S1} = read_arg(S, R),
     case match_tag(Tag, V) of
-        true  -> prune_branch(S1, Path, Code, AccP, [I || R == {stack, 0}] ++ AccC);
+        true  -> prune_branch(S1, Path, Reads, Code, AccP, [I || R == {stack, 0}] ++ AccC);
         false -> [];
-        maybe -> prune_branch(S1, Path, Code, [Tag | AccP], [I | AccC])
+        maybe -> prune_branch(S1, Path, Reads, Code, [Tag | AccP], [I || R == {stack, 0}] ++ AccC)
     end;
-prune_branch(_, [], Code, AccP, AccC) ->
+prune_branch(_, [], [], Code, AccP, AccC) ->
     [{lists:reverse(AccP), lists:reverse(AccC) ++ Code}].
 
 step(S, {read, Arg}) ->
@@ -375,7 +408,8 @@ optimize(Code, Opts) ->
 prop_eval() ->
     in_parallel(
     ?LET(Verbose, parameter(verbose, false),
-    ?FORALL({LoopCount, P1}, {choose(0, 3), program_g()},
+    ?FORALL(LoopCount, choose(0, 3),
+    ?FORALL(P1, program_g(max_branches(LoopCount)),
     begin
         Opts = [ {debug, [opt_rules, opt]} || Verbose ],
         S0 = init_state(),
@@ -388,15 +422,25 @@ prop_eval() ->
             S2 = sym_eval(S0, LoopCount, P2, Verbose),
             Size1 = code_size(P1),
             Size2 = code_size(P2),
+            Branches = length(S1),
             ?IMPLIES(not lists:any(fun({_, S}) -> maps:is_key(skip, S) end, S1),
-            measure(branches, length(S1),
             measure(optimize, (1 + Size2) / (1 + Size1),
-                conjunction([{size, ?WHENFAIL(io:format("~p > ~p\n", [Size2, Size1]), Size2 =< Size1)},
-                             {state, compare_states(S1, S2)}]))))
+                conjunction([{skip, equals([], [ TS || {_, #{skip := _}} = TS <- S2 ])},
+                             {branches, check_branches(Branches, P1)},
+                             {size, ?WHENFAIL(io:format("~p > ~p\n", [Size2, Size1]), Size2 =< Size1)},
+                             {state, compare_states(S1, S2)}])))
         catch K:Err ->
             equals({K, Err, erlang:get_stacktrace()}, ok)
         end)
-    end))).
+    end)))).
+
+check_branches(B, P) ->
+    ?WHENFAIL(
+       begin
+           Bs = [ Trace || {Trace, _} <- sym_eval(init_state(), 0, P, false) ],
+           io:format("Program branches: ~p\nTotal Branches:   ~p\nAll paths (no loops):\n  ~p\n",
+                     [count_branches(P), B, Bs])
+        end, B =< ?MaxBranches).
 
 compare_states(Ss1, Ss2) when is_list(Ss1), is_list(Ss2) ->
     {Trace1, _} = lists:unzip(Ss1),
@@ -440,4 +484,6 @@ ix(Xs) -> ix(1, Xs).
 
 keyuniq(Ix, Xs) ->
     Xs -- (Xs -- lists:ukeysort(Ix, Xs)).
+
+uniq(Xs) -> Xs -- (Xs -- lists:usort(Xs)).
 
