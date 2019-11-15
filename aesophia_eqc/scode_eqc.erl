@@ -191,8 +191,10 @@ op_view(I) when element(1, I) == 'PUSH';
                 element(1, I) == 'CALL_GR' ->
     [Op | Args] = tuple_to_list(I),
     {Op, {stack, 0}, Args};
+op_view({'INC', R})   -> {'INC', R, [R]};
+op_view({'DEC', R})   -> {'DEC', R, [R]};
 op_view('INCA')       -> {'INC', {stack, 0}, [{stack, 0}]};
-op_view('DECA')       -> {'INC', {stack, 0}, [{stack, 0}]};
+op_view('DECA')       -> {'DEC', {stack, 0}, [{stack, 0}]};
 op_view('BITS_NONEA') -> {'BITS_NONE', {stack, 0}, []};
 op_view('BITS_ALLA')  -> {'BITS_ALL', {stack, 0}, []};
 op_view({'POP', R}) ->
