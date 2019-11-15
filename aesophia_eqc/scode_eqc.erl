@@ -495,9 +495,9 @@ compare_states(Ss1, Ss2) when is_list(Ss1), is_list(Ss2) ->
     end;
 compare_states(#{ stack := Stack1, store := Store1, effects := Eff1 } = S1,
                #{ stack := Stack2, store := Store2, effects := Eff2 } = S2) ->
-    Abort1 = maps:get(abort, S1, false),
-    Abort2 = maps:get(abort, S2, false),
-    case Abort1 == false andalso Abort2 == false of
+    Abort1 = maps:get(abort, S1, no_abort),
+    Abort2 = maps:get(abort, S2, no_abort),
+    case Abort1 == no_abort andalso Abort2 == no_abort of
         false -> equals_upto({abort, Abort1}, {abort, Abort2});
         true  -> conjunction([{stack, equals_upto(Stack1, Stack2)},
                               {store, equals_upto(Store1, Store2)},
