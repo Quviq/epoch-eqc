@@ -342,7 +342,7 @@ step(S, {'ABORT', Reg}) ->
 step(S, I) ->
     {Op, Dst, Args} = op_view(I),
     {Vals, S1} = read_args(S, Args),
-    write_arg(Dst, sym(Op, Vals),
+    write_arg(Dst, truncate(sym(Op, Vals)),
     side_effect(Op, Vals, S1)).
 
 -define(is_value(X), X == true orelse X == false).
@@ -357,7 +357,7 @@ sym('IS_NIL', ['NIL']) -> true;
 sym(Op, [X, Y]) when ?is_cmp(Op) ->
     Value = is_value(X) andalso is_value(Y),
     case Op of
-        _ when not Value -> {Op, truncate(X), truncate(Y)};
+        _ when not Value -> {Op, X, Y};
         'LT'             -> X < Y;
         'GT'             -> X > Y;
         'EQ'             -> X =:= Y;
@@ -376,12 +376,12 @@ sym('MOD', [X, Y]) when is_integer(X), is_integer(Y), Y /= 0 -> X rem Y;
 sym('NOT', [false]) -> true;
 sym('NOT', [true])  -> false;
 sym(Op, [])       -> Op;
-sym(Op, Vs)       -> list_to_tuple([Op | truncate(Vs)]).
+sym(Op, Vs)       -> list_to_tuple([Op | Vs]).
 
 -define(TermDepth, 3).
 truncate(X) -> truncate(?TermDepth, X).
 
-truncate(0, X) when is_atom(X); is_integer(X) -> X;
+truncate(_, X) when is_atom(X); is_integer(X); X == []; X == {}; X == #{} -> X;
 truncate(0, _) -> '...';
 truncate(D, L) when is_list(L) ->
     [ truncate(D - 1, X) || X <- L ];
