@@ -498,10 +498,10 @@ compare_states(#{ stack := Stack1, store := Store1, effects := Eff1 } = S1,
     Abort1 = maps:get(abort, S1, false),
     Abort2 = maps:get(abort, S2, false),
     case Abort1 == false andalso Abort2 == false of
-        false -> equals({abort, Abort1}, {abort, Abort2});
-        true  -> conjunction([{stack, equals(Stack1, Stack2)},
-                              {store, equals(Store1, Store2)},
-                              {effects, equals(lists:reverse(Eff1), lists:reverse(Eff2))}])
+        false -> equals_upto({abort, Abort1}, {abort, Abort2});
+        true  -> conjunction([{stack, equals_upto(Stack1, Stack2)},
+                              {store, equals_upto(Store1, Store2)},
+                              {effects, equals_upto(lists:reverse(Eff1), lists:reverse(Eff2))}])
     end.
 
 compare_trace(T1, T2) when length(T1) /= length(T2) -> false;
@@ -510,6 +510,23 @@ compare_trace(T1, T2) ->
               (Tag)            -> [Tag] end,
     Cmp = fun({P1, P2}) -> lists:flatmap(Flat, P1) == lists:flatmap(Flat, P2) end,
     lists:all(Cmp, lists:zip(T1, T2)).
+
+equals_upto(X, Y) ->
+    case eq_upto(X, Y) of
+        true  -> true;
+        false -> equals(X, Y)
+    end.
+
+eq_upto('...', _) -> true;
+eq_upto(_, '...') -> true;
+eq_upto(X, X)     -> true;
+eq_upto([H1 | T1], [H2 | T2]) ->
+    eq_upto(H1, H2) andalso eq_upto(T1, T2);
+eq_upto(T1, T2) when is_tuple(T1), is_tuple(T2) ->
+    eq_upto(tuple_to_list(T1), tuple_to_list(T2));
+eq_upto(M1, M2) when is_map(M1), is_map(M2) ->
+    eq_upto(maps:to_list(M1), maps:to_list(M2));
+eq_upto(_, _) -> false.
 
 code_size(P) when is_list(P) ->
     lists:sum([ code_size(I) || I <- P ]);
