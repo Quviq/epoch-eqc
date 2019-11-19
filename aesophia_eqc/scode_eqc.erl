@@ -387,7 +387,7 @@ sym(Op, Vs)       -> list_to_tuple([Op | Vs]).
 -define(TermDepth, 3).
 truncate(X) -> truncate(?TermDepth, X).
 
-truncate(_, X) when is_atom(X); is_integer(X); X == []; X == {}; X == #{} -> X;
+truncate(_, X) when is_atom(X); is_integer(X); X == []; X == {}; X == #{}; X == <<>> -> X;
 truncate(0, _) -> '...';
 truncate(D, L) when is_list(L) ->
     [ truncate(D - 1, X) || X <- L ];
@@ -535,8 +535,9 @@ prop_eval_bb() ->
             [ io:format("== Optimized ==\n") || Verbose ],
             Ss2 = sym_eval_bb(S0, LoopCount, BB2, Verbose),
             ?IMPLIES(not lists:any(fun({_, S}) -> maps:is_key(skip, S) end, Ss1),
+            measure(branches, length(Ss1),
             aggregate([ exit_code(S) || {_, S} <- Ss1 ],
-                compare_states(Ss1, Ss2)))
+                compare_states(Ss1, Ss2))))
         catch K:Err ->
             equals({K, Err, erlang:get_stacktrace()}, ok)
         end)
@@ -599,7 +600,7 @@ compare_trace(T1, T2) when length(T1) /= length(T2) -> false;
 compare_trace(T1, T2) ->
     Flat = fun({switch, Tags}) -> Tags;
               (Tag)            -> [Tag] end,
-    Cmp = fun({P1, P2}) -> lists:flatmap(Flat, P1) == lists:flatmap(Flat, P2) end,
+    Cmp = fun({P1, P2}) -> eq_upto(lists:flatmap(Flat, P1), lists:flatmap(Flat, P2)) end,
     lists:all(Cmp, lists:zip(T1, T2)).
 
 equals_upto(X, Y) ->
