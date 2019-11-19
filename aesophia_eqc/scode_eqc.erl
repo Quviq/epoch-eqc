@@ -108,7 +108,7 @@ switch_g() ->
 
 switch_type_g() ->
     oneof([boolean, tuple,
-           {variant, eqc_gen:fmap(fun(N) -> lists:duplicate(N, tuple) end, choose(1, 3))}]).
+           {variant, eqc_gen:fmap(fun(N) -> lists:duplicate(N, tuple) end, choose(1, 4))}]).
 
 switch_alt_g(D) ->
     weighted_default(
@@ -150,7 +150,7 @@ max_branches(_) -> 6.
 count_branches([I | Is]) ->
     count_branches(I) * count_branches(Is);
 count_branches(S = {switch, _, _, _, _}) ->
-    Bs = try prune_branches(init_state(), branches(init_state(), S)) catch throw:type_error -> [] end,
+    Bs = prune_branches(init_state(), branches(init_state(), S)),
     max(1, lists:sum([ count_branches(Code) || {_, Code} <- Bs ]));
 count_branches(_) -> 1.
 
@@ -330,9 +330,21 @@ step(S, Switch = {switch, _Arg, _Type, _Alts, _Def}) ->
     {fork, branches(S, Switch)};
 step(S, {'TUPLE', Dst, {immediate, N}}) ->
     step(S, list_to_tuple(['TUPLE', Dst | lists:duplicate(N, {stack, 0})]));
+step(S, {'EXIT', Reg}) ->
+    {Msg, S1} = read_arg(S, Reg),
+    S1#{ abort => Msg };
 step(S, {'ABORT', Reg}) ->
     {Msg, S1} = read_arg(S, Reg),
     S1#{ abort => Msg };
+step(S, 'RETURN') ->
+    {V, S1} = read_arg(S, {stack, 0}),
+    S1#{ return => V };
+step(S, {'RETURNR', R}) ->
+    {V, S1} = read_arg(S, R),
+    S1#{ return => V };
+step(S, {'CALL_T', R}) ->
+    {V, S1} = read_arg(S, R),
+    S1#{ return => {'CALL_T', V} };
 step(S, I) ->
     {Op, Dst, Args} = op_view(I),
     {Vals, S1} = read_args(S, Args),
@@ -414,12 +426,65 @@ sym_eval(S, Trace, P0, LoopC, [I | Is], Verbose) ->
         _                            -> sym_eval(S1, Trace, P0, LoopC, Is, Verbose)
     end.
 
+sym_eval_bb(S, LoopCount, BBs = #{ 0 := Code }, Verbose) ->
+    sym_eval_bb(S, [], LoopCount, BBs, 0, Code, Verbose).
+
+sym_eval_bb(S = #{ return := _ }, Trace, _, _, _, _, _) ->
+    sym_eval_return(S, Trace);
+sym_eval_bb(S = #{ abort := _ }, Trace, _, _, _, _, _) ->
+    sym_eval_return(S, Trace);
+sym_eval_bb(S, Trace, LoopC, BBs, _PC, [{'JUMP', {immediate, I}}], Verbose) ->
+    LoopC1 = if I == 0 -> LoopC - 1; true -> LoopC end,
+    case LoopC1 < 0 of
+        true  -> sym_eval_return(S, Trace);
+        false -> sym_eval_bb(S, [loop || LoopC1 < LoopC] ++ Trace, LoopC1, BBs, I, maps:get(I, BBs), Verbose)
+    end;
+sym_eval_bb(S, Trace, LoopC, BBs, PC, [{'JUMPIF', R, {immediate, I}}], Verbose) ->
+    {V, S1} = read_arg(S, R),
+    Bs = [{[{V, '=', true}],  I}      || V /= false] ++
+         [{[{V, '=', false}], PC + 1} || V /= true],
+    sym_eval_branches(S1, Trace, LoopC, BBs, Bs, Verbose);
+sym_eval_bb(S, Trace, LoopC, BBs, PC, [{'SWITCH_V2', R, {immediate, I}, {immediate, J}}], Verbose) ->
+    sym_eval_bb(S, Trace, LoopC, BBs, PC, [{'SWITCH_VN', R, {immediate, [I, J]}}], Verbose);
+sym_eval_bb(S, Trace, LoopC, BBs, PC, [{'SWITCH_V3', R, {immediate, I}, {immediate, J}, {immediate, K}}], Verbose) ->
+    sym_eval_bb(S, Trace, LoopC, BBs, PC, [{'SWITCH_VN', R, {immediate, [I, J, K]}}], Verbose);
+sym_eval_bb(S, Trace, LoopC, BBs, _PC, [{'SWITCH_VN', R, {immediate, Ls}}], Verbose) ->
+    Ar      = length(Ls),
+    {V, S1} = read_arg(S, R),
+    Mismatch = fun(I) -> case V of {variant, _, J, _} when J < Ar -> I /= J;
+                                   _                              -> false end end,
+    Bs = [{{is_con, I, V}, L} || {I, L} <- ix(0, Ls), not Mismatch(I)],
+    sym_eval_branches(S1, Trace, LoopC, BBs, Bs, Verbose);
+sym_eval_bb(S, Trace, LoopC, BBs, PC, [I | Code], Verbose) ->
+    S1 = step(S, I),
+    sym_eval_bb(S1, Trace, LoopC, BBs, PC, Code, Verbose);
+sym_eval_bb(S, Trace, LoopC, BBs, PC, [], Verbose) ->
+    sym_eval_bb(S, Trace, LoopC, BBs, PC + 1, maps:get(PC + 1, BBs), Verbose).
+
+sym_eval_jump(S, Trace, LoopC, BBs, I, Verbose) ->
+    sym_eval_bb(S, Trace, LoopC, BBs, I, maps:get(I, BBs), Verbose).
+
+sym_eval_branches(S, Trace, LoopC, BBs, [{_, PC}], Verbose) ->
+    sym_eval_jump(S, Trace, LoopC, BBs, PC, Verbose);
+sym_eval_branches(S, Trace, LoopC, BBs, Branches, Verbose) ->
+    lists:append(
+      [ sym_eval_jump(S, [Choice | Trace], LoopC, BBs, PC1, Verbose)
+      || {Choice, PC1} <- Branches ]).
+
+sym_eval_return(S, Trace) ->
+    [{lists:reverse(Trace), S}].
+
 %% -- Properties -------------------------------------------------------------
 
 optimize(Code) -> optimize(Code, []).
 optimize(Code, Opts) ->
     {_, _, Code1} = aeso_fcode_to_fate:optimize_fun([], "test_fun", {[], {[], integer}, Code}, Opts),
     Code1.
+
+to_bbs(Code) ->
+    Funs = #{ <<"test">> => {[], {[], integer}, Code} },
+    [{_, {_, _, BBs}}] = maps:to_list(aeb_fate_code:functions(aeso_fcode_to_fate:to_basic_blocks(Funs))),
+    BBs.
 
 prop_eval() ->
     in_parallel(
@@ -451,6 +516,35 @@ prop_eval() ->
             equals({K, Err, erlang:get_stacktrace()}, ok)
         end)
     end)))).
+
+prop_eval_bb() ->
+    in_parallel(
+    ?LET(Verbose, parameter(verbose, false),
+    ?FORALL(LoopCount, choose(0, 3),
+    ?FORALL(P1, program_g(max_branches(LoopCount)),
+    begin
+        Opts = [ {debug, [opt_rules, opt]} || Verbose ],
+        S0 = init_state(),
+        P2 = optimize(P1, Opts),
+        BB1 = (catch to_bbs(P1)),
+        BB2 = (catch to_bbs(P2)),
+        ?WHENFAIL(io:format("Optimized:\n  ~p\nBB1 = ~p\nBB2 = ~p\n", [P2, BB1, BB2]),
+        try
+            [ io:format("== Original ==\n") || Verbose ],
+            Ss1 = sym_eval_bb(S0, LoopCount, BB1, Verbose),
+            [ io:format("== Optimized ==\n") || Verbose ],
+            Ss2 = sym_eval_bb(S0, LoopCount, BB2, Verbose),
+            ?IMPLIES(not lists:any(fun({_, S}) -> maps:is_key(skip, S) end, Ss1),
+            aggregate([ exit_code(S) || {_, S} <- Ss1 ],
+                compare_states(Ss1, Ss2)))
+        catch K:Err ->
+            equals({K, Err, erlang:get_stacktrace()}, ok)
+        end)
+    end)))).
+
+exit_code(#{ abort := _ })  -> abort;
+exit_code(#{ return := _ }) -> return;
+exit_code(#{})              -> loop.
 
 check_term_size(Ss) ->
     Check = fun(#{ stack := Stack, store := Store }) ->
@@ -491,11 +585,14 @@ compare_states(#{ stack := Stack1, store := Store1, effects := Eff1 } = S1,
                #{ stack := Stack2, store := Store2, effects := Eff2 } = S2) ->
     Abort1 = maps:get(abort, S1, no_abort),
     Abort2 = maps:get(abort, S2, no_abort),
+    Return1 = maps:get(return, S1, no_return),
+    Return2 = maps:get(return, S2, no_return),
     case Abort1 == no_abort andalso Abort2 == no_abort of
         false -> equals_upto({abort, Abort1}, {abort, Abort2});
         true  -> conjunction([{stack, equals_upto(Stack1, Stack2)},
                               {store, equals_upto(Store1, Store2)},
-                              {effects, equals_upto(lists:reverse(Eff1), lists:reverse(Eff2))}])
+                              {effects, equals_upto(lists:reverse(Eff1), lists:reverse(Eff2))},
+                              {return, equals_upto(Return1, Return2)}])
     end.
 
 compare_trace(T1, T2) when length(T1) /= length(T2) -> false;
