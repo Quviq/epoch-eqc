@@ -264,28 +264,38 @@ side_effect(Op, Vs, S) ->
 alt_tag(boolean, I, V) ->
     B = if I == 0 -> false; true -> true end,
     [{V, '=', B} || B /= V];
-alt_tag(tuple, 0, {tuple, _}) -> [];
-alt_tag(tuple, 0, V) -> [{is_tuple, V}];
+alt_tag(tuple, _, _) -> [];
+alt_tag({variant, [_]}, _, _) -> [];
 alt_tag({variant, _}, I, {variant, _, I, _}) -> [];
 alt_tag({variant, _}, I, V) -> [{is_con, I, V}].
 
-branches(_S, _Path, _Reads, missing, []) -> [];
+branches(_S, Path, Reads, [], _) ->
+    [{Path, [{read, R} || R <- lists:reverse(Reads)], []}];
+branches(_S, Path, Reads, missing, []) ->
+    [{Path, [{read, R} || R <- lists:reverse(Reads)], [{'ABORT', {immediate, "Incomplete patterns"}}]}];
 branches(S, Path, Reads, missing, [C | Catchalls]) ->
     branches(S, Path, Reads, C, Catchalls);
 branches(_S, Path, Reads, [switch_body | Code], _) ->
-    [{lists:reverse(Path), [ {read, R} || R <- lists:reverse(Reads) ], Code}];
-branches(S, Path, Reads, [{switch, _, _, _, _} = Switch], Catchalls) ->
-    branches(S, Path, Reads, Switch, Catchalls);
-branches(S, Path, Reads, {switch, Arg, Type, Alts, Def}, Catchalls) ->
-    {V, S1} = read_arg(S, Arg),
-    case type_check(V, Type) of
-        false ->
-            [{Path, [{read, R} || R <- lists:reverse(Reads)], [{'ABORT', {immediate, "Type error"}}]}];
-        true ->
-            Catchalls1 = [Def || Def /= missing] ++ Catchalls,
-            [ {Path1, Rs, Code}
-              || {I, Alt} <- ix(0, Alts),
-                 {Path1, Rs, Code} <- branches(S1, alt_tag(Type, I, V) ++ Path, [Arg | Reads], Alt, Catchalls1) ]
+    [{Path, [ {read, R} || R <- lists:reverse(Reads) ], Code}];
+branches(S, Path, Reads, Switch = {switch, _, _, _, _}, Catchalls) ->
+    branches(S, Path, Reads, [Switch], Catchalls);
+branches(S, Path, Reads, [{switch, Arg, Type, Alts, Def} | Code], Catchalls) ->
+    Append = fun(missing, _) -> missing; (A, B) -> A ++ B end,
+    case lists:usort(Alts) of
+        [missing] ->
+            {_, S1} = read_arg(S, Arg),
+            branches(S1, Path, [Arg | Reads], Append(Def, Code), Catchalls);
+        _ ->
+            {V, S1} = read_arg(S, Arg),
+            case type_check(V, Type) of
+                false ->
+                    [{Path, [{read, R} || R <- lists:reverse(Reads)], [{'ABORT', {immediate, "Type error"}}]}];
+                true ->
+                    Catchalls1 = [Def ++ Code || Def /= missing] ++ Catchalls,
+                    [ {Path1, Rs, Code1}
+                      || {I, Alt} <- ix(0, Alts),
+                         {Path1, Rs, Code1} <- branches(S1, alt_tag(Type, I, V) ++ Path, [Arg | Reads], Append(Alt, Code), Catchalls1) ]
+            end
     end.
 
 branches(S, Switch) ->
@@ -335,7 +345,8 @@ step(S, {'EXIT', Reg}) ->
     S1#{ abort => Msg };
 step(S, {'ABORT', Reg}) ->
     {Msg, S1} = read_arg(S, Reg),
-    S1#{ abort => Msg };
+    Msg1 = if is_binary(Msg) -> binary_to_list(Msg); true -> Msg end,
+    S1#{ abort => Msg1 };
 step(S, 'RETURN') ->
     {V, S1} = read_arg(S, {stack, 0}),
     S1#{ return => V };
@@ -397,31 +408,35 @@ truncate(D, M) when is_map(M) ->
     maps:map(fun(_, V) -> truncate(D - 1, V) end, M);
 truncate(_, X) -> X.
 
-pp_state(S, Verbose) ->
-    [ io:format("- ~p\n", [S]) || Verbose ].
+pp_state(S, Trace, Verbose) ->
+    [ io:format("- ~p\n", [S#{ trace => Trace }]) || Verbose ].
 
 sym_eval(S, LoopCount, P, Verbose) ->
     sym_eval(S, [], P, LoopCount, P, Verbose).
 
 sym_eval(S = #{ abort := _ }, Trace, _, _, _, Verbose) ->
-    pp_state(S, Verbose),
-    [{lists:reverse(Trace), S}];
+    pp_state(S, Trace, Verbose),
+    sym_eval_return(S, Trace);
+sym_eval(S = #{ return := _ }, Trace, _, _, _, Verbose) ->
+    pp_state(S, Trace, Verbose),
+    sym_eval_return(S, Trace);
 sym_eval(S, Trace, _, _, [], Verbose) ->
-    pp_state(S, Verbose),
-    [{lists:reverse(Trace), S}];
+    pp_state(S, Trace, Verbose),
+    {V, S1} = read_arg(S, {stack, 0}),
+    sym_eval_return(S1#{ return => V }, Trace);
 sym_eval(S, Trace, P0, LoopC, [I | Is], Verbose) ->
-    pp_state(S, Verbose),
+    pp_state(S, Trace, Verbose),
     [ io:format("~p\n", [I]) || Verbose ],
     S1 = step(S, I),
     case S1 of
         {fork, Alts}                 ->
             case prune_branches(S, Alts) of
-                [] -> [{lists:reverse(Trace), S#{ abort => "Incomplete patterns" }}];
+                [] -> sym_eval_return(S#{ abort => "Incomplete patterns" }, Trace);
                 Alts1 ->
-                    lists:append([ sym_eval(S, [{switch, Path} || Path /= []] ++ Trace, P0, LoopC, Alt ++ Is, Verbose)
+                    lists:append([ sym_eval(S, Path ++ Trace, P0, LoopC, Alt ++ Is, Verbose)
                                    || {Path, Alt} <- Alts1 ])
             end;
-        _ when I == loop, LoopC =< 0 -> pp_state(S1, Verbose), [{lists:reverse(Trace), S1}];
+        _ when I == loop, LoopC =< 0 -> pp_state(S1, Trace, Verbose), sym_eval_return(S1, Trace);
         _ when I == loop             -> sym_eval(S1, [loop | Trace], P0, LoopC - 1, P0, Verbose);
         _                            -> sym_eval(S1, Trace, P0, LoopC, Is, Verbose)
     end.
@@ -441,8 +456,8 @@ sym_eval_bb(S, Trace, LoopC, BBs, _PC, [{'JUMP', {immediate, I}}], Verbose) ->
     end;
 sym_eval_bb(S, Trace, LoopC, BBs, PC, [{'JUMPIF', R, {immediate, I}}], Verbose) ->
     {V, S1} = read_arg(S, R),
-    Bs = [{[{V, '=', true}],  I}      || V /= false] ++
-         [{[{V, '=', false}], PC + 1} || V /= true],
+    Bs = [{{V, '=', false}, PC + 1} || V /= true] ++
+         [{{V, '=', true},  I}      || V /= false],
     sym_eval_branches(S1, Trace, LoopC, BBs, Bs, Verbose);
 sym_eval_bb(S, Trace, LoopC, BBs, PC, [{'SWITCH_V2', R, {immediate, I}, {immediate, J}}], Verbose) ->
     sym_eval_bb(S, Trace, LoopC, BBs, PC, [{'SWITCH_VN', R, {immediate, [I, J]}}], Verbose);
@@ -531,13 +546,19 @@ prop_eval_bb() ->
         ?WHENFAIL(io:format("Optimized:\n  ~p\nBB1 = ~p\nBB2 = ~p\n", [P2, BB1, BB2]),
         try
             [ io:format("== Original ==\n") || Verbose ],
-            Ss1 = sym_eval_bb(S0, LoopCount, BB1, Verbose),
+            Ss1a = sym_eval(S0, LoopCount, P1, Verbose),
+            [ io:format("== Original BB ==\n") || Verbose ],
+            Ss1b = sym_eval_bb(S0, LoopCount, BB1, Verbose),
             [ io:format("== Optimized ==\n") || Verbose ],
-            Ss2 = sym_eval_bb(S0, LoopCount, BB2, Verbose),
-            ?IMPLIES(not lists:any(fun({_, S}) -> maps:is_key(skip, S) end, Ss1),
-            measure(branches, length(Ss1),
-            aggregate([ exit_code(S) || {_, S} <- Ss1 ],
-                compare_states(Ss1, Ss2))))
+            Ss2a = sym_eval(S0, LoopCount, P2, Verbose),
+            [ io:format("== Optimized BB ==\n") || Verbose ],
+            Ss2b = sym_eval_bb(S0, LoopCount, BB2, Verbose),
+            ?IMPLIES(not lists:any(fun({_, S}) -> maps:is_key(skip, S) end, Ss1b),
+            measure(branches, length(Ss1b),
+            aggregate([ exit_code(S) || {_, S} <- Ss1b ],
+                conjunction([{opt,    compare_states(Ss1a, Ss2a)},
+                             {opt_bb, compare_states(Ss1b, Ss2b)},
+                             {bb,     compare_states(Ss2a, Ss2b)}]))))
         catch K:Err ->
             equals({K, Err, erlang:get_stacktrace()}, ok)
         end)
@@ -623,6 +644,7 @@ eq_upto(_, _) -> false.
 code_size(P) when is_list(P) ->
     lists:sum([ code_size(I) || I <- P ]);
 code_size(missing) -> 0;
+code_size(switch_body) -> 0;
 code_size({switch, _, _, Alts, Def}) ->
     1 + code_size([Def | Alts]);
 code_size({'POP', {var, 9999}}) -> 0;   %% Don't count popping unused stack elems
