@@ -459,10 +459,9 @@ sym_eval_bb(S, Trace, LoopC, BBs, PC, [{'SWITCH_V2', R, {immediate, I}, {immedia
 sym_eval_bb(S, Trace, LoopC, BBs, PC, [{'SWITCH_V3', R, {immediate, I}, {immediate, J}, {immediate, K}}], Verbose) ->
     sym_eval_bb(S, Trace, LoopC, BBs, PC, [{'SWITCH_VN', R, {immediate, [I, J, K]}}], Verbose);
 sym_eval_bb(S, Trace, LoopC, BBs, _PC, [{'SWITCH_VN', R, {immediate, Ls}}], Verbose) ->
-    Ar      = length(Ls),
     {V, S1} = read_arg(S, R),
-    Mismatch = fun(I) -> case V of {variant, _, J, _} when J < Ar -> I /= J;
-                                   _                              -> false end end,
+    Mismatch = fun(I) -> case V of {variant, _, J, _} -> I /= J;
+                                   _                  -> false end end,
     Bs = [{{is_con, I, V}, L} || {I, L} <- ix(0, Ls), not Mismatch(I)],
     sym_eval_branches(S1, Trace, LoopC, BBs, Bs, Verbose);
 sym_eval_bb(S, Trace, LoopC, BBs, PC, [I | Code], Verbose) ->
