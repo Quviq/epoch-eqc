@@ -473,6 +473,8 @@ sym_eval_bb(S, Trace, LoopC, BBs, PC, [], Verbose) ->
 sym_eval_jump(S, Trace, LoopC, BBs, I, Verbose) ->
     sym_eval_bb(S, Trace, LoopC, BBs, I, maps:get(I, BBs), Verbose).
 
+sym_eval_branches(S, Trace, _, _, [], _Verbose) ->
+    sym_eval_return(S#{ abort => "Incomplete patterns" }, Trace);
 sym_eval_branches(S, Trace, LoopC, BBs, [{_, PC}], Verbose) ->
     sym_eval_jump(S, Trace, LoopC, BBs, PC, Verbose);
 sym_eval_branches(S, Trace, LoopC, BBs, Branches, Verbose) ->
