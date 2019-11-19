@@ -287,15 +287,10 @@ branches(S, Path, Reads, [{switch, Arg, Type, Alts, Def} | Code], Catchalls) ->
             branches(S1, Path, [Arg | Reads], Append(Def, Code), Catchalls);
         _ ->
             {V, S1} = read_arg(S, Arg),
-            case type_check(V, Type) of
-                false ->
-                    [{Path, [{read, R} || R <- lists:reverse(Reads)], [{'ABORT', {immediate, "Type error"}}]}];
-                true ->
-                    Catchalls1 = [Def ++ Code || Def /= missing] ++ Catchalls,
-                    [ {Path1, Rs, Code1}
-                      || {I, Alt} <- ix(0, Alts),
-                         {Path1, Rs, Code1} <- branches(S1, alt_tag(Type, I, V) ++ Path, [Arg | Reads], Append(Alt, Code), Catchalls1) ]
-            end
+            Catchalls1 = [Def ++ Code || Def /= missing] ++ Catchalls,
+            [ {Path1, Rs, Code1}
+              || {I, Alt} <- ix(0, Alts),
+                 {Path1, Rs, Code1} <- branches(S1, alt_tag(Type, I, V) ++ Path, [Arg | Reads], Append(Alt, Code), Catchalls1) ]
     end.
 
 branches(S, Switch) ->
