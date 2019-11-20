@@ -151,7 +151,7 @@ count_branches([I | Is]) ->
     count_branches(I) * count_branches(Is);
 count_branches(S = {switch, _, _, _, _}) ->
     Bs = branches(init_state(), S),
-    max(1, lists:sum([ count_branches(Code) || {_, Code} <- Bs ]));
+    max(1, lists:sum([ count_branches(Code) || {_, _, Code} <- Bs ]));
 count_branches(_) -> 1.
 
 cap_branches(_, []) -> [];
@@ -499,6 +499,15 @@ to_bbs(Code) ->
     Funs = #{ <<"test">> => {[], {[], integer}, Code} },
     [{_, {_, _, BBs}}] = maps:to_list(aeb_fate_code:functions(aeso_fcode_to_fate:to_basic_blocks(Funs))),
     BBs.
+
+prop_branches() ->
+    ?FORALL(LoopCount, choose(0, 3),
+    ?FORALL(P, program_g(max_branches(LoopCount)),
+    begin
+        Ss = sym_eval(init_state(), LoopCount, P, false),
+        ?WHENFAIL(eqc:format("Branches:\n~120p\nCount: ~p\n", [Ss, length(Ss)]),
+            length(Ss) < 3000)
+    end)).
 
 prop_eval() ->
     in_parallel(
