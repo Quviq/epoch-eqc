@@ -150,7 +150,7 @@ max_branches(_) -> 6.
 count_branches([I | Is]) ->
     count_branches(I) * count_branches(Is);
 count_branches(S = {switch, _, _, _, _}) ->
-    Bs = prune_branches(init_state(), branches(init_state(), S)),
+    Bs = branches(init_state(), S),
     max(1, lists:sum([ count_branches(Code) || {_, Code} <- Bs ]));
 count_branches(_) -> 1.
 
@@ -272,7 +272,7 @@ alt_tag({variant, _}, I, V) -> [{is_con, I, V}].
 branches(_S, Path, Reads, [], _) ->
     [{Path, [{read, R} || R <- lists:reverse(Reads)], []}];
 branches(_S, Path, Reads, missing, []) ->
-    [{Path, [{read, R} || R <- lists:reverse(Reads)], [{'ABORT', {immediate, "Incomplete patterns"}}]}];
+    [{Path, [{read, R} || R <- lists:reverse(Reads)], [incomplete_patterns()]}];
 branches(S, Path, Reads, missing, [C | Catchalls]) ->
     branches(S, Path, Reads, C, Catchalls);
 branches(_S, Path, Reads, [switch_body | Code], _) ->
@@ -287,10 +287,15 @@ branches(S, Path, Reads, [{switch, Arg, Type, Alts, Def} | Code], Catchalls) ->
             branches(S1, Path, [Arg | Reads], Append(Def, Code), Catchalls);
         _ ->
             {V, S1} = read_arg(S, Arg),
-            Catchalls1 = [Def ++ Code || Def /= missing] ++ Catchalls,
-            [ {Path1, Rs, Code1}
-              || {I, Alt} <- ix(0, Alts),
-                 {Path1, Rs, Code1} <- branches(S1, alt_tag(Type, I, V) ++ Path, [Arg | Reads], Append(Alt, Code), Catchalls1) ]
+            Catchalls1 = [Append(Def, Code) | Catchalls],
+            Bs = [ {Path1, Rs, Code1}
+                    || {I, Alt} <- ix(0, Alts),
+                       {Path1, Rs, Code1} <- branches(S1, alt_tag(Type, I, V) ++ Path,
+                                                      [Arg | Reads], Append(Alt, Code), Catchalls1) ],
+            case prune_branches(Bs) of
+                []  -> [{Path, [{read, R} || R <- lists:reverse(Reads)], [incomplete_patterns()]}];
+                PBs -> PBs
+            end
     end.
 
 branches(S, Switch) ->
@@ -315,17 +320,19 @@ match_tag({false, '=', true})  -> false;
 match_tag({is_con, I, {variant, _, J, _}}) -> I == J;
 match_tag(_) -> maybe.
 
-prune_branches(_S, Alts) ->
-    uniq(lists:flatmap(fun({Path, Reads, Code}) -> prune_branch(Path, Reads ++ Code, []) end, Alts)).
+incomplete_patterns() -> {'ABORT', {immediate, "Incomplete patterns"}}.
 
-prune_branch([Tag | Path], Code, Acc) ->
+prune_branches(Alts) ->
+    uniq(lists:flatmap(fun({Path, Reads, Code}) -> prune_branch(Path, Reads, Code, []) end, Alts)).
+
+prune_branch([Tag | Path], Reads, Code, Acc) ->
     case match_tag(Tag) of
-        true  -> prune_branch(Path, Code, Acc);
+        true  -> prune_branch(Path, Reads, Code, Acc);
         false -> [];
-        maybe -> prune_branch(Path, Code, [Tag | Acc])
+        maybe -> prune_branch(Path, Reads, Code, [Tag | Acc])
     end;
-prune_branch([], Code, Acc) ->
-    [{lists:reverse(Acc), Code}].
+prune_branch([], Reads, Code, Acc) ->
+    [{lists:reverse(Acc), Reads, Code}].
 
 step(S, {read, Arg}) ->
     {_, S1} = read_arg(S, Arg),
@@ -425,12 +432,8 @@ sym_eval(S, Trace, P0, LoopC, [I | Is], Verbose) ->
     S1 = step(S, I),
     case S1 of
         {fork, Alts}                 ->
-            case prune_branches(S, Alts) of
-                [] -> sym_eval_return(S#{ abort => "Incomplete patterns" }, Trace);
-                Alts1 ->
-                    lists:append([ sym_eval(S, Path ++ Trace, P0, LoopC, Alt ++ Is, Verbose)
-                                   || {Path, Alt} <- Alts1 ])
-            end;
+            lists:append([ sym_eval(S, Path ++ Trace, P0, LoopC, Reads ++ Code ++ Is, Verbose)
+                           || {Path, Reads, Code} <- Alts ]);
         _ when I == loop, LoopC =< 0 -> pp_state(S1, Trace, Verbose), sym_eval_return(S1, Trace);
         _ when I == loop             -> sym_eval(S1, [loop | Trace], P0, LoopC - 1, P0, Verbose);
         _                            -> sym_eval(S1, Trace, P0, LoopC, Is, Verbose)
