@@ -10,6 +10,9 @@
 
 %% -- Compiling and running --------------------------------------------------
 
+-define(VM_FATE_1, 5).
+-define(VM_FATE_2, 7).
+
 run(Code, Contract, Function0, Arguments) ->
     try
         Function = aeb_fate_code:symbol_identifier(Function0),
@@ -57,7 +60,8 @@ make_call(Contract, Function, Arguments) ->
        gas      => 1000000,
        value    => 0,
        store    => aefa_stores:initial_contract_store(),
-       call     => aeb_fate_encoding:serialize(Calldata) }.
+       call     => aeb_fate_encoding:serialize(Calldata),
+       vm_version => ?VM_FATE_1}.
 
 pad_contract_name(Name) ->
     PadSize = 32 - byte_size(Name),
