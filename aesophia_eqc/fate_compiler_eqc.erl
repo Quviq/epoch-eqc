@@ -529,7 +529,7 @@ prop_fun() ->
     begin
         Contract = pp_fun(Defs, Fun),
         ?WHENFAIL(eqc:format("// Contract\n~s\n", [Contract]),
-        ?TIMEOUT(5000,
+        ?TIMEOUT(60000,
         case catch compile_contract(Contract, [{debug, all} || Verbose]) of
             Compiled when is_tuple(Compiled), element(1, Compiled) == fcode ->
                 ?WHENFAIL([eqc:format("// Compiled\n~s\n", [aeb_fate_asm:pp(Compiled)]) || Verbose],
