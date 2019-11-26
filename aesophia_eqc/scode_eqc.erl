@@ -446,7 +446,7 @@ sym_eval_bb(S = #{ return := _ }, Trace, _, _, _, _, _) ->
     sym_eval_return(S, Trace);
 sym_eval_bb(S = #{ abort := _ }, Trace, _, _, _, _, _) ->
     sym_eval_return(S, Trace);
-sym_eval_bb(S, Trace, LoopC, BBs, _PC, [{'JUMP', {immediate, I}}], Verbose) ->
+sym_eval_bb(S, Trace, LoopC, BBs, _PC, [{'JUMP', {immediate, I}} | _], Verbose) ->
     LoopC1 = if I == 0 -> LoopC - 1; true -> LoopC end,
     case LoopC1 < 0 of
         true  -> sym_eval_return(S, Trace);

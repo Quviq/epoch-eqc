@@ -11,7 +11,7 @@
 %% -- Compiling and running --------------------------------------------------
 
 -define(VM_FATE_1, 5).
--define(VM_FATE_2, 7).
+-define(VM_FATE_2, 6).
 
 run(Code, Contract, Function0, Arguments) ->
     try
@@ -474,6 +474,15 @@ eval(Env, {variant_t, _, Cons}, {con, C, Es}) ->
     {variant, Size, Tag, list_to_tuple([eval(Env, T, E) || {T, E} <- lists:zip(Ts, Es)])};
 eval(_Env, T, E) -> {todo, T, E}.
 
+unsingleton({E}) -> unsingleton(E);
+unsingleton({variant, Ar, I, Args}) ->
+    {variant, Ar, I, list_to_tuple(unsingleton(tuple_to_list(Args)))};
+unsingleton(T) when is_tuple(T) ->
+    list_to_tuple(unsingleton(tuple_to_list(T)));
+unsingleton([H | T]) ->
+    [unsingleton(H) | unsingleton(T)];
+unsingleton(X) -> X.
+
 untup({tuple, T}) ->
     list_to_tuple(untup(tuple_to_list(T)));
 untup({variant, Ar, I, Args}) ->
@@ -534,8 +543,8 @@ prop_fun() ->
             Compiled when is_tuple(Compiled), element(1, Compiled) == fcode ->
                 ?WHENFAIL([eqc:format("// Compiled\n~s\n", [aeb_fate_asm:pp(Compiled)]) || Verbose],
                 begin
-                    Expect   = [ interpret_fun(Defs, Fun, Val) || Val <- Vals ],
-                    Results  = [ untup(run(Compiled, <<"test">>, <<"test">>, Val)) || Val <- Vals ],
+                    Expect   = [ unsingleton(interpret_fun(Defs, Fun, Val)) || Val <- Vals ],
+                    Results  = [ untup(run(Compiled, <<"test">>, <<"test">>, unsingleton(Val))) || Val <- Vals ],
                     Tag = fun({error, _}) -> error; (_) -> value end,
                     aggregate(lists:map(Tag, Results),
                         equals(Results, Expect))
