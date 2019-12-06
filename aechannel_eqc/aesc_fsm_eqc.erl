@@ -79,7 +79,7 @@ initiate(Host, Port, #{initiator := I, responder := R} = SymOpts, #{faulty := Fa
     %% Should read it from S, but no wrap_call in component framework
     Opts = SymOpts#{initiator => aec_accounts:pubkey(maps:get(I, Symbolic)),
                     responder => aec_accounts:pubkey(maps:get(R, Symbolic))},
-    case aesc_fsm:initiate(list_to_binary(Host), Port, Opts) of
+    case aesc_client:initiate(list_to_binary(Host), Port, Opts) of
         {ok, Pid} when not Faulty ->
             Pid;
         {ok, Pid} when Faulty ->
@@ -99,11 +99,14 @@ initiate_callouts(S, [Host, Port, #{initiator := I, responder := R}, #{faulty :=
     ?MATCH(BReturn,
            ?CALLOUT(aec_chain, get_account, [aec_accounts:pubkey(RAccount)],
                     oneof([{error, something} || Faulty] ++ [ {value, RAccount} ]))),
+    ?CALLOUT(aesc_limits, allow_new, [],
+            oneof([{error, exists} || Faulty ] ++ [ ok ])),
     ?WHEN(BReturn =/= {error, something} andalso AReturn =/= {error, something},
           ?SEQ([
                 ?CALLOUT(aesc_session_noise, connect, [list_to_binary(Host), Port, []], Connection),
                 ?WHEN(Connection =/= {error, not_connected},
-                      ?APPLY(noise_open_channel, []))
+                      ?SEQ([?APPLY(noise_open_channel, []),
+                            ?SEND(?SELF, {aesc_fsm, ?WILDCARD, ?WILDCARD})]))
                ])).
 
 noise_open_channel_callouts(S, []) ->
@@ -135,6 +138,7 @@ initiate_features(_S, [_Host, _Port, _Opts, #{faulty := Faulty}], Res) ->
 %% --- Operation: chain_mismatch ---
 chain_mismatch_pre(S) ->
     maps:get(state, S, undefined) == initialized andalso
+        maps:get(accepted, S, false) == false andalso
         maps:is_key(temporary_channel_id, S).
 
 chain_mismatch_args(#{fsm := Fsm} = S) ->
@@ -154,9 +158,10 @@ chain_mismatch(Fsm, ArgMap) ->
 
 chain_mismatch_callouts(#{chain := Chain}, [Fsm, ArgMap]) ->
     GenesisHeader = lists:last(Chain),
-    ?CALLOUT(aec_chain, genesis_hash, [], aec_headers:root_hash(GenesisHeader)),
-    ?SEND(?SELF, ?WILDCARD),  %% error
-    ?SEND(?SELF, ?WILDCARD).  %% died
+    ?OPTIONAL(?CALLOUT(aec_chain, genesis_hash, [],
+                       aec_headers:root_hash(GenesisHeader))),
+    ?SEND(?SELF, {aesc_fsm, ?WILDCARD, #{info => ?WILDCARD, tag => error, type => report}}),
+    ?OPTIONAL(?SEND(?SELF, ?WILDCARD)).
 
 chain_mismatch_next(S, _Value, [_, _]) ->
     maps:with([chain, protocol], S).
@@ -171,6 +176,7 @@ chain_mismatch_post(_S, [_, _], Res) ->
 %% --- Operation: channel_accept ---
 channel_accept_pre(S) ->
     maps:get(state, S, undefined) == initialized andalso
+        maps:get(accepted, S, false) == false andalso
         maps:is_key(temporary_channel_id, S).
 
 channel_accept_args(#{fsm := Fsm, chain := Chain} = S) ->
@@ -200,12 +206,16 @@ channel_accept_callouts(#{chain := Chain} = S, [Fsm, #{initiator := I, responder
     Trees = [],
     PinnedHeight = 0,
     IAccount = maps:get(I, S),
+    IAccountType = aec_accounts:type(IAccount),
     RAccount = maps:get(R, S),
+    RAccountType = aec_accounts:type(RAccount),
     Protocol = maps:get(protocol, S),
-    ?CALLOUT(aec_chain, genesis_hash, [], aec_headers:root_hash(GenesisHeader)),
+    ?OPTIONAL(?CALLOUT(aec_chain, genesis_hash, [], aec_headers:root_hash(GenesisHeader))),
     ?PAR([?SEQ([
                 ?CALLOUT(aec_chain, get_account, [aec_accounts:pubkey(IAccount)], {value, maps:get(alice, S)}),
-                ?CALLOUT(aec_next_nonce, pick_for_account, [aec_accounts:pubkey(IAccount)], {ok, nonce(maps:get(alice, S))}),
+                ?WHEN(IAccountType =:= basic,
+                      ?CALLOUT(aec_next_nonce, pick_for_account,
+                               [aec_accounts:pubkey(IAccount)], {ok, nonce(maps:get(alice, S))})),
                 ?CALLOUT(aec_chain, top_header, [], hd(Chain)),
                 ?CALLOUT(aec_chain, get_key_header_by_height, [PinnedHeight], {ok, GenesisHeader}), %% This needs to be a different one
                 %% This header is now serialized and hashed
@@ -218,17 +228,13 @@ channel_accept_callouts(#{chain := Chain} = S, [Fsm, #{initiator := I, responder
                 ?CALLOUT(aetx_env, height, [?WILDCARD], PinnedHeight),
                 ?CALLOUT(aec_chain, top_header, [], hd(Chain)),
                 ?CALLOUT(aec_chain, top_header, [], hd(Chain)),
-                ?CALLOUT(aec_chain, top_header, [], hd(Chain)),
-                ?CALLOUT(aec_chain, top_header, [], hd(Chain)),
-                ?CALLOUT(aec_chain, top_header, [], hd(Chain)),
                 ?CALLOUT(aec_chain, top_header, [], hd(Chain))
                ]),
-          ?SEND(?SELF,  {aesc_fsm, ?WILDCARD, #{info => channel_accept, tag => info, type => report}})]),
-    ?SEND(?SELF,  {aesc_fsm, ?WILDCARD, #{info => ?WILDCARD, tag => create_tx, type => sign}}).   %% signed Tx.
-
+          ?SEND(?SELF,  {aesc_fsm, ?WILDCARD, #{info => channel_accept, tag => info, type => report}}),
+          ?SEND(?SELF,  {aesc_fsm, ?WILDCARD, #{info => ?WILDCARD, tag => create_tx, type => sign}})]).
 
 channel_accept_next(S, _Value, [_Fsm, _Args, _]) ->
-    S.
+    S#{accepted => true}.
 
 channel_accept_post(_S, [_Fsm, _Args, _], Res) ->
     eq(Res, ok).
@@ -318,6 +324,7 @@ api_spec() ->
                          , aec_next_nonce_spec()
                          , aetx_env_spec()
                          , lager_spec()
+                         , aesc_limit_spec()
                          ]
              }.
 
@@ -359,3 +366,10 @@ aetx_env_spec() ->
              #api_fun{ name = height, arity = 1},
              #api_fun{ name = consensus_version, arity = 1}
            ] }.
+
+aesc_limit_spec() ->
+    #api_module{ name = aesc_limits,
+                 functions =
+                 [ #api_fun{ name = allow_new, arity = 0}
+                 ]
+               }.

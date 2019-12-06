@@ -4,3 +4,4 @@ system-test/data/keys
 *.beam
 current_counterexample.eqc
 aefate/cover
+*/.eqc-info
