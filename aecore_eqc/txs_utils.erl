@@ -252,10 +252,12 @@ size_extra_fee(_, Tx, ABI) ->
     sc_slash          -> 25000;
     contract_create when ABI == ?ABI_FATE_1 -> 10000;
     contract_create   -> 45000;
+    contract_call     -> 4500;
     ga_meta           -> 10000;
     ns_update         -> 5000;
     ns_claim          -> 5000;
     spend             -> 2000;
+    paying_for        -> 4000;
     _                 -> 3000
   end.
 

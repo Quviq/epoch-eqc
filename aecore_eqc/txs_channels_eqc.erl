@@ -267,10 +267,15 @@ sc_close_mutual_next(S, _Value, Args = [Actor, _NotActor, Channel, Tx]) ->
     true ->
       C  = get_channel(S, Channel),
       S1 = delete_channel(Channel, S),
+      S2 = case maps:is_key(paying_for, S) of
+             false -> S1;
+             true  -> charge(Actor, 0, maps:get(fee, Tx), S1)
+           end,
+
       reserve_fee(maps:get(fee, Tx),
         bump_nonce(Actor,
           credit(?ACCOUNT(C#channel.init), maps:get(initiator_amount_final, Tx),
-            credit(?ACCOUNT(C#channel.resp), maps:get(responder_amount_final, Tx), S1))))
+            credit(?ACCOUNT(C#channel.resp), maps:get(responder_amount_final, Tx), S2))))
   end.
 
 sc_close_mutual_post(S, Args, Res) ->
@@ -923,9 +928,12 @@ is_valid_withdraw(S, ChId, Amt) ->
 is_valid_close_mutual(S, ChId, #{initiator_amount_final := IAf,
                                  responder_amount_final := RAf,
                                  fee := Fee}) ->
+  PayingFor = maps:is_key(paying_for, S),
   case get_channel(S, ChId) of
     #channel{ state = #cs{ i_am = IA, r_am = RA, c_am = CA } }
         when (IA + RA + CA - Fee) >= IAf + RAf -> true;
+    #channel{ state = #cs{ i_am = IA, r_am = RA, c_am = CA } }
+        when PayingFor andalso (IA + RA + CA) >= IAf + RAf -> true;
     _ -> false
   end.
 
