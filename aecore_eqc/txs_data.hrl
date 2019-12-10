@@ -9,6 +9,7 @@
 -define(SOPHIA_FORTUNA,   3).
 -define(SOPHIA_LIMA_AEVM, 4).
 -define(SOPHIA_LIMA_FATE, 5).
+-define(SOPHIA_IRIS_FATE, 6).
 
 -define(ABI_AEVM_1, 1).
 -define(ABI_FATE_1, 3).
@@ -20,6 +21,7 @@
 -define(VM_AEVM_SOPHIA_3,   16#04).
 -define(VM_FATE_SOPHIA_1,   16#05).
 -define(VM_AEVM_SOPHIA_4,   16#06).
+-define(VM_FATE_SOPHIA_2,   16#07).
 
 -record(account, {key, amount, nonce = 1, ga = false}).
 -record(ga, {contract, auth_fun}).

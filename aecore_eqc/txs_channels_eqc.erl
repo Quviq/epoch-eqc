@@ -531,7 +531,7 @@ sc_force_progress_next(S, _Value, Args = [Actor, Channel, Tx]) ->
                   ?ABI_AEVM_1 when CAmtPre > 1 -> 22364;
                   ?ABI_AEVM_1 -> 13364;
                   %% ?ABI_AEVM_1 -> 100000;
-                  ?ABI_FATE_1 -> 166
+                  ?ABI_FATE_1 -> 144
                 end,
 
       C = #channel{ state = CS, solo_rnd = SRnd } = get_channel(S2, Channel),

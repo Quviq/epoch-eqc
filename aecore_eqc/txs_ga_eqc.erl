@@ -229,8 +229,8 @@ is_valid_auth_gas(S, GA, ABI, P, Gas) ->
 
 auth_gas(?ABI_AEVM_1, _, P) when P < ?LIMA_PROTOCOL_VSN -> 402;
 auth_gas(?ABI_AEVM_1, _, _)                             -> 722;
-auth_gas(?ABI_FATE_1, N, _) when N < 64                 -> 167;
-auth_gas(?ABI_FATE_1, _, _)                             -> 172;
+auth_gas(?ABI_FATE_1, N, _) when N < 64                 -> 124;
+auth_gas(?ABI_FATE_1, _, _)                             -> 129;
 auth_gas(_, _, _)                                       -> 1.
 
 check_abi(S, GA, ABI) ->

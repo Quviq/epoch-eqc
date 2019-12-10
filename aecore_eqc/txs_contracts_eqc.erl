@@ -33,7 +33,7 @@ contract_create_args(#{protocol := Protocol} = S) ->
             [Creator, Name, SymName, Compiler,
              #{vm_version  => VM,
                abi_version => ABI,
-               fee         => gen_fee(S, conctract_create, ABI),
+               fee         => gen_fee(S, contract_create, ABI),
                gas_price   => gen_gas_price(Protocol),
                gas         => gen_gas(GasUsed),
                nonce       => gen_nonce(),
@@ -66,8 +66,7 @@ check_contract_opts(?FORTUNA_PROTOCOL_VSN, ?SOPHIA_FORTUNA,   aevm_sophia_2, abi
 check_contract_opts(?FORTUNA_PROTOCOL_VSN, ?SOPHIA_FORTUNA,   aevm_sophia_3, abi_aevm_1) -> true;
 check_contract_opts(?LIMA_PROTOCOL_VSN,    ?SOPHIA_LIMA_AEVM, aevm_sophia_4, abi_aevm_1) -> true;
 check_contract_opts(?LIMA_PROTOCOL_VSN,    ?SOPHIA_LIMA_FATE, fate_sophia_1, abi_fate_1) -> true;
-check_contract_opts(?IRIS_PROTOCOL_VSN,    ?SOPHIA_LIMA_AEVM, aevm_sophia_4, abi_aevm_1) -> true;
-check_contract_opts(?IRIS_PROTOCOL_VSN,    ?SOPHIA_LIMA_FATE, fate_sophia_1, abi_fate_1) -> true;
+check_contract_opts(?IRIS_PROTOCOL_VSN,    ?SOPHIA_IRIS_FATE, fate_sophia_2, abi_fate_1) -> true;
 check_contract_opts(_, _, _, _) -> false.
 
 contract_create_tx(S, Args) ->
@@ -283,7 +282,7 @@ is_payable_contract(S, C) ->
     case get_contract(S, C) of
         false -> true;
         #contract{ vm = VM } ->
-          not lists:member(VM, [fate_sophia_1, aevm_sophia_4])
+          not lists:member(VM, [fate_sophia_1, fate_sophia_2, aevm_sophia_4])
     end.
 
 is_valid_gas_price(S, #{ gas_price := GasPrice }) ->
@@ -291,10 +290,10 @@ is_valid_gas_price(S, #{ gas_price := GasPrice }) ->
 
 is_valid_gas(Name, Fun, ABI, VM, P, Gas) ->
     GasUse = contract_gas(Name, Fun, ABI, P),
-    %% io:format("XXX: ~p ~p ~p ~p\n", [Fun, VM, Gas, GasUse]),
+    %% io:format("XXX: ~p ~p ~p ~p ~p ~p\n", [Fun, VM, Gas, GasUse, P, (Gas - GasUse)]),
     case {lists:member(VM, [aevm_sophia_1, aevm_sophia_2]), Gas - GasUse} of
-      {true, N} when N < 0, N > -4, P < ?LIMA_PROTOCOL_VSN -> Fun /= "check_nonce" andalso Fun /= "n_checks";
-      {true, N} when N < 0, N > -323, P >= ?LIMA_PROTOCOL_VSN -> Fun /= "check_nonce" andalso Fun /= "n_checks";
+      {true, N} when N < 0, N > -4, P < ?LIMA_PROTOCOL_VSN -> Fun /= "check_nonce" andalso Fun /= "n_checks" andalso Fun /= "check";
+      {true, N} when N < 0, N > -323, P >= ?LIMA_PROTOCOL_VSN -> Fun /= "check_nonce" andalso Fun /= "n_checks" andalso Fun /= "check";
       _ -> true
     end.
 
@@ -309,6 +308,7 @@ vm_to_int(aevm_sophia_2) -> 3;
 vm_to_int(aevm_sophia_3) -> 4;
 vm_to_int(fate_sophia_1) -> 5;
 vm_to_int(aevm_sophia_4) -> 6;
+vm_to_int(fate_sophia_2) -> 7;
 vm_to_int(N)             -> N.
 
 %% This is cheating a bit, but ABI hasn't moved... So use the latest version
@@ -345,9 +345,14 @@ gen_contract_opts(?FORTUNA_PROTOCOL_VSN) ->
     ?LET(VM, frequency([{60, aevm_sophia_3}, {39, aevm_sophia_2}, {1, elements([22, vm_solidity, aevm_sophia_1, aevm_sophia_4])}]),
     ?LET(ABI, frequency([{99, abi_aevm_1}, {1, elements([abi_fate_1, abi_raw])}]),
          {Compiler, VM, ABI})));
-gen_contract_opts(Vsn) when Vsn == ?LIMA_PROTOCOL_VSN; Vsn == ?IRIS_PROTOCOL_VSN ->
+gen_contract_opts(?LIMA_PROTOCOL_VSN) ->
     ?LET(Kind, elements([fate, aevm]),
-         gen_contract_opts(?LIMA_PROTOCOL_VSN, Kind)).
+         gen_contract_opts(?LIMA_PROTOCOL_VSN, Kind));
+gen_contract_opts(?IRIS_PROTOCOL_VSN) ->
+    ?LET(Compiler, frequency([{99, ?SOPHIA_IRIS_FATE}, {1, elements([?SOPHIA_FORTUNA, ?SOPHIA_LIMA_AEVM])}]),
+    ?LET(VM, frequency([{99, fate_sophia_2}, {1, elements([22, vm_solidity, fate_sophia_1, aevm_sophia_4])}]),
+    ?LET(ABI, frequency([{99, abi_fate_1}, {1, elements([abi_aevm_1, abi_raw])}]),
+         {Compiler, VM, ABI}))).
 
 gen_contract_opts(?LIMA_PROTOCOL_VSN, aevm) ->
     ?LET(Compiler, frequency([{99, ?SOPHIA_LIMA_AEVM}, {1, elements([?SOPHIA_FORTUNA, ?SOPHIA_LIMA_FATE])}]),
@@ -411,7 +416,7 @@ contracts() ->
               [ begin
                     {ok, Code} = aect_test_utils:compile_contract(CompilerVersion, File),
                     {{code, CompilerVersion}, Code}
-                end || CompilerVersion <- [1, 2, 3, 4, 5] ],
+                end || CompilerVersion <- [1, 2, 3, 4, 5, 6] ],
           maps:merge(C#{src => ContractSrc}, maps:from_list(CompiledCode))
       end || C <- Static ].
 
@@ -428,16 +433,16 @@ contract_gas(simple_state, init, ?ABI_AEVM_1, _) -> 413;
 contract_gas(simple_state, init, ?ABI_FATE_1, _) -> 103;
 contract_gas(simple_state, "check", ?ABI_AEVM_1, P) when P < ?LIMA_PROTOCOL_VSN -> 404;
 contract_gas(simple_state, "check", ?ABI_AEVM_1, _) -> 724;
-contract_gas(simple_state, "check", ?ABI_FATE_1, _) -> 147;
+contract_gas(simple_state, "check", ?ABI_FATE_1, _) -> 125;
 contract_gas(simple_state, "n_checks", ?ABI_AEVM_1, P) when P < ?LIMA_PROTOCOL_VSN -> 327;
 contract_gas(simple_state, "n_checks", ?ABI_AEVM_1, _) -> 647;
 contract_gas(simple_state, "n_checks", ?ABI_FATE_1, _) -> 21;
 contract_gas(_, _, _, _) -> 1000.
 
 contract_payable_fun(simple_state, "n_checks", VM) ->
-    VM /= aevm_sophia_4 andalso VM /= fate_sophia_1;
+    VM /= aevm_sophia_4 andalso VM /= fate_sophia_1 andalso VM /= fate_sophia_2;
 contract_payable_fun(simple_state, "check", VM) ->
-    VM /= aevm_sophia_4 andalso VM /= fate_sophia_1;
+    VM /= aevm_sophia_4 andalso VM /= fate_sophia_1 andalso VM /= fate_sophia_2;
 contract_payable_fun(_, _, _) -> true.
 
 propsetup(HardForks, Prop) ->
