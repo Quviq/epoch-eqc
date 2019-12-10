@@ -10,6 +10,9 @@
 
 %% -- Compiling and running --------------------------------------------------
 
+-define(VM_FATE_1, 5).
+-define(VM_FATE_2, 6).
+
 run(Code, Contract, Function0, Arguments) ->
     try
         Function = aeb_fate_code:symbol_identifier(Function0),
@@ -17,8 +20,9 @@ run(Code, Contract, Function0, Arguments) ->
         Call  = make_call(Contract, Function, Arguments),
         Spec  = dummy_spec(),
         case aefa_fate:run_with_cache(Call, Spec, Cache) of
-            {ok, ES}      -> aefa_engine_state:accumulator(ES);
-            {error, E, _} -> {error, binary_to_list(E)}
+            {ok, ES}       -> aefa_engine_state:accumulator(ES);
+            {error, E, _}  -> {error, binary_to_list(E)};
+            {revert, E, _} -> {error, binary_to_list(E)}
         end
     catch _:Err ->
         {'EXIT', Err, erlang:get_stacktrace()}
@@ -28,7 +32,7 @@ compile_contract(Code) ->
     compile_contract(Code, []).
 
 compile_contract(Code, Options) ->
-    {ok, Ast} = aeso_parser:string(Code),
+    Ast       = aeso_parser:string(Code),
     TypedAst  = aeso_ast_infer_types:infer(Ast, Options),
     FCode     = aeso_ast_to_fcode:ast_to_fcode(TypedAst, Options),
     Fate      = aeso_fcode_to_fate:compile(FCode, Options),
@@ -56,7 +60,8 @@ make_call(Contract, Function, Arguments) ->
        gas      => 1000000,
        value    => 0,
        store    => aefa_stores:initial_contract_store(),
-       call     => aeb_fate_encoding:serialize(Calldata) }.
+       call     => aeb_fate_encoding:serialize(Calldata),
+       vm_version => ?VM_FATE_1}.
 
 pad_contract_name(Name) ->
     PadSize = 32 - byte_size(Name),
@@ -469,6 +474,15 @@ eval(Env, {variant_t, _, Cons}, {con, C, Es}) ->
     {variant, Size, Tag, list_to_tuple([eval(Env, T, E) || {T, E} <- lists:zip(Ts, Es)])};
 eval(_Env, T, E) -> {todo, T, E}.
 
+unsingleton({E}) -> unsingleton(E);
+unsingleton({variant, Ar, I, Args}) ->
+    {variant, Ar, I, list_to_tuple(unsingleton(tuple_to_list(Args)))};
+unsingleton(T) when is_tuple(T) ->
+    list_to_tuple(unsingleton(tuple_to_list(T)));
+unsingleton([H | T]) ->
+    [unsingleton(H) | unsingleton(T)];
+unsingleton(X) -> X.
+
 untup({tuple, T}) ->
     list_to_tuple(untup(tuple_to_list(T)));
 untup({variant, Ar, I, Args}) ->
@@ -524,13 +538,13 @@ prop_fun() ->
     begin
         Contract = pp_fun(Defs, Fun),
         ?WHENFAIL(eqc:format("// Contract\n~s\n", [Contract]),
-        ?TIMEOUT(5000,
+        ?TIMEOUT(60000,
         case catch compile_contract(Contract, [{debug, all} || Verbose]) of
             Compiled when is_tuple(Compiled), element(1, Compiled) == fcode ->
                 ?WHENFAIL([eqc:format("// Compiled\n~s\n", [aeb_fate_asm:pp(Compiled)]) || Verbose],
                 begin
-                    Expect   = [ interpret_fun(Defs, Fun, Val) || Val <- Vals ],
-                    Results  = [ untup(run(Compiled, <<"test">>, <<"test">>, Val)) || Val <- Vals ],
+                    Expect   = [ unsingleton(interpret_fun(Defs, Fun, Val)) || Val <- Vals ],
+                    Results  = [ untup(run(Compiled, <<"test">>, <<"test">>, unsingleton(Val))) || Val <- Vals ],
                     Tag = fun({error, _}) -> error; (_) -> value end,
                     aggregate(lists:map(Tag, Results),
                         equals(Results, Expect))

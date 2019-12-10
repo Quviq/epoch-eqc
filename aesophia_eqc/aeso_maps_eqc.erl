@@ -745,8 +745,10 @@ prop_run(Backend0) ->
 %% -- Low-level operations ---------------------------------------------------
 
 init(Backend) ->
-    eqc_mocking:start_mocking(api_spec(Backend)),
-    eqc_mocking:init_lang({repl, ?EVENT(aec_hard_forks, protocol_effective_at_height, ['_'], 4)}).
+    Backend.
+    %% eqc_mocking:start_mocking(api_spec(Backend)),
+    %% eqc_mocking:init_lang({repl, ?XALT(?EVENT(aec_hard_forks, protocol_effective_at_height, ['_'], 4),
+    %%                                    ?EVENT(aec_hard_forks, sorted_protocol_versions, [], [4]))}).
 
 api_spec(_) ->
   #api_spec
@@ -756,6 +758,7 @@ api_spec(_) ->
       , fallback  = aec_hard_forks
       , functions =
           [ #api_fun{ name = protocol_effective_at_height, arity = 1 }
+          , #api_fun{ name = sorted_protocol_versions,     arity = 0 }
           ]
       } ] }.
 
