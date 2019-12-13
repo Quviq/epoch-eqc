@@ -11,11 +11,11 @@
 tx_models() ->
   [ txs_spend_eqc
   , txs_channels_eqc
-  %% , txs_contracts_eqc
-  %% , txs_names_eqc
-  %% , txs_oracles_eqc
+  , txs_contracts_eqc
+  , txs_names_eqc
+  , txs_oracles_eqc
   , txs_ga_eqc
-  %% , txs_paying_for_eqc
+  , txs_paying_for_eqc
   ].
 
 initial_state(HFs) ->
@@ -108,6 +108,36 @@ mine_next(#{height := Height, hard_forks := Forks} = S0, Value, [Blocks]) ->
 mine_features(_S, [_B], _Res) ->
   [].
 
+%% --- Operation: dry_run ---
+
+dry_run_tx_pre(S) ->
+  maps:is_key(accounts, S).
+
+dry_run_tx_args(S) ->
+  gen_tx(S).
+
+dry_run_tx_pre(S, [M, Tx, TxData]) ->
+  not lists:member(Tx, [sc_offchain, paying_for, ga_meta]) andalso
+  is_consistent(S, TxData) andalso
+  try apply(M, ?pre(Tx), [S, TxData])
+  catch _:_ -> true end.
+
+dry_run_tx_call(S = #{height := Height, protocol := P}, [M, Tx, TxData]) ->
+  {ok, UTx} = apply(M, ?tx(Tx), [S, TxData]),
+  try dry_run_transaction(Height, P, UTx)
+  catch _:Reason -> {error, Reason, erlang:get_stacktrace()} end.
+  %% catch _:Reason -> {error, Reason} end.
+
+dry_run_tx_next(S, _Value, _Args) ->
+  S.
+
+dry_run_tx_post(S, [M, Tx, TxData], Res) ->
+  apply(M, ?post(Tx), [S, TxData, Res]).
+
+dry_run_tx_features(S, [M, Tx, TxData], Res) ->
+  [{dry_run, Tx}]
+    ++ apply(M, ?features(Tx), [S, TxData, Res]).
+
 %% --- Operation: tx ---
 
 tx_pre(S) ->
@@ -153,6 +183,26 @@ apply_transaction(Height, P, Tx) ->
       Other
   end.
 
+dry_run_transaction(_Height, _P, no_tx) ->
+  ok;
+dry_run_transaction(Height, P, Tx) ->
+  {Type, _} = aetx:specialize_type(Tx),
+  case lists:member(Type, [offchain_tx, ga_meta_tx, paying_for_tx]) of
+    true ->
+      ok;
+    false ->
+      Env0 = aetx_env:tx_env(Height, P),
+      STx  = aetx_sign:new(Tx, []),
+      Env  = aetx_env:set_signed_tx(Env0, {value, aetx_sign:new(Tx, [])}),
+
+      Trees = get(trees),
+
+      case aec_dry_run:dry_run([{tx, [], STx}], Trees, Env, []) of
+        [{_Type, {ok, _}}] -> ok;
+        [{_Type, Res}]    -> Res
+      end
+  end.
+
 wrap_call(S, {call, _, Cmd, Args}) ->
   CmdCall = list_to_atom(lists:concat([Cmd, "_call"])),
   try
@@ -175,8 +225,9 @@ gen_tx(S) ->
          lists:append([eqc_statem:apply(M, command_list, [S]) || M <- Active])),
        [M, F, Args]).
 
-weight(_S, tx)   -> 200;
-weight(_S, mine) -> 50;
+weight(_S, tx)         -> 200;
+weight(_S, dry_run_tx) -> 20;
+weight(_S, mine)       -> 50;
 weight(#{keys := Keys}, newkey) ->
   case maps:size(Keys) < 5 of
     true  -> 50;
