@@ -375,6 +375,8 @@ type_check(_, _, _) -> false.
 
 %% -- Compiling --------------------------------------------------------------
 
+-record(rt_state, { backend, accounts = [], contracts = [] }).
+
 contracts_source(#state{ contracts = Cs } = S, CmdChunks) ->
     ACIs = [ contract_aci(S, C) || C <- Cs ],
     [ contract_source(S, ACIs, C, [Chunk || {I, Chunk} <- CmdChunks, I == Id ])
@@ -493,7 +495,7 @@ chunk_entrypoint([{set, {var, N}, _} | _]) -> lists:concat(["chunk_", N]).
 
 poly_map() -> {map, {tvar, key}, {tvar, val}}.
 
-map_types(#state{ backend = fate_poly }, _) -> [poly_map()];
+map_types(#state{ backend = {fate, _} }, _) -> [poly_map()];
 map_types(_, Type)                          -> map_types(Type).
 
 map_types({map, K, V}) ->
@@ -546,7 +548,7 @@ map_fun_name(S, Id, Id, Fun, Type) ->
 map_fun_name(S, _, Id, Fun, Type) ->
     [contract_var(Id), ".", map_fun_name(S, Fun, Type)].
 
-map_fun_name(#state{ backend = fate_poly }, Fun, _) ->
+map_fun_name(#state{ backend = {fate, _} }, Fun, _) ->
     map_fun_name(Fun, poly_map());
 map_fun_name(_, Fun, Type) ->
     map_fun_name(Fun, Type).
@@ -637,7 +639,7 @@ field_name(I) -> [lists:nth(I, lists:seq($a, $z))].
 compile_commands(InitS = #state{ contracts = Cs }, Chunks) ->
     Account = {var, 1},
     Sources = contracts_source(InitS, Chunks),
-    [ {init, InitS#state.backend} ] ++
+    [ {init, #rt_state{ backend = InitS#state.backend }} ] ++
     [ {set, Account, {call, ?MODULE, new_account, []}} ] ++
     [ {set, {var, Id + 1}, {call, ?MODULE, create_contract, [Account, Source, {}]}}
       || {#contract{id = Id}, Source} <- lists:zip(Cs, Sources) ] ++
@@ -688,11 +690,13 @@ chunk_return_type(S, Id, Cmds) ->
 
 %% -- Property ---------------------------------------------------------------
 
+backends() -> [aevm, {fate, lima}, {fate, iris}].
+
 %% The property.
 prop_compile() -> prop_compile(?MODULE).
 
 prop_compile(Mod) ->
-    ?FORALL(Backend, elements([aevm, fate]),
+    ?FORALL(Backend, elements(backends()),
             prop_compile(Backend, Mod)).
 
 prop_compile(Backend, Mod) ->
@@ -713,13 +717,9 @@ prop_compile(Backend, Mod) ->
         end)
     end))).
 
-backend_variants(fate) -> [fate_poly, fate];
-backend_variants(aevm) -> [aevm].
-
-prop_run() -> prop_run(fate).
-prop_run(Backend0) ->
-    ?SETUP(fun() -> init(Backend0), fun() -> ok end end,
-    ?FORALL(Backend, elements(backend_variants(Backend0)),
+prop_run() -> prop_run({fate, iris}).
+prop_run(Backend) ->
+    ?SETUP(fun() -> init(Backend), fun() -> ok end end,
     ?FORALL(InitS, init_state(Backend),
     ?FORALL(Cmds, ?SUCHTHAT(Cmds, commands(?MODULE, InitS), length(Cmds) > 2),
     begin
@@ -739,16 +739,69 @@ prop_run(Backend0) ->
                 _ -> false
             end)))
         end)
-    end)))).
+    end))).
+
+invariant(#rt_state{ backend = aevm }) -> true;          %% Only checking FATE store
+invariant(#rt_state{ backend = {fate, lima} }) -> true;  %% Known to be buggy
+invariant(#rt_state{ contracts = Contracts }) ->
+    S = aecontract_SUITE:state(),
+    conj([ store_invariant(get_contract_store(Pubkey, S)) || Pubkey <- Contracts ]).
+
+store_invariant(Store) ->
+    Regs0 = #{ 0 := Meta } =
+        maps:from_list(
+            [ {binary:decode_unsigned(Reg), aeb_fate_encoding:deserialize(Val)}
+            || {<<0, Reg/binary>>, Val} <- maps:to_list(Store) ]),
+    Regs = maps:without([0], Regs0),
+    GetMap = fun(Id) ->
+                maps:from_list(
+                  [ {aeb_fate_encoding:deserialize(Key), aeb_fate_encoding:deserialize(Val)}
+                  || {<<1, Id1:32, Key/binary>>, Val} <- maps:to_list(Store),
+                     Key /= <<>>, Id1 == Id ])
+             end,
+    Maps = maps:map(fun(_, {tuple, {RawId, RefCount, _}}) -> {RefCount, GetMap(RawId)}
+                    end, Meta),
+    Refcount = refcount([Regs, Maps]),
+    eqc_statem:conj(
+      [ eqc_statem:tag(refcounts,
+        eqc_statem:tag([{regs, Regs}, {maps, Maps}],
+            eqc_statem:eq(Refcount, maps:map(fun(_, {R, _}) -> R end, Maps)))) ]).
+
+get_contract_store(Pubkey, S) ->
+    CTree = aect_test_utils:contracts(S),
+    Ct    = aect_state_tree:get_contract(Pubkey, CTree, [full_store_cache]),
+    aect_contracts_store:contents(aect_contracts:state(Ct)).
+
+refcount(X) -> refcount(X, #{}).
+refcount({store_map, _, Id}, Acc) -> maps:update_with(Id, fun(N) -> N + 1 end, 1, Acc);
+refcount([H | T], Acc)            -> refcount(T, refcount(H, Acc));
+refcount(T, Acc) when is_tuple(T) -> refcount(tuple_to_list(T), Acc);
+refcount(M, Acc) when is_map(M)   -> refcount(maps:values(M), Acc);
+refcount(_, Acc)                  -> Acc.
 
 
 %% -- Low-level operations ---------------------------------------------------
 
 init(Backend) ->
-    Backend.
-    %% eqc_mocking:start_mocking(api_spec(Backend)),
-    %% eqc_mocking:init_lang({repl, ?XALT(?EVENT(aec_hard_forks, protocol_effective_at_height, ['_'], 4),
-    %%                                    ?EVENT(aec_hard_forks, sorted_protocol_versions, [], [4]))}).
+    Protocol = protocol(Backend),
+    eqc_mocking:start_mocking(api_spec(Backend)),
+    eqc_mocking:init_lang({repl, ?XALT(?EVENT(aec_hard_forks, protocol_effective_at_height, ['_'], Protocol),
+                                       ?EVENT(aec_hard_forks, sorted_protocol_versions, [], [Protocol]))}).
+
+protocol({fate, iris}) -> 5;
+protocol({fate, lima}) -> 4;
+protocol(aevm) -> 4.
+
+vm_version({fate, iris}) -> 7;
+vm_version({fate, lima}) -> 5;
+vm_version(aevm)         -> 6.
+
+sophia_version({fate, iris}) -> 6;
+sophia_version({fate, lima}) -> 5;
+sophia_version(aevm)         -> 4.
+
+abi_version({fate, _}) -> 3;
+abi_version(aevm)      -> 1.
 
 api_spec(_) ->
   #api_spec
@@ -762,15 +815,12 @@ api_spec(_) ->
           ]
       } ] }.
 
-init_run(fate_poly) -> init_run(fate);
 init_run(Backend) ->
-    VM = fun(_, FATE) when Backend == fate -> FATE;
-            (AEVM, _) when Backend == aevm -> AEVM end,
     put(backend, Backend),
-    put('$vm_version',     VM(6, 5)),
-    put('$sophia_version', VM(4, 5)),
-    put('$abi_version',    VM(1, 3)),
-    put('$protocol_version', 4),
+    put('$vm_version',     vm_version(Backend)),
+    put('$sophia_version', sophia_version(Backend)),
+    put('$abi_version',    abi_version(Backend)),
+    put('$protocol_version', protocol(Backend)),
     aecontract_SUITE:state(aect_test_utils:new_state()),
     ok.
 
@@ -780,10 +830,13 @@ init_run(Backend) ->
 new_account() ->
     call(new_account, [?BALANCE]).
 
+new_account_next(S, V, _) ->
+    S#rt_state{ accounts = [V | S#rt_state.accounts] }.
+
 -define(SOPHIA_CONTRACT_VSN, 3).
 
 create_contract(Owner, Source, Args) ->
-    Backend = get(backend),
+    Backend = case get(backend) of {fate, _} -> fate; aevm -> aevm end,
     case ?BENCHMARK(compile, aeso_compiler:from_string(Source, [{backend, Backend}, no_implicit_stdlib])) of
         {ok, Code} ->
             ByteCode = aect_sophia:serialize(Code, ?SOPHIA_CONTRACT_VSN),
@@ -792,6 +845,9 @@ create_contract(Owner, Source, Args) ->
             io:format("~s\n", [Err]),
             {error, binary_to_list(Err)}
     end.
+
+create_contract_next(S, V, _) ->
+    S#rt_state{ contracts = [V | S#rt_state.contracts] }.
 
 call_contract(Caller, ContractKey, Fun, Type, Args, _Expect) ->
     {Res, _Gas} = call(call_contract, [Caller, ContractKey, Fun, Type, Args, #{gas => ?MAX_GAS, return_gas_used => true}]),
