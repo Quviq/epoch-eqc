@@ -105,6 +105,7 @@ set_state_next(S, _V, [Ref, Val]) ->
 
 map_funs() -> [ map_get
               , map_upd
+              , map_upd2
               , map_del
               , map_member
               , map_lookup
@@ -114,6 +115,7 @@ map_funs() -> [ map_get
 
 map_fun_signature(map_get)      -> {[existing_key, map], val};
 map_fun_signature(map_upd)      -> {[key, val, map], map};
+map_fun_signature(map_upd2)     -> {[key1, key2, inner_val, nested_map], nested_map};
 map_fun_signature(map_del)      -> {[key, map], map};
 map_fun_signature(map_lookup)   -> {[key, map], {option, val}};
 map_fun_signature(map_lookup_d) -> {[key, map, val], val};
@@ -123,6 +125,7 @@ map_fun_signature(map_to_list)  -> {[map], {list, {tuple, [key, val]}}}.
 
 map_fun_body(map_get)      -> "map[key]";
 map_fun_body(map_upd)      -> "map{[key] = val}";
+map_fun_body(map_upd2)     -> "map{[key1 = {}][key2] = val}";
 map_fun_body(map_del)      -> "Map.delete(key, map)";
 map_fun_body(map_lookup)   -> "Map.lookup(key, map)";
 map_fun_body(map_lookup_d) -> "Map.lookup_default(key, map, val)";
@@ -130,8 +133,19 @@ map_fun_body(map_member)   -> "Map.member(key, map)";
 map_fun_body(map_size)     -> "Map.size(map)";
 map_fun_body(map_to_list)  -> "Map.to_list(map)".
 
+map_get_pre(S)      -> pre(S, map_get).
+map_upd_pre(S)      -> pre(S, map_upd).
+map_upd2_pre(S)     -> pre(S, map_upd2).
+map_del_pre(S)      -> pre(S, map_del).
+map_member_pre(S)   -> pre(S, map_member).
+map_lookup_pre(S)   -> pre(S, map_lookup).
+map_lookup_d_pre(S) -> pre(S, map_lookup_d).
+map_size_pre(S)     -> pre(S, map_size).
+map_to_list_pre(S)  -> pre(S, map_to_list).
+
 map_get_args(S)      -> args(S, map_get).
 map_upd_args(S)      -> args(S, map_upd).
+map_upd2_args(S)     -> args(S, map_upd2).
 map_del_args(S)      -> args(S, map_del).
 map_member_args(S)   -> args(S, map_member).
 map_lookup_args(S)   -> args(S, map_lookup).
@@ -141,6 +155,7 @@ map_to_list_args(S)  -> args(S, map_to_list).
 
 map_get(Key, Map)           -> maps:get(Key, Map, error).
 map_upd(Key, Val, Map)      -> Map#{ Key => Val }.
+map_upd2(Key1, Key2, Val, Map) -> Map#{ Key1 => (maps:get(Key1, Map, #{}))#{ Key2 => Val } }.
 map_del(Key, Map)           -> maps:remove(Key, Map).
 map_member(Key, Map)        -> maps:is_key(Key, Map).
 map_to_list(Map)            -> maps:to_list(Map).
@@ -152,6 +167,10 @@ map_lookup(Key, Map) ->
         not_found -> none;
         Val       -> {some, Val}
     end.
+
+requires_nested(Fun) ->
+    {Args, _} = map_fun_signature(Fun),
+    lists:member(nested_map, Args).
 
 %% Generate a pair of references of the same type
 ref_pair(S) ->
@@ -178,8 +197,12 @@ map_upd_s_next(S, V, [_, _, Key, Val, InRef, OutRef]) ->
 
 %% -- Common -----------------------------------------------------------------
 
+pre(S, Fun) ->
+    not requires_nested(Fun) orelse has_nested(S).
+
 args(S, Fun) ->
-    ?LET({Id, Type, Map}, map(S),
+    Nested = case requires_nested(Fun) of true -> nested; false -> any end,
+    ?LET({Id, Type, Map}, map(S, Nested),
     begin
         {ArgSig, _} = map_fun_signature(Fun),
         ?LET(Args, [arg_gen(S, Type, Map, Arg) || Arg <- ArgSig],
@@ -193,9 +216,19 @@ apply_map_fun(S, Fun, Args) ->
 arg_gen(S, Type = {map, _, ValT}, Map, K) ->
     case K of
         map          -> return(Map);
+        nested_map   -> return(Map);
         existing_key -> existing_key(evaluate(S, Map), Type);
         key          -> maybe_existing_key(1, 1, evaluate(S, Map), Type);
-        val          -> value(S, ValT)
+        key1         -> maybe_existing_key(1, 1, evaluate(S, Map), Type);
+        key2         ->
+            Evaled    = evaluate(S, Map),
+            InnerMaps = maps:fold(fun(_, Inner, Acc) -> maps:merge(Inner, Acc) end,
+                                  #{}, Evaled),
+            maybe_existing_key(1, 1, InnerMaps, ValT);
+        val          -> value(S, ValT);
+        inner_val    ->
+            {map, _, Inner} = ValT,
+            value(S, Inner)
     end.
 
 precondition_common(S, {call, ?MODULE, Fun, [Id, Type | Args0]}) ->
@@ -233,9 +266,15 @@ record_type() ->
 map_type() ->
     ?LET(D, choose(1, ?MAX_DEPTH), map_type1(D)).
 
-map_type(S) ->
+map_type(S, Kind) ->
     elements([ M || #contract{ state_type = T } <- S#state.contracts,
-                    M <- map_types(T) ]).
+                  M <- map_types(T), Kind == any orelse is_nested(M) ]).
+
+is_nested({map, _, {map, _, _}}) -> true;
+is_nested(_)                     -> false.
+
+has_nested(#state{ contracts = Cs }) ->
+    lists:any(fun is_nested/1, map_types([ C#contract.state_type || C <- Cs ])).
 
 key_type() -> elements([int, string, {tuple, [int, string]}]).
 
@@ -259,19 +298,11 @@ maybe_existing_key(A, B, Map, {map, KeyType, _}) ->
 id_for_type(S, Type) ->
     elements([ Id || #contract{id = Id, state_type = T} <- S#state.contracts,
                      lists:member(Type, map_types(T)) ]).
-map(S) ->
-    ?LET(Type, map_type(S),
+map(S, Kind) ->
+    ?LET(Type, map_type(S, Kind),
     ?LET(Map,  value(S, Type),
     ?LET(Id,   id_for_type(S, Type),
         {Id, Type, Map}))).
-
-map_and_existing_key(S) ->
-    map_and_maybe_existing_key(S, 1, 0).
-
-map_and_maybe_existing_key(S, A, B) ->
-    ?LET({Id, Type, Map}, map(S),
-    ?LET(Key, maybe_existing_key(A, B, evaluate(S, Map), Type),
-        {Id, Type, Map, Key})).
 
 value(S, Type) ->
     case [V || {V, T} <- S#state.values, T == Type] of
@@ -561,9 +592,13 @@ map_fun_name(Fun, Type) ->
 signature_type_val({map, Key, Val} = Type, K) ->
     case K of
         map          -> Type;
+        nested_map   -> Type;
         key          -> Key;
+        key1         -> Key;
+        key2         -> {map, Key2, _} = Val, Key2;
         existing_key -> Key;
         val          -> Val;
+        inner_val    -> {map, _, Val2} = Val, Val2;
         bool         -> bool;
         int          -> int;
         {list, T}    -> {list, signature_type_val(Type, T)};
@@ -574,11 +609,15 @@ signature_type_val({map, Key, Val} = Type, K) ->
 arg_to_list(existing_key) -> "key";
 arg_to_list(Arg) -> atom_to_list(Arg).
 
+map_fun_proto(map_upd2, _) ->
+    ["entrypoint map_upd2 : ('key1, 'key2, 'val, map('key1, map('key2, 'val))) => map('key1, map('key2, 'val))\n"];
 map_fun_proto(Fun, Type) ->
     {Args, Ret} = map_fun_signature(Fun),
     T = fun(K) -> to_sophia_type(signature_type_val(Type, K)) end,
     ["entrypoint ", map_fun_name(Fun, Type), " : (", lists:join(", ", [T(Arg) || Arg <- Args]), ") => ", T(Ret), "\n"].
 
+map_fun_lhs(map_upd2, _) ->
+    ["entrypoint map_upd2(key1, key2, val, map)"];
 map_fun_lhs(Fun, Type) ->
     {Args, Ret} = map_fun_signature(Fun),
     T = fun(K) -> to_sophia_type(signature_type_val(Type, K)) end,
@@ -730,6 +769,11 @@ prop_run(Backend) ->
             init_run(Backend),
             HSR={_, _, Res} = run_commands(?MODULE, CompiledCmds),
             aggregate(command_names(Cmds),
+            aggregate(with_title(state_type), [ case T of
+                                                    {map, _, {map, _, _}} -> nested;
+                                                    {map, _, _}           -> not_nested
+                                                end || #contract{ state_type = Ts } <- InitS#state.contracts,
+                                                       T <- if is_list(Ts) -> Ts; true -> [Ts] end ],
             measure(chunk_len, [length(Chunk) || {_, Chunk} <- Chunks],
             pretty_commands(?MODULE, CompiledCmds, HSR,
             case Res of
@@ -737,7 +781,7 @@ prop_run(Backend) ->
                 {exception, {'EXIT', {function_clause, [{aeso_icode_to_asm, dup, _, _} | _]}}} ->
                     ?IMPLIES(false, false);
                 _ -> false
-            end)))
+            end))))
         end)
     end))).
 
@@ -903,6 +947,7 @@ weight(_, new_account)     -> 0;
 weight(_, create_contract) -> 0;
 weight(_, call_contract)   -> 0;
 weight(_, map_upd_s)       -> 20;
+weight(_, map_upd2)        -> 30;
 weight(_, cut)             -> 30;
 weight(_, _)               -> 10.
 
