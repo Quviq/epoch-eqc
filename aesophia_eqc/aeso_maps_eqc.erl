@@ -70,6 +70,10 @@ evaluate(S, T) when is_tuple(T) -> list_to_tuple(evaluate(S, tuple_to_list(T)));
 evaluate(S, M) when is_map(M)   -> maps:map(fun(_, V) -> evaluate(S, V) end, M);
 evaluate(_S, X) -> X.
 
+add_value(S, {var, X} = V, Type, Val) ->
+    S#state{ values = [{V, Type} | S#state.values]
+           , env    = (S#state.env)#{ X => Val } }.
+
 %% -- Operations -------------------------------------------------------------
 
 %% Where we cut up the chunks.
@@ -84,10 +88,11 @@ get_state_pre(S, [R, V]) -> V == ref_value(S, R).
 
 get_state(_, _) -> ok.
 
-get_state_next(S, {var, X} = V, [Ref, Val]) ->
-  S#state{ values = [{V, ref_type(S, Ref)} | S#state.values]
-         , env    = (S#state.env)#{ X => Val }
-         }.
+get_state_next(S, V, [Ref, Val]) ->
+    add_value(S, V, ref_type(S, Ref), Val).
+
+get_state_adapt(S, [Ref, _]) ->
+    [Ref, ref_value(S, Ref)].
 
 %% --- put ---
 
@@ -153,6 +158,16 @@ map_lookup_d_args(S) -> args(S, map_lookup_d).
 map_size_args(S)     -> args(S, map_size).
 map_to_list_args(S)  -> args(S, map_to_list).
 
+map_get_adapt(S, Args)      -> adapt(S, map_get, Args).
+map_upd_adapt(S, Args)      -> adapt(S, map_upd, Args).
+map_upd2_adapt(S, Args)     -> adapt(S, map_upd2, Args).
+map_del_adapt(S, Args)      -> adapt(S, map_del, Args).
+map_member_adapt(S, Args)   -> adapt(S, map_member, Args).
+map_lookup_adapt(S, Args)   -> adapt(S, map_lookup, Args).
+map_lookup_d_adapt(S, Args) -> adapt(S, map_lookup_d, Args).
+map_size_adapt(S, Args)     -> adapt(S, map_size, Args).
+map_to_list_adapt(S, Args)  -> adapt(S, map_to_list, Args).
+
 map_get(Key, Map)           -> maps:get(Key, Map, error).
 map_upd(Key, Val, Map)      -> Map#{ Key => Val }.
 map_upd2(Key1, Key2, Val, Map) -> Map#{ Key1 => (maps:get(Key1, Map, #{}))#{ Key2 => Val } }.
@@ -214,6 +229,7 @@ apply_map_fun(S, Fun, Args) ->
     apply(?MODULE, Fun, Args1).
 
 arg_gen(S, Type = {map, _, ValT}, Map, K) ->
+    shrink_to_evaluated(S,
     case K of
         map          -> return(Map);
         nested_map   -> return(Map);
@@ -229,6 +245,18 @@ arg_gen(S, Type = {map, _, ValT}, Map, K) ->
         inner_val    ->
             {map, _, Inner} = ValT,
             value(S, Inner)
+    end).
+
+shrink_to_evaluated(S, Gen) ->
+    ?SHRINK(Gen, [eqc_gen:fmap(fun(V) -> evaluate(S, V) end, Gen)]).
+
+adapt(S, Fun, [Id, Type | Args0]) ->
+    try
+        Args  = lists:droplast(Args0),
+        Args1 = Args ++ [apply_map_fun(S, Fun, Args)],
+        [Id, Type | Args1]
+    catch _:_ ->
+        false
     end.
 
 precondition_common(S, {call, ?MODULE, Fun, [Id, Type | Args0]}) ->
@@ -244,6 +272,17 @@ precondition_common(S, {call, ?MODULE, Fun, [Id, Type | Args0]}) ->
             andalso lists:member(Type, map_types((get_contract(S, Id))#contract.state_type))
     end;
 precondition_common(_, _) -> true.
+
+next_state_common(S, X, {call, ?MODULE, Fun, [_, Type | Args0]}) ->
+    case lists:member(Fun, map_funs()) of
+        false -> S;
+        true  ->
+            Val = lists:last(Args0),
+            {_, RetSig} = map_fun_signature(Fun),
+            RetType = signature_type_val(Type, RetSig),
+            add_value(S, X, RetType, Val)
+    end;
+next_state_common(S, _, _) -> S.
 
 %% -- Generators -------------------------------------------------------------
 
@@ -307,13 +346,14 @@ map(S, Kind) ->
 value(S, Type) ->
     case [V || {V, T} <- S#state.values, T == Type] of
         []  -> value(Type);
-        Vs  -> weighted_default({9, elements(Vs)}, {1, value(Type)})
+        Vs  -> frequency([{9, shrink_to_evaluated(S, elements(Vs))},
+                          {1, value(Type)}])
     end.
 
 value(int)    -> nat();
 value(string) ->
     ?SUCHTHAT(Bin,
-        ?LET(Parts, list(string_part()), list_to_binary(string:join(Parts, "-"))),
+        ?LET(Parts, list(2, string_part()), list_to_binary(string:join(Parts, "-"))),
         byte_size(Bin) /= 32);   %% To not confuse the auto-address machinery.
 value({tuple, Ts}) ->
     ?LET(Vs, [ value(T) || T <- Ts ], list_to_tuple(Vs));
@@ -769,6 +809,7 @@ prop_run(Backend) ->
             init_run(Backend),
             HSR={_, _, Res} = run_commands(?MODULE, CompiledCmds),
             aggregate(command_names(Cmds),
+            aggregate(with_title(the_stuff), the_stuff(Cmds),
             aggregate(with_title(state_type), [ case T of
                                                     {map, _, {map, _, _}} -> nested;
                                                     {map, _, _}           -> not_nested
@@ -781,9 +822,14 @@ prop_run(Backend) ->
                 {exception, {'EXIT', {function_clause, [{aeso_icode_to_asm, dup, _, _} | _]}}} ->
                     ?IMPLIES(false, false);
                 _ -> false
-            end))))
+            end)))))
         end)
     end))).
+
+the_stuff(Cmds) ->
+    IsSym = fun(#{}) -> not_symbolic; ({var, _}) -> symbolic end,
+    [ IsSym(Val) || {set, _, {call, _, set_state, [_, Val]}} <- Cmds ].
+    %% [ IsSym(Map) || {set, _, {call, _, map_upd2, [_, _, _, _, _, Map, _]}} <- Cmds ].
 
 invariant(#rt_state{ backend = aevm }) -> true;          %% Only checking FATE store
 invariant(#rt_state{ backend = {fate, lima} }) -> true;  %% Known to be buggy
