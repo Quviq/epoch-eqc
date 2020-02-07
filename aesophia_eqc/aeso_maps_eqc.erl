@@ -20,10 +20,13 @@
                    state        %% No symbolic variables
                   }).
 
+-record(value, {val, from_store = false}).
+
 -record(state, {backend,
                 contracts :: [#contract{}],
                 values = [], %% Can contain symbolic variables
-                env    = #{} %% Maps symbolic variables to concrete values
+                env    = #{}, %% Maps symbolic variables to concrete values
+                sequence = none
                }).
 
 init_state(Backend) ->
@@ -31,6 +34,7 @@ init_state(Backend) ->
     ?LET(Types, ?LET(N, weighted_default({4, 2}, {1, 3}),
                         ne_list(N, state_type(MapTypes))),
     #state{ backend = Backend,
+            %% sequence = [map_upd_s, cut, get_state, map_upd2, set_state],
             contracts = [ #contract{ id = I, state_type = T,
                                      state = init_value(T) }
                           || {I, T} <- ix(Types) ] })).
@@ -64,15 +68,18 @@ set_ref1(top, Val, _) -> Val;
 set_ref1({field, I}, Val, Old) ->
     setelement(I, Old, Val).
 
-evaluate(S, {var, X})           -> maps:get(X, S#state.env);
+evaluate(S, {var, X})           -> (maps:get(X, S#state.env))#value.val;
 evaluate(S, L) when is_list(L)  -> [evaluate(S, V) || V <- L];
 evaluate(S, T) when is_tuple(T) -> list_to_tuple(evaluate(S, tuple_to_list(T)));
 evaluate(S, M) when is_map(M)   -> maps:map(fun(_, V) -> evaluate(S, V) end, M);
 evaluate(_S, X) -> X.
 
-add_value(S, {var, X} = V, Type, Val) ->
+add_value(S, {var, X} = V, Type, Val, FromStore) ->
     S#state{ values = [{V, Type} | S#state.values]
-           , env    = (S#state.env)#{ X => Val } }.
+           , env    = (S#state.env)#{ X => #value{val = Val, from_store = FromStore} } }.
+
+from_store(S, {var, X}) -> (maps:get(X, S#state.env))#value.from_store;
+from_store(_, _)        -> false.
 
 %% -- Operations -------------------------------------------------------------
 
@@ -89,7 +96,7 @@ get_state_pre(S, [R, V]) -> V == ref_value(S, R).
 get_state(_, _) -> ok.
 
 get_state_next(S, V, [Ref, Val]) ->
-    add_value(S, V, ref_type(S, Ref), Val).
+    add_value(S, V, ref_type(S, Ref), Val, true).
 
 get_state_adapt(S, [Ref, _]) ->
     [Ref, ref_value(S, Ref)].
@@ -98,7 +105,7 @@ get_state_adapt(S, [Ref, _]) ->
 
 set_state_args(S) ->
     ?LET(R, reference(S),
-    ?LET(V, value(S, ref_type(S, R)),
+    ?LET(V, value(S, ref_type(S, R), ref_value(S, R)),
     [R, V])).
 
 set_state(_, _) -> ok.
@@ -259,6 +266,8 @@ adapt(S, Fun, [Id, Type | Args0]) ->
         false
     end.
 
+command_precondition_common(S, Fun) -> check_sequence(S, Fun).
+
 precondition_common(S, {call, ?MODULE, Fun, [Id, Type | Args0]}) ->
     not lists:member(Fun, map_funs()) orelse
     begin
@@ -273,16 +282,24 @@ precondition_common(S, {call, ?MODULE, Fun, [Id, Type | Args0]}) ->
     end;
 precondition_common(_, _) -> true.
 
+check_sequence(#state{ sequence = Seq }, Fun) when is_list(Seq) ->
+    lists:sublist(Seq, 1) == [Fun];
+check_sequence(_, _) -> true.
+
+step_sequence(S = #state{ sequence = [_ | Seq] }) -> S#state{ sequence = Seq };
+step_sequence(S) -> S.
+
 next_state_common(S, X, {call, ?MODULE, Fun, [_, Type | Args0]}) ->
     case lists:member(Fun, map_funs()) of
-        false -> S;
+        false -> step_sequence(S);
         true  ->
             Val = lists:last(Args0),
             {_, RetSig} = map_fun_signature(Fun),
+            FromStore = lists:any(fun(Arg) -> from_store(S, Arg) end, Args0),
             RetType = signature_type_val(Type, RetSig),
-            add_value(S, X, RetType, Val)
+            step_sequence(add_value(S, X, RetType, Val, FromStore))
     end;
-next_state_common(S, _, _) -> S.
+next_state_common(S, _, _) -> step_sequence(S).
 
 %% -- Generators -------------------------------------------------------------
 
@@ -343,10 +360,21 @@ map(S, Kind) ->
     ?LET(Id,   id_for_type(S, Type),
         {Id, Type, Map}))).
 
+%% Try to avoid the third argument
+value(S, Type, Val) ->
+    case [V || {V, T} <- S#state.values, T == Type, evaluate(S, V) /= Val, from_store(S, V) ] of
+        []  -> value(S, Type);
+        Vs  -> frequency([{4, elements(Vs)},
+                          {1, value(S, Type)}])
+    end.
+
 value(S, Type) ->
-    case [V || {V, T} <- S#state.values, T == Type] of
+    AllVals   = [V || {V, T} <- S#state.values, T == Type ],
+    StoreVals = [V || V <- AllVals, from_store(S, V) ],
+    case AllVals of
         []  -> value(Type);
-        Vs  -> frequency([{9, shrink_to_evaluated(S, elements(Vs))},
+        _   -> frequency([{19, shrink_to_evaluated(S, elements(StoreVals))} || StoreVals /= []] ++
+                         [{3,  shrink_to_evaluated(S, elements(AllVals))},
                           {1, value(Type)}])
     end.
 
@@ -808,8 +836,9 @@ prop_run(Backend) ->
         begin
             init_run(Backend),
             HSR={_, _, Res} = run_commands(?MODULE, CompiledCmds),
+            S = state_after(InitS, Cmds),
             aggregate(command_names(Cmds),
-            aggregate(with_title(the_stuff), the_stuff(Cmds),
+            aggregate(with_title(the_stuff), the_stuff(S, Cmds),
             aggregate(with_title(state_type), [ case T of
                                                     {map, _, {map, _, _}} -> nested;
                                                     {map, _, _}           -> not_nested
@@ -826,8 +855,9 @@ prop_run(Backend) ->
         end)
     end))).
 
-the_stuff(Cmds) ->
-    IsSym = fun(#{}) -> not_symbolic; ({var, _}) -> symbolic end,
+the_stuff(S, Cmds) ->
+    IsSym = fun(X = {var, _}) -> case from_store(S, X) of true -> store_var; false -> var end;
+               (_)            -> value end,
     [ IsSym(Val) || {set, _, {call, _, set_state, [_, Val]}} <- Cmds ].
     %% [ IsSym(Map) || {set, _, {call, _, map_upd2, [_, _, _, _, _, Map, _]}} <- Cmds ].
 
@@ -994,8 +1024,11 @@ weight(_, create_contract) -> 0;
 weight(_, call_contract)   -> 0;
 weight(_, map_upd_s)       -> 20;
 weight(_, map_upd2)        -> 30;
+weight(_, map_upd)         -> 20;
+weight(_, map_del)         -> 20;
+weight(_, set_state)       -> 30;
 weight(_, cut)             -> 30;
-weight(_, _)               -> 10.
+weight(_, _)               -> 5.
 
 call(Fun, Args) ->
     S = aecontract_SUITE:state(),
