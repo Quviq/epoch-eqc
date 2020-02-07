@@ -838,7 +838,7 @@ prop_run(Backend) ->
             HSR={_, _, Res} = run_commands(?MODULE, CompiledCmds),
             S = state_after(InitS, Cmds),
             aggregate(command_names(Cmds),
-            aggregate(with_title(the_stuff), the_stuff(S, Cmds),
+            aggregate(with_title(set_state_value), set_state_stats(S, Cmds),
             aggregate(with_title(state_type), [ case T of
                                                     {map, _, {map, _, _}} -> nested;
                                                     {map, _, _}           -> not_nested
@@ -855,11 +855,10 @@ prop_run(Backend) ->
         end)
     end))).
 
-the_stuff(S, Cmds) ->
-    IsSym = fun(X = {var, _}) -> case from_store(S, X) of true -> store_var; false -> var end;
-               (_)            -> value end,
-    [ IsSym(Val) || {set, _, {call, _, set_state, [_, Val]}} <- Cmds ].
-    %% [ IsSym(Map) || {set, _, {call, _, map_upd2, [_, _, _, _, _, Map, _]}} <- Cmds ].
+set_state_stats(S, Cmds) ->
+    Classify = fun(X = {var, _}) -> case from_store(S, X) of true -> store_var; false -> var end;
+                  (_)            -> value end,
+    [ Classify(Val) || {set, _, {call, _, set_state, [_, Val]}} <- Cmds ].
 
 invariant(#rt_state{ backend = aevm }) -> true;          %% Only checking FATE store
 invariant(#rt_state{ backend = {fate, lima} }) -> true;  %% Known to be buggy
@@ -1045,4 +1044,37 @@ ind(N, S) ->
                  _  -> Lines
              end,
     [ [lists:duplicate(N, 32), L, "\n"] || L <- Lines1 ].
+
+counterexample_1() ->
+    Call = fun(Fun, Args) -> {call, aeso_maps_eqc, Fun, Args} end,
+    MapFun = fun(Fun, Args) -> Call(Fun, [1, {map, int, {map, int, int}} | Args]) end,
+    [{state,{fate,iris},
+            [{contract,1,{map,int,{map,int,int}},#{}}],
+            [],#{}},
+     [{model,aeso_maps_eqc},
+      {init,{state,{fate,iris},
+                   [{contract,1,{map,int,{map,int,int}},#{}}],
+                   [],#{}}},
+      {set, {var,1}, MapFun(map_upd_s, [0, #{}, {1, top}, {1, top}])},
+      {set, {var,2}, Call(cut, [1])},
+      {set, {var,3}, Call(get_state, [{1, top}, #{0 => #{}}])},
+      {set, {var,4}, MapFun(map_get, [0, {var, 3}, #{}])},
+      {set, {var,5}, MapFun(map_upd, [0, 1, {var, 4}, #{0 => 1}])},
+      {set, {var,6}, MapFun(map_upd_s, [0, {var, 5}, {1, top}, {1, top}])}]].
+
+counter_example2() ->
+    Call = fun(Fun, Args) -> {call, aeso_maps_eqc, Fun, Args} end,
+    MapFun = fun(Fun, Args) -> Call(Fun, [1, {map, int, {map, int, int}} | Args]) end,
+    [{state,{fate,iris},
+            [{contract,1,{map,int,{map,int,int}},#{}}],
+            [],#{}},
+     [{model,aeso_maps_eqc},
+      {init,{state,{fate,iris},
+                   [{contract,1,{map,int,{map,int,int}},#{}}],
+                   [],#{}}},
+      {set, {var,1}, MapFun(map_upd_s, [0, #{}, {1, top}, {1, top}])},
+      {set, {var,2}, Call(cut, [1])},
+      {set, {var,3}, Call(get_state, [{1, top}, #{0 => #{}}])},
+      {set, {var,4}, MapFun(map_upd2, [0, 0, 1, {var, 3}, #{0 => #{0 => 1}}])},
+      {set, {var,5}, Call(set_state, [{1, top}, {var, 4}])}]].
 
