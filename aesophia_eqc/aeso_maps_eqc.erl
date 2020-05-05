@@ -6,7 +6,7 @@
 
 -compile([export_all, nowarn_export_all]).
 
--define(PROFILE, true).
+%% -define(PROFILE, true).
 -include_lib("eqc/include/eqc_profile.hrl").
 
 -include_lib("eqc/include/eqc.hrl").
@@ -945,6 +945,7 @@ init_run(Backend) ->
 
 -define(MAX_GAS, 6000000 * 1000 * 1000).
 -define(BALANCE, 1000 * 1000 * 1000 * 1000 * 1000 * 1000 * 1000 * 1000).
+-define(HEIGHT, 1000000).
 
 new_account() ->
     call(new_account, [?BALANCE]).
@@ -969,7 +970,7 @@ create_contract_next(S, V, _) ->
     S#rt_state{ contracts = [V | S#rt_state.contracts] }.
 
 call_contract(Caller, ContractKey, Fun, Type, Args, _Expect) ->
-    {Res, _Gas} = call(call_contract, [Caller, ContractKey, Fun, Type, Args, #{gas => ?MAX_GAS, return_gas_used => true}]),
+    {Res, _Gas} = call(call_contract, [Caller, ContractKey, Fun, Type, Args, #{gas => ?MAX_GAS, height => ?HEIGHT, return_gas_used => true}]),
     case Res of
         error -> {Res, _Gas};
         _     -> Res
