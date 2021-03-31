@@ -438,8 +438,8 @@ cut([], [[] | Acc]) ->
     lists:reverse(Acc);
 cut([], [Chunk | Acc]) ->
     lists:reverse([{1, lists:reverse(Chunk)} | Acc]);
-cut([{set, _, {call, _, cut, [_]}} | Cmds], Acc = [[] | _]) ->
-    cut(Cmds, Acc);
+cut([{set, _, {call, _, cut, [_]}} | Cmds], [[] | Acc]) ->
+    cut(Cmds, [[] | Acc]);
 cut([{set, _, {call, _, cut, [Id]}} | Cmds], [Chunk | Acc]) ->
     cut(Cmds, [[], {Id, lists:reverse(Chunk)} | Acc]);
 cut([Cmd | Cmds], [Chunk | Acc]) ->
@@ -743,17 +743,19 @@ to_sophia_val(T) when is_tuple(T) ->
 
 field_name(I) -> [lists:nth(I, lists:seq($a, $z))].
 
-compile_commands(InitS = #state{ contracts = Cs }, Chunks) ->
+compile_commands(InitS = #state{ contracts = Cs, backend = Backend }, Chunks) ->
     Account = {var, 1},
     Sources = contracts_source(InitS, Chunks),
-    [ {init, #rt_state{ backend = InitS#state.backend }} ] ++
+    [ {init, #rt_state{ backend = Backend }} ] ++
     [ {set, Account, {call, ?MODULE, new_account, []}} ] ++
     [ {set, {var, Id + 1}, {call, ?MODULE, create_contract, [Account, Source, {}]}}
       || {#contract{id = Id}, Source} <- lists:zip(Cs, Sources) ] ++
-    compile_chunks(InitS, #{}, length(Cs) + 2, Chunks).
+    compile_chunks(InitS, #{}, length(Cs) + 2, protocol_height(Backend), Chunks).
 
-compile_chunks(_, _, _, []) -> [];
-compile_chunks(S, Binds, Var, [{Id, Cmds} | Chunks]) ->
+compile_chunks(_, _, _, _, []) -> [];
+compile_chunks(S, Binds, Var, Height, [hardfork | Chunks]) ->
+    compile_chunks(S, Binds, Var, next_height(Height), Chunks);
+compile_chunks(S, Binds, Var, Height, [{Id, Cmds} | Chunks]) ->
     Account  = {var, 1},
     Contract = {var, Id + 1},
     Fun      = list_to_atom(chunk_entrypoint(Cmds)),
@@ -764,8 +766,8 @@ compile_chunks(S, Binds, Var, [{Id, Cmds} | Chunks]) ->
                  _   -> maps:from_list([{X, {Var, I}} || {I, X} <- ix(Xs)])
                end,
     Binds1 = maps:merge(Binds, NewBinds),
-    [{set, {var, Var}, {call, ?MODULE, call_contract, [Account, Contract, Fun, to_vm_type(Type), Args, Expect]}} |
-     compile_chunks(S, Binds1, Var + 1, Chunks)].
+    [{set, {var, Var}, {call, ?MODULE, call_contract, [Account, Contract, Fun, to_vm_type(Type), Height, Args, Expect]}} |
+     compile_chunks(S, Binds1, Var + 1, Height, Chunks)].
 
 chunk_arguments(Binds, Id, Cmds) ->
     MakeArg = fun(X) -> make_arg(Binds, X) end,
@@ -824,36 +826,54 @@ prop_compile(Backend, Mod) ->
         end)
     end))).
 
-prop_run() -> prop_run({fate, iris}).
+hardfork_point({fate, lima}, N) when N >= 2 ->
+  weighted_default({1, no_hardfork},
+                   {4, {hardfork, choose(1, N - 1)}});
+hardfork_point(_, _) -> no_hardfork.
+
+insert_hardfork(no_hardfork, Chunks) -> Chunks;
+insert_hardfork({hardfork, N}, Chunks) ->
+  {Before, After} = lists:split(N, Chunks),
+  Before ++ [hardfork] ++ After.
+
+prop_run() ->
+    ?SETUP(fun() -> init(), fun() -> ok end end,
+    ?FORALL(Backend, weighted_default({1, iris}, {4, lima}),
+    prop_run({fate, Backend}))).
+
 prop_run(Backend) ->
-    ?SETUP(fun() -> init(Backend), fun() -> ok end end,
     ?FORALL(InitS, init_state(Backend),
-    ?FORALL(Cmds, ?SUCHTHAT(Cmds, commands(?MODULE, InitS), length(Cmds) > 2),
+    ?FORALL(Cmds, ?SUCHTHAT(Cmds, more_commands(20, commands(?MODULE, InitS)), length(Cmds) > 2),
     begin
         Chunks = command_chunks(Cmds),
-        CompiledCmds = compile_commands(InitS, Chunks),
-        ?WHENFAIL([eqc:format("~s\n", [Source]) || Source <- contracts_source(InitS, Chunks)],
+        ?FORALL(Hardfork, hardfork_point(Backend, length(Chunks)),
         begin
-            init_run(Backend),
-            HSR={_, _, Res} = run_commands(?MODULE, CompiledCmds),
-            S = state_after(InitS, Cmds),
-            aggregate(command_names(Cmds),
-            aggregate(with_title(set_state_value), set_state_stats(S, Cmds),
-            aggregate(with_title(state_type), [ case T of
-                                                    {map, _, {map, _, _}} -> nested;
-                                                    {map, _, _}           -> not_nested
-                                                end || #contract{ state_type = Ts } <- InitS#state.contracts,
-                                                       T <- if is_list(Ts) -> Ts; true -> [Ts] end ],
-            measure(chunk_len, [length(Chunk) || {_, Chunk} <- Chunks],
-            pretty_commands(?MODULE, CompiledCmds, HSR,
-            case Res of
-                ok -> true;
-                {exception, {'EXIT', {function_clause, [{aeso_icode_to_asm, dup, _, _} | _]}}} ->
-                    ?IMPLIES(false, false);
-                _ -> false
-            end)))))
+            CompiledCmds = compile_commands(InitS, insert_hardfork(Hardfork, Chunks)),
+            ?WHENFAIL([eqc:format("~s\n", [Source]) || Source <- contracts_source(InitS, Chunks)],
+            begin
+                init_run(Backend),
+                HSR={Hist, _, Res} = run_commands(?MODULE, CompiledCmds),
+                S = state_after(InitS, Cmds),
+                aggregate(command_names(Cmds),
+                aggregate(with_title(set_state_value), set_state_stats(S, Cmds),
+                aggregate(with_title(state_type), [ case T of
+                                                        {map, _, {map, _, _}} -> nested;
+                                                        {map, _, _}           -> not_nested
+                                                    end || #contract{ state_type = Ts } <- InitS#state.contracts,
+                                                           T <- if is_list(Ts) -> Ts; true -> [Ts] end ],
+                aggregate(call_features(Hist),
+                measure(calls,     length([ x || {set, _, {call, _, call_contract, _}} <- CompiledCmds]),
+                measure(chunk_len, [length(Chunk) || {_, Chunk} <- Chunks],
+                pretty_commands(?MODULE, CompiledCmds, HSR,
+                case Res of
+                    ok -> true;
+                    {exception, {'EXIT', {function_clause, [{aeso_icode_to_asm, dup, _, _} | _]}}} ->
+                        ?IMPLIES(false, false);
+                    _ -> false
+                end)))))))
+            end)
         end)
-    end))).
+    end)).
 
 set_state_stats(S, Cmds) ->
     Classify = fun(X = {var, _}) -> case from_store(S, X) of true -> store_var; false -> var end;
@@ -901,11 +921,20 @@ refcount(_, Acc)                  -> Acc.
 
 %% -- Low-level operations ---------------------------------------------------
 
-init(Backend) ->
-    Protocol = protocol(Backend),
-    eqc_mocking:start_mocking(api_spec(Backend)),
-    eqc_mocking:init_lang({repl, ?XALT(?EVENT(aec_hard_forks, protocol_effective_at_height, ['_'], Protocol),
-                                       ?EVENT(aec_hard_forks, sorted_protocol_versions, [], [Protocol]))}).
+-define(LIMA_HEIGHT, 1).
+-define(IRIS_HEIGHT, 2).
+
+init() ->
+    eqc_mocking:start_mocking(api_spec()),
+    eqc_mocking:init_lang({repl, ?XALT(?XALT(?EVENT(aec_hard_forks, protocol_effective_at_height, [?LIMA_HEIGHT], 4),
+                                             ?EVENT(aec_hard_forks, protocol_effective_at_height, [?IRIS_HEIGHT], 5)),
+                                       ?EVENT(aec_hard_forks, sorted_protocol_versions, [], [4, 5]))}).
+
+protocol_height({fate, lima}) -> ?LIMA_HEIGHT;
+protocol_height({fate, iris}) -> ?IRIS_HEIGHT;
+protocol_height(aevm)         -> ?LIMA_HEIGHT.
+
+next_height(?LIMA_HEIGHT) -> ?IRIS_HEIGHT.
 
 protocol({fate, iris}) -> 5;
 protocol({fate, lima}) -> 4;
@@ -922,7 +951,7 @@ sophia_version(aevm)         -> 4.
 abi_version({fate, _}) -> 3;
 abi_version(aevm)      -> 1.
 
-api_spec(_) ->
+api_spec() ->
   #api_spec
   { modules  =
     [ #api_module
@@ -945,7 +974,6 @@ init_run(Backend) ->
 
 -define(MAX_GAS, 6000000 * 1000 * 1000).
 -define(BALANCE, 1000 * 1000 * 1000 * 1000 * 1000 * 1000 * 1000 * 1000).
--define(HEIGHT, 1000000).
 
 new_account() ->
     call(new_account, [?BALANCE]).
@@ -956,11 +984,13 @@ new_account_next(S, V, _) ->
 -define(SOPHIA_CONTRACT_VSN, 3).
 
 create_contract(Owner, Source, Args) ->
-    Backend = case get(backend) of {fate, _} -> fate; aevm -> aevm end,
-    case ?BENCHMARK(compile, aeso_compiler:from_string(Source, [{backend, Backend}, no_implicit_stdlib])) of
+    Backend = get(backend),
+    VM      = case Backend of {fate, _} -> fate; aevm -> aevm end,
+    Height  = protocol_height(Backend),
+    case ?BENCHMARK(compile, aeso_compiler:from_string(Source, [{backend, VM}, no_implicit_stdlib])) of
         {ok, Code} ->
             ByteCode = aect_sophia:serialize(Code, ?SOPHIA_CONTRACT_VSN),
-            call(create_contract_with_code, [Owner, ByteCode, Args, #{}]);
+            call(create_contract_with_code, [Owner, ByteCode, Args, #{height => Height}]);
         {error, Err} ->
             io:format("~s\n", [Err]),
             {error, binary_to_list(Err)}
@@ -969,8 +999,8 @@ create_contract(Owner, Source, Args) ->
 create_contract_next(S, V, _) ->
     S#rt_state{ contracts = [V | S#rt_state.contracts] }.
 
-call_contract(Caller, ContractKey, Fun, Type, Args, _Expect) ->
-    {Res, _Gas} = call(call_contract, [Caller, ContractKey, Fun, Type, Args, #{gas => ?MAX_GAS, height => ?HEIGHT, return_gas_used => true}]),
+call_contract(Caller, ContractKey, Fun, Type, Height, Args, _Expect) ->
+    {Res, _Gas} = call(call_contract, [Caller, ContractKey, Fun, Type, Args, #{gas => ?MAX_GAS, height => Height, return_gas_used => true}]),
     case Res of
         error -> {Res, _Gas};
         _     -> Res
@@ -987,7 +1017,7 @@ new_account_post(_, _, Res) ->
 create_contract_post(_, _, Res) ->
     is_binary(Res) andalso byte_size(Res) == 32.
 
-call_contract_post(_, [_, _, _, _, _, {error, Expect}], {error, Actual}) ->
+call_contract_post(_, [_, _, _, _, _, _, {error, Expect}], {error, Actual}) ->
     eq_err(Actual, Expect);
 call_contract_post(_, _, {error, Err}) ->
     case is_binary(Err) of
@@ -996,9 +1026,12 @@ call_contract_post(_, _, {error, Err}) ->
             binary_to_list(Err);
         false -> {error, Err}
     end;
-call_contract_post(Backend, [_, _, _, _, _, Expect], Actual) ->
+call_contract_post(Backend, [_, _, _, _, _, _, Expect], Actual) ->
     %% Map.to_list sorts differently on AEVM
     eq(sort_lists(Backend, Actual), sort_lists(Backend, Expect)).
+
+call_contract_features(_S, [_Caller, _ContractKey, _Fun, _Type, Height, _Args, _Expect], _V) ->
+  [{height, Height}].
 
 sort_lists(aevm, X) -> sort_lists(X);
 sort_lists(_, X) -> X.
